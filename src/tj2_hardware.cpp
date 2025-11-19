@@ -142,17 +142,18 @@ hardware_interface::CallbackReturn TJ2Hardware::on_activate(
   {
     // OnSetTargetState_A(1);
     // OnSetJointLmt_A(50, 50);
-    // double K[7] = {500,500,500,10,10,10,0}; //预设为参数最大上限，供参考。
+    // double K[7] = {2000,2000,2000,10,10,10,0}; //预设为参数最大上限，供参考。
     // double D[7] = {0.1,0.1,0.1,0.3,0.3,1};//预设为参数最大上限，供参考。
-    int type = 1; //type = 1 关节阻抗;type = 2 坐标阻抗;type = 3 力控
+    // int type = 1; //type = 1 关节阻抗;type = 2 坐标阻抗;type = 3 力控
 
 
-    // double K[7] = {2,2,2,1.6,1,1,1};//预设为参数最大上限，供参考。
-    // double D[7] = {0.4,0.4,0.4,0.4,0.4,0.4,0.4};//预设为参数最大上限，供参考。
-    // OnClearSet();
-    // OnSetJointKD_A(K, D) ;
-    // OnSetSend();
-    // usleep(100000);
+    double K[7] = {2,2,2,1.6,1,1,1};//预设为参数最大上限，供参考。
+    double D[7] = {0.4,0.4,0.4,0.4,0.4,0.4,0.4};//预设为参数最大上限，供参考。
+    OnClearSet();
+
+    OnSetJointKD_A(K, D) ;
+    OnSetSend();
+    usleep(100000);
 
 
 
@@ -163,29 +164,29 @@ hardware_interface::CallbackReturn TJ2Hardware::on_activate(
     OnSetSend();
     usleep(100000);
 
-    // OnClearSet();
-    // OnSetJointLmt_A(10, 10) ;
-    // OnSetSend();
-    // usleep(100000);
+    OnClearSet();
+    OnSetJointLmt_A(10, 10) ;
+    OnSetSend();
+    usleep(100000);
 
 
-    // OnClearSet();
-    // OnSetTargetState_A(3) ; //3:torque mode; 1:position mode; 
-    // OnSetImpType_A(1) ;//type = 1 关节阻抗;type = 2 坐标阻抗;type = 3 力控
-    // // OnSetImpType_A(2) ;//type = 1 关节阻抗;type = 2 坐标阻抗;type = 3 力控
-    // OnSetSend();
-    // usleep(100000);
-    // OnClearSet();
+    OnClearSet();
+    OnSetTargetState_A(3) ; //3:torque mode; 1:position mode;
+    OnSetImpType_A(1) ;//type = 1 关节阻抗;type = 2 坐标阻抗;type = 3 力控
+    // OnSetImpType_A(2) ;//type = 1 关节阻抗;type = 2 坐标阻抗;type = 3 力控
+    OnSetSend();
+    usleep(100000);
+    OnClearSet();
 
       //进关节拖动前先设置机器人运动控制模式为关节阻抗
-    OnClearSet();
-    OnSetTargetState_A(4) ; //3:torque mode; 1:position mode
-    OnSetSend();
-    usleep(100000);
-    OnClearSet();
-    OnSetImpType_A(1) ;//type = 1 关节阻抗;type = 2 坐标阻抗;type = 3 力控
-    OnSetSend();
-    usleep(100000);
+    // OnClearSet();
+    // OnSetTargetState_A(1) ; //3:torque mode; 1:position mode
+    // OnSetSend();
+    // usleep(100000);
+    // OnClearSet();
+    // // OnSetImpType_A(1) ;//type = 1 关节阻抗;type = 2 坐标阻抗;type = 3 力控
+    // OnSetSend();
+    // usleep(100000);
 
      int dgType = 1;
     //   gType
@@ -196,10 +197,10 @@ hardware_interface::CallbackReturn TJ2Hardware::on_activate(
     // # 4 笛卡尔空间z方向拖动
     // # 5 笛卡尔空间旋转方向拖动
 
-    OnClearSet();
-    OnSetDragSpace_A(dgType);
-    OnSetSend();
-    usleep(100000);
+    // OnClearSet();
+    // OnSetDragSpace_A(dgType);
+    // OnSetSend();
+    // usleep(100000);
 
     DCSS t;
     OnGetBuf(&t);
@@ -394,13 +395,13 @@ hardware_interface::return_type TJ2Hardware::write(
   // Enforce joint limits before sending commands
   // enforceJointLimits();  
 
-  // if (!writeToHardware(robot_arm_left_right_, hw_commands)) {
-  //   RCLCPP_ERROR_THROTTLE(
-  //     rclcpp::get_logger("TJ2Hardware"), 
-  //     *clock_, 5000, 
-  //     "Failed to write to hardware");
-  //   return hardware_interface::return_type::ERROR;
-  // }
+  if (!writeToHardware(robot_arm_left_right_, hw_commands)) {
+    RCLCPP_ERROR_THROTTLE(
+      rclcpp::get_logger("TJ2Hardware"),
+      *clock_, 5000,
+      "Failed to write to hardware");
+    return hardware_interface::return_type::ERROR;
+  }
   return hardware_interface::return_type::OK;
 }
 

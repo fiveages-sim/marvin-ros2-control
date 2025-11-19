@@ -20,7 +20,7 @@ pkg_check_modules(EIGEN3 REQUIRED eigen3)
 set(HEADER_KINE_DIR "${CMAKE_SOURCE_DIR}/external/TJ_FX_ROBOT_CONTRL_SDK/kinematicsSDK/")
 set(HEADER_CONTROL_DIR "${CMAKE_SOURCE_DIR}/external/TJ_FX_ROBOT_CONTRL_SDK/contrlSDK/")
 set(LIB_KINE_DIR "${CMAKE_SOURCE_DIR}/external/TJ_FX_ROBOT_CONTRL_SDK/kinematicsSDK/")
-set(LIB_CONTROL_DIR "${CMAKE_SOURCE_DIR}/external/TJ_FX_ROBOT_CONTRL_SDK/contrlSDK/")
+set(LIB_CONTROL_DIR "${CMAKE_SOURCE_DIR}/external/TJ_FX_ROBOT_CONTRL_SDK/demo_linux_win/c++_linux/")
 
 # Link to the existing .so library (replace with your actual .so file name and path)
 find_library(EXTERNAL_KINEMATICSO NAMES "libKine.so" PATHS ${LIB_KINE_DIR} NO_DEFAULT_PATH)
@@ -83,6 +83,7 @@ install(FILES
     ${LIB_KINE_DIR}/libKine.so
     ${LIB_CONTROL_DIR}/libMarvinSDK.so
     DESTINATION lib
+    OPTIONAL
 )
 
 install(
