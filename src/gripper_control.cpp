@@ -7,6 +7,9 @@
 
 namespace tj2_ros2_control
 {
+    bool ZXGripper::acc_set = false;
+    bool ZXGripper::deacc_set = false;
+
     std::vector<uint16_t> ModbusIO::readHoldingRegisters(uint8_t slaveId, uint16_t startAddr, uint16_t count) {
         if (count > 125) count = 125;
         
@@ -116,6 +119,7 @@ namespace tj2_ros2_control
         unsigned char buffer[256];
         long channel = 2; // COM1
         
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
         // Wait for response with timeout
         for (int i = 0; i < 20; i++) {  // Increased attempts for better reliability
             int received = OnGetChDataA(buffer, &channel);
@@ -170,7 +174,8 @@ namespace tj2_ros2_control
         uint8_t slave_id = 0x01;
         uint16_t slave_add = 0x0100;
         uint16_t value = 0x0001;
-        
+        ZXGripper::deacc_set = false;
+        ZXGripper::acc_set = false;
         bool success = ModbusIO::writeSingleRegister(slave_id, slave_add, value);
         std::cout << "Gripper initialization: " << (success ? "SUCCESS" : "FAILED") << std::endl;
         return success;
@@ -199,22 +204,33 @@ namespace tj2_ros2_control
         // Write position (multiple registers)
         result = result && ModbusIO::writeMultipleRegisters(slave_id, 0x0102, pos_vec, response);
         std::cout << "Write position: " << (result ? "SUCCESS" : "FAILED") << std::endl;
-        
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
         // Write velocity
         result = result && ModbusIO::writeSingleRegister(slave_id, 0x0104, vel);
         std::cout << "Write velocity: " << (result ? "SUCCESS" : "FAILED") << std::endl;
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
         
         // Write torque
         result = result && ModbusIO::writeSingleRegister(slave_id, 0x0105, trq);
         std::cout << "Write torque: " << (result ? "SUCCESS" : "FAILED") << std::endl;
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
         
-        // Write acceleration
-        result = result && ModbusIO::writeSingleRegister(slave_id, 0x0106, acc);
-        std::cout << "Write acceleration: " << (result ? "SUCCESS" : "FAILED") << std::endl;
-        
-        // Write deceleration
-        result = result && ModbusIO::writeSingleRegister(slave_id, 0x0107, deacc);
-        std::cout << "Write deceleration: " << (result ? "SUCCESS" : "FAILED") << std::endl;
+        if (!ZXGripper::acc_set)
+        {
+            // Write acceleration
+            result = result && ModbusIO::writeSingleRegister(slave_id, 0x0106, acc);
+            std::cout << "Write acceleration: " << (result ? "SUCCESS" : "FAILED") << std::endl;
+            ZXGripper::acc_set = true;
+        }
+
+        if (!ZXGripper::deacc_set)
+        {
+            // Write deceleration
+            result = result && ModbusIO::writeSingleRegister(slave_id, 0x0107, deacc);
+            std::cout << "Write deceleration: " << (result ? "SUCCESS" : "FAILED") << std::endl;
+            ZXGripper::deacc_set = true;
+        }
         
         // Write trigger
         result = result && ModbusIO::writeSingleRegister(slave_id, 0x0108, trigger);

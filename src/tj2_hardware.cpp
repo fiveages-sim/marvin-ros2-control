@@ -25,6 +25,7 @@ hardware_interface::CallbackReturn TJ2Hardware::on_init(
   node_->declare_parameter<double>("max_velocity", 10.0);
   node_->declare_parameter<double>("max_acceleration", 10.0);
   node_->declare_parameter<bool>("use_drag_mode", false);
+  node_->declare_parameter<bool>("ctrl_mode", static_cast<int>(RobotCtrlMode::POSITION));
   node_->declare_parameter<std::vector<double>>("joint_imp_gain", {2,2,2,1.6,1,1,1});
   node_->declare_parameter<std::vector<double>>("joint_imp_damp", {0.4,0.4,0.4,0.4,0.4,0.4,0.4});
   node_->declare_parameter<std::vector<double>>("cart_imp_gain", {500,500,500,10,10,10,0});
@@ -37,7 +38,7 @@ hardware_interface::CallbackReturn TJ2Hardware::on_init(
     // Get the number of joints from the hardware info
     size_t num_joints = info.joints.size();
     robot_arm_left_right_ = static_cast<int>(RobotArmConfig::LEFT_ARM);
-    robot_ctrl_mode_ = static_cast<int>(RobotCtrlMode::POSITION);
+    robot_ctrl_mode_ = static_cast<int>(RobotCtrlMode::CART_IMPEDANCE);
 
     if (info_.hardware_parameters.find("left_right_arm") != info_.hardware_parameters.end()) {
       robot_arm_left_right_ = std::stoi(info_.hardware_parameters.at("left_right_arm"));
@@ -66,6 +67,7 @@ hardware_interface::CallbackReturn TJ2Hardware::on_init(
     gripper_position_ = -1.0;
     gripper_position_command_ = -1.0;
     last_gripper_command_ = -1.0;
+    last_gripper_position_ = -1.0;
     // gripper_read_counter_ = 0;
     has_gripper_ = false;
     gripper_joint_index_ = -1;
@@ -76,8 +78,7 @@ hardware_interface::CallbackReturn TJ2Hardware::on_init(
     // Initialize hardware connection status
     hardware_connected_ = false;
     simulation_active_ = false;
-    param_callback_handle_ =
-        node_->add_on_set_parameters_callback(
+    param_callback_handle_ = node_->add_on_set_parameters_callback(
             std::bind(&TJ2Hardware::paramCallback, this, std::placeholders::_1));
     return hardware_interface::CallbackReturn::SUCCESS;
 }
@@ -90,10 +91,26 @@ TJ2Hardware::paramCallback(const std::vector<rclcpp::Parameter> & params)
 
     for (const auto & param : params) {
         if (param.get_name() == "joint_imp_gain" || param.get_name() == "joint_imp_damp" && robot_ctrl_mode_ == static_cast<int>(RobotCtrlMode::JOINT_IMPEDANCE)) {
-            OnClearSet();
-            OnSetTargetState_A(3) ; //3:torque mode; 1:position mode
-            OnSetSend();
-            usleep(100000);
+          // change gain parameter
+          RCLCPP_INFO(get_logger(), "change impedance parameters");
+        }
+        if (param.get_name() == "ctrl_mode")
+        {
+          robot_ctrl_mode_ = param.as_int();
+          RCLCPP_INFO(get_logger(), "param robot ctrl mode changed to %d", robot_ctrl_mode_);
+          if (robot_arm_left_right_ == static_cast<int>(RobotArmConfig::LEFT_ARM))
+          {
+            setLeftArmCtrl();
+          }
+          else if (robot_arm_left_right_ == static_cast<int>(RobotArmConfig::RIGHT_ARM))
+          {
+            setRightArmCtrl();
+          }
+          else if(robot_arm_left_right_ == static_cast<int>(RobotArmConfig::DUAL_ARM))
+          {
+            setLeftArmCtrl();
+            setRightArmCtrl();
+          }
         }
     }
     return result;
@@ -106,7 +123,7 @@ void TJ2Hardware::setLeftArmCtrl()
   double dynPara[10] = {1.8, 0.0, 0.0, 96.411347, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
   OnClearSet();
   OnClearErr_A();
-
+  RCLCPP_INFO(get_logger(), "set tool load parameters");
   OnSetTool_A(kineParam, dynPara);
   OnSetSend();
   usleep(100000);
@@ -149,8 +166,12 @@ void TJ2Hardware::setLeftArmCtrl()
 void TJ2Hardware::setRightArmCtrl()
 {
   /// clear error first
+  double kineParam[6] = {0, 0, 0, 0, 0, 0};
+  double dynPara[10] = {1.8, 0.0, 0.0, 96.411347, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
   OnClearSet();
   OnClearErr_B();
+
+  OnSetTool_B(kineParam, dynPara);
   OnSetSend();
   usleep(100000);
   if (robot_ctrl_mode_ == static_cast<int>(RobotCtrlMode::POSITION))
@@ -326,21 +347,25 @@ void TJ2Hardware::gripper_callback()
 {
   while(hardware_connected_)
   {
-    int cur_pos_status = 0;
-    int cur_speed_status = 0;
-    int cur_effort_status = 0;
-    bool success = ZXGripper::ZXGripperStatus(cur_effort_status, cur_speed_status, cur_pos_status);
-    RCLCPP_INFO(rclcpp::get_logger("TJ2Hardware"), "gripper read position %d", cur_pos_status);
-    gripper_position_ = (9000 - cur_pos_status) / 9000;
-    // if(!gripper_stopped_)
-    // {
-    //    /// only read when the gripper is movin
-      
-    //   if (success)
-    //   {
-    //     gripper_position_ = (2000 - cur_pos_status) / 20000;
-    //   }
-    // }
+    if(!gripper_stopped_)
+    {
+      int cur_pos_status = 0;
+      int cur_speed_status = 0;
+      int cur_effort_status = 0;
+      bool success = ZXGripper::ZXGripperStatus(cur_effort_status, cur_speed_status, cur_pos_status);
+      RCLCPP_INFO(rclcpp::get_logger("TJ2Hardware"), "gripper read position %d", cur_pos_status);
+      gripper_position_ = (9000 - cur_pos_status) / 9000.0;
+      RCLCPP_INFO(rclcpp::get_logger("TJ2Hardware"), "gripper position %f", gripper_position_);
+      if (gripper_position_ == last_gripper_position_)
+      {
+        gripper_stopped_ = true;
+      }
+      else
+      {
+        last_gripper_position_ = gripper_position_;
+      }
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
     /// write when the gripper commannd is different
     if (last_gripper_command_ != gripper_position_command_)
     {
@@ -352,8 +377,9 @@ void TJ2Hardware::gripper_callback()
       RCLCPP_INFO(rclcpp::get_logger("TJ2Hardware"), "gripper write position %d", cur_pos_set);
       bool success = ZXGripper::ZXGripperMove(cur_effort_set, cur_speed_set, cur_pos_set);
       last_gripper_command_ = gripper_position_command_;
+      gripper_stopped_ = false;
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
   }
 }
 

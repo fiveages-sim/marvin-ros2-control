@@ -73,6 +73,9 @@ class ZXGripper
         static bool ZXGripperStatus(int& trq_set, int& vel_set, int& pos_set);
         static bool ZXGripperInit();
         static void ZXGripperDeInit();
+        
+        static bool acc_set;
+        static bool deacc_set;
 };       
 }
 

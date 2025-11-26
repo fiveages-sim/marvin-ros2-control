@@ -110,6 +110,7 @@ private:
   bool                                  has_gripper_;
   std::string                    gripper_joint_name_;
   size_t                        gripper_joint_index_;
+  double                            last_gripper_position_;
   double                            gripper_position_; 
   double                            gripper_velocity_;
   double                            gripper_effort_;
