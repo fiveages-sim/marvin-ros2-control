@@ -51,6 +51,7 @@ public:
 
 private:
   // Hardware parameters
+  std::shared_ptr<rclcpp::Node> node_;
   std::string device_ip_;
   int device_port_;
   double simulation_mode_;
@@ -78,7 +79,8 @@ private:
   // Connection status
   bool hardware_connected_;
   bool simulation_active_;
-
+  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_callback_handle_;
+  std::vector<std::string> joint_names_;
   // Dobot communication handle (placeholder)
   // void* dobot_handle_;
 
@@ -93,6 +95,7 @@ private:
   void logJointStates();
   void setLeftArmCtrl();
   void setRightArmCtrl();
+  rcl_interfaces::msg::SetParametersResult paramCallback(const std::vector<rclcpp::Parameter> & params);
   
   double degreeToRad(double degree) {
       return degree * M_PI / 180.0;

@@ -41,6 +41,7 @@ find_library(EXTERNAL_CONTROLSO NAMES "libMarvinSDK.so" PATHS ${LIB_CONTROL_DIR}
 # Create library
 add_library(${PROJECT_NAME} SHARED
         src/tj2_hardware.cpp
+        src/gripper_control.cpp
 )
 
 add_dependencies(${PROJECT_NAME} build_marvin_sdk)
