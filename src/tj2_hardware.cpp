@@ -64,10 +64,11 @@ hardware_interface::CallbackReturn TJ2Hardware::on_init(
     hw_effort_states_.resize(num_joints, 0.0);
 
     // 初始化夹爪参数
-    gripper_position_ = -1.0;
+    gripper_position_ = 0.0;
     gripper_position_command_ = -1.0;
     last_gripper_command_ = -1.0;
     last_gripper_position_ = -1.0;
+    step_size_ = 0.0;
     // gripper_read_counter_ = 0;
     has_gripper_ = false;
     gripper_joint_index_ = -1;
@@ -119,14 +120,14 @@ TJ2Hardware::paramCallback(const std::vector<rclcpp::Parameter> & params)
 void TJ2Hardware::setLeftArmCtrl()
 {
   /// clear error first
-  double kineParam[6] = {0, 0, 0, 0, 0, 0};
-  double dynPara[10] = {1.8, 0.0, 0.0, 96.411347, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+  double kineParam[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+  double dynPara[10] = {2.0, 0.0, 0.0, 96.411347, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
   OnClearSet();
   OnClearErr_A();
   RCLCPP_INFO(get_logger(), "set tool load parameters");
-  OnSetTool_A(kineParam, dynPara);
   OnSetSend();
   usleep(100000);
+
   if (robot_ctrl_mode_ == static_cast<int>(RobotCtrlMode::POSITION))
   {
     OnClearSet();
@@ -138,6 +139,7 @@ void TJ2Hardware::setLeftArmCtrl()
   {
     OnClearSet();
     OnSetTargetState_A(3) ; //3:torque mode; 1:position mode
+    OnSetTool_A(kineParam, dynPara);
     if (robot_ctrl_mode_ == static_cast<int>(RobotCtrlMode::JOINT_IMPEDANCE))
     {
       double K[7] = {2,2,2,1.6,1,1,1};//预设为参数最大上限，供参考。
@@ -147,8 +149,8 @@ void TJ2Hardware::setLeftArmCtrl()
     }
     else if (robot_ctrl_mode_ == static_cast<int>(RobotCtrlMode::CART_IMPEDANCE))
     {
-      double K[7] = {500,500,500,10,10,10,0}; //预设为参数最大上限，供参考。
-      double D[7] = {0.1,0.1,0.1,0.3,0.3,1};//预设为参数最大上限，供参考。
+      double K[7] = {1800,1800,1800,40,40,40,20}; //预设为参数最大上限，供参考。
+      double D[7] = {0.6,0.6,0.6,0.4,0.4,0.4, 0.4};//预设为参数最大上限，供参考。
       OnSetCartKD_A(K, D, 2);
       OnSetImpType_A(2);
     }
@@ -171,7 +173,7 @@ void TJ2Hardware::setRightArmCtrl()
   OnClearSet();
   OnClearErr_B();
 
-  OnSetTool_B(kineParam, dynPara);
+
   OnSetSend();
   usleep(100000);
   if (robot_ctrl_mode_ == static_cast<int>(RobotCtrlMode::POSITION))
@@ -185,6 +187,7 @@ void TJ2Hardware::setRightArmCtrl()
   {
     OnClearSet();
     OnSetTargetState_B(3) ; //3:torque mode; 1:position mode
+    OnSetTool_B(kineParam, dynPara);
     if (robot_ctrl_mode_ == static_cast<int>(RobotCtrlMode::JOINT_IMPEDANCE))
     {
       double K[7] = {2,2,2,1.6,1,1,1};//预设为参数最大上限，供参考。
@@ -194,8 +197,8 @@ void TJ2Hardware::setRightArmCtrl()
     }
     else if (robot_ctrl_mode_ == static_cast<int>(RobotCtrlMode::CART_IMPEDANCE))
     {
-      double K[7] = {500,500,500,10,10,10,0}; //预设为参数最大上限，供参考。
-      double D[7] = {0.1,0.1,0.1,0.3,0.3,1};//预设为参数最大上限，供参考。
+      double K[7] = {2500,2500,2500,60,60,60,20}; //预设为参数最大上限，供参考。
+      double D[7] = {0.6,0.6,0.6,0.2,0.2,0.2, 0.4};//预设为参数最大上限，供参考。
       OnSetCartKD_B(K, D, 2);
       OnSetImpType_B(2);
     }
@@ -332,6 +335,14 @@ hardware_interface::CallbackReturn TJ2Hardware::on_activate(
       // start gripper control thread
       gripper_ctrl_thread_ = std::thread(&TJ2Hardware::gripper_callback, this);
       gripper_ctrl_thread_.detach();
+      // read once
+      // int cur_pos_status = 0;
+      // int cur_speed_status = 0;
+      // int cur_effort_status = 0;
+      // bool success = ZXGripper::ZXGripperStatus(cur_effort_status, cur_speed_status, cur_pos_status, OnClearChDataA);
+      // RCLCPP_INFO(rclcpp::get_logger("TJ2Hardware"), "gripper read position %d", cur_pos_status);
+      // gripper_position_ = (9000 - cur_pos_status) / 9000.0;
+      gripper_position_ = 0.0;
     }
     else
     {
@@ -347,25 +358,39 @@ void TJ2Hardware::gripper_callback()
 {
   while(hardware_connected_)
   {
+    OnClearSet();
+    // if(!gripper_stopped_)
+    // {
+    //   int cur_pos_status = 0;
+    //   int cur_speed_status = 0;
+    //   int cur_effort_status = 0;
+    //   bool success = ZXGripper::ZXGripperStatus(cur_effort_status, cur_speed_status, cur_pos_status, OnClearChDataA);
+    //   RCLCPP_INFO(rclcpp::get_logger("TJ2Hardware"), "gripper read position %d", cur_pos_status);
+    //   gripper_position_ = (9000 - cur_pos_status) / 9000.0;
+    //   RCLCPP_INFO(rclcpp::get_logger("TJ2Hardware"), "gripper position %f", gripper_position_);
+    //   if (gripper_position_ == last_gripper_position_)
+    //   {
+    //     gripper_stopped_ = true;
+    //   }
+    //   else
+    //   {
+    //     last_gripper_position_ = gripper_position_;
+    //   }
+    // }
     if(!gripper_stopped_)
     {
-      int cur_pos_status = 0;
-      int cur_speed_status = 0;
-      int cur_effort_status = 0;
-      bool success = ZXGripper::ZXGripperStatus(cur_effort_status, cur_speed_status, cur_pos_status);
-      RCLCPP_INFO(rclcpp::get_logger("TJ2Hardware"), "gripper read position %d", cur_pos_status);
-      gripper_position_ = (9000 - cur_pos_status) / 9000.0;
-      RCLCPP_INFO(rclcpp::get_logger("TJ2Hardware"), "gripper position %f", gripper_position_);
-      if (gripper_position_ == last_gripper_position_)
+      //RCLCPP_INFO(rclcpp::get_logger("TJ2Hardware"), "gripper write position %f", step_size_);
+      gripper_position_ = gripper_position_ + step_size_;
+      //RCLCPP_INFO(rclcpp::get_logger("TJ2Hardware"), "gripper write position %f", gripper_position_);
+      //RCLCPP_INFO(rclcpp::get_logger("TJ2Hardware"), "gripper write position %f", last_gripper_command_);
+      // RCLCPP_INFO(rclcpp::get_logger("TJ2Hardware"), "gripper write position %d", last_gripper_command_ == gripper_position_);
+      if (abs(gripper_position_ - last_gripper_command_) < 0.001)
       {
         gripper_stopped_ = true;
-      }
-      else
-      {
-        last_gripper_position_ = gripper_position_;
+        step_size_ = 0.0;
       }
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
     /// write when the gripper commannd is different
     if (last_gripper_command_ != gripper_position_command_)
     {
@@ -375,17 +400,19 @@ void TJ2Hardware::gripper_callback()
       int cur_speed_set = 100;
       int cur_effort_set = 100;
       RCLCPP_INFO(rclcpp::get_logger("TJ2Hardware"), "gripper write position %d", cur_pos_set);
-      bool success = ZXGripper::ZXGripperMove(cur_effort_set, cur_speed_set, cur_pos_set);
+      bool success = ZXGripper::ZXGripperMove(cur_effort_set, cur_speed_set, cur_pos_set, OnClearChDataA);
       last_gripper_command_ = gripper_position_command_;
       gripper_stopped_ = false;
+      step_size_ = (last_gripper_command_ - gripper_position_) / 10.0;
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    OnSetSend();
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
   }
 }
 
 bool TJ2Hardware::connect_gripper()
 {
-   return ZXGripper::ZXGripperInit();
+   return ZXGripper::ZXGripperInit(OnClearChDataA);
 }
 
 hardware_interface::CallbackReturn TJ2Hardware::on_deactivate(
@@ -537,18 +564,18 @@ hardware_interface::return_type TJ2Hardware::read(
   // }
 
   if (!hardware_connected_) {
-    RCLCPP_ERROR_THROTTLE(
-      rclcpp::get_logger("TJ2Hardware"), 
-      *std::make_shared<rclcpp::Clock>(), 5000, 
-      "Not connected to hardware");
+    // RCLCPP_ERROR_THROTTLE(
+    //   rclcpp::get_logger("TJ2Hardware"), 
+    //   *std::make_shared<rclcpp::Clock>(), 5000, 
+    //   "Not connected to hardware");
     return hardware_interface::return_type::ERROR;
   }
 
   if (!readFromHardware(robot_arm_left_right_, false)) {
-    RCLCPP_ERROR_THROTTLE(
-      rclcpp::get_logger("TJ2Hardware"), 
-      *std::make_shared<rclcpp::Clock>(), 5000, 
-      "Failed to read from hardware");
+    // RCLCPP_ERROR_THROTTLE(
+    //   rclcpp::get_logger("TJ2Hardware"), 
+    //   *std::make_shared<rclcpp::Clock>(), 5000, 
+    //   "Failed to read from hardware");
     return hardware_interface::return_type::ERROR;
   }
 
@@ -639,43 +666,43 @@ bool TJ2Hardware::readFromHardware(int robot_arm_left_right_, bool initial_frame
 {
   
   OnGetBuf(&frame_data_);
-  // RCLCPP_INFO(rclcpp::get_logger("TJ2Hardware"), "Reading from hardware interface ... %d", frame_data_.m_Out[robot_arm_left_right_].m_OutFrameSerial);
+    // RCLCPP_INFO(rclcpp::get_logger("TJ2Hardware"), "Reading from hardware interface ... %d", frame_data_.m_Out[robot_arm_left_right_].m_OutFrameSerial);
   if (initial_frame)
   {
     previous_message_frame_ = frame_data_.m_Out[robot_arm_left_right_].m_OutFrameSerial;
   }
-
-  if (previous_message_frame_ - frame_data_.m_Out[robot_arm_left_right_].m_OutFrameSerial < 2)
+  if (robot_arm_left_right_ == static_cast<int>(RobotArmConfig::LEFT_ARM)|| robot_arm_left_right_ == static_cast<int>(RobotArmConfig::RIGHT_ARM))
   {
-    if (robot_arm_left_right_ == static_cast<int>(RobotArmConfig::LEFT_ARM)|| robot_arm_left_right_ == static_cast<int>(RobotArmConfig::RIGHT_ARM))
-    {
-      for (size_t i = 0; i < 7; i++) {
-        hw_position_states_[i] = degreeToRad(frame_data_.m_Out[robot_arm_left_right_].m_FB_Joint_Pos[i]);
-        hw_velocity_states_[i] = frame_data_.m_Out[robot_arm_left_right_].m_FB_Joint_Vel[i];
-        hw_effort_states_[i] = frame_data_.m_Out[robot_arm_left_right_].m_FB_Joint_SToq[i];
-      }
+    for (size_t i = 0; i < 7; i++) {
+      hw_position_states_[i] = degreeToRad(frame_data_.m_Out[robot_arm_left_right_].m_FB_Joint_Pos[i]);
+      hw_velocity_states_[i] = frame_data_.m_Out[robot_arm_left_right_].m_FB_Joint_Vel[i];
+      hw_effort_states_[i] = frame_data_.m_Out[robot_arm_left_right_].m_FB_Joint_SToq[i];
     }
-    else if(robot_arm_left_right_ == static_cast<int>(RobotArmConfig::DUAL_ARM))
-    {
-      for (size_t i = 0; i < 7; i++) {
-        hw_position_states_[i] = degreeToRad(frame_data_.m_Out[static_cast<int>(RobotArmConfig::LEFT_ARM)].m_FB_Joint_Pos[i]);
-        hw_velocity_states_[i] = frame_data_.m_Out[static_cast<int>(RobotArmConfig::LEFT_ARM)].m_FB_Joint_Vel[i];
-        hw_effort_states_[i] = frame_data_.m_Out[static_cast<int>(RobotArmConfig::LEFT_ARM)].m_FB_Joint_SToq[i];
-      }
-
-      for (size_t i = 0; i < 7; i++) {
-        hw_position_states_[i + 7] = degreeToRad(frame_data_.m_Out[static_cast<int>(RobotArmConfig::RIGHT_ARM)].m_FB_Joint_Pos[i]);
-        hw_velocity_states_[i + 7] = frame_data_.m_Out[static_cast<int>(RobotArmConfig::RIGHT_ARM)].m_FB_Joint_Vel[i];
-        hw_effort_states_[i + 7] = frame_data_.m_Out[static_cast<int>(RobotArmConfig::RIGHT_ARM)].m_FB_Joint_SToq[i];
-      }
-    }
-    
-    return true;
   }
+  else if(robot_arm_left_right_ == static_cast<int>(RobotArmConfig::DUAL_ARM))
+  {
+    for (size_t i = 0; i < 7; i++) {
+      hw_position_states_[i] = degreeToRad(frame_data_.m_Out[static_cast<int>(RobotArmConfig::LEFT_ARM)].m_FB_Joint_Pos[i]);
+      hw_velocity_states_[i] = frame_data_.m_Out[static_cast<int>(RobotArmConfig::LEFT_ARM)].m_FB_Joint_Vel[i];
+      hw_effort_states_[i] = frame_data_.m_Out[static_cast<int>(RobotArmConfig::LEFT_ARM)].m_FB_Joint_SToq[i];
+    }
+
+    for (size_t i = 0; i < 7; i++) {
+      hw_position_states_[i + 7] = degreeToRad(frame_data_.m_Out[static_cast<int>(RobotArmConfig::RIGHT_ARM)].m_FB_Joint_Pos[i]);
+      hw_velocity_states_[i + 7] = frame_data_.m_Out[static_cast<int>(RobotArmConfig::RIGHT_ARM)].m_FB_Joint_Vel[i];
+      hw_effort_states_[i + 7] = frame_data_.m_Out[static_cast<int>(RobotArmConfig::RIGHT_ARM)].m_FB_Joint_SToq[i];
+    }
+  }
+  previous_message_frame_ = frame_data_.m_Out[robot_arm_left_right_].m_OutFrameSerial;
+
+    if (previous_message_frame_ - frame_data_.m_Out[robot_arm_left_right_].m_OutFrameSerial < 2)
+    {
+      return true;
+    }
    else
    {
         RCLCPP_INFO(rclcpp::get_logger("TJ2Hardware"), "Missing more than 2 frames");
-        return false;
+        return true;
    }
 }
 

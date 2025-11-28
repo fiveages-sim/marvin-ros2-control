@@ -119,6 +119,7 @@ private:
   bool                             gripper_stopped_ ;
   bool                             gripper_initilized_;
   void                              contains_gripper();
+  double                              step_size_;
   std::thread gripper_ctrl_thread_;
   void gripper_callback();
   bool connect_gripper();
