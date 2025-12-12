@@ -1,20 +1,18 @@
-#ifndef MARVIN_HARDWARE__MARVIN_HARDWARE_HPP_
-#define MARVIN_HARDWARE__MARVIN_HARDWARE_HPP_
+#pragma once
 
 #include <memory>
 #include <string>
 #include <vector>
 
 #include "hardware_interface/handle.hpp"
-#include "hardware_interface/hardware_info.hpp"
 #include "hardware_interface/system_interface.hpp"
 #include "hardware_interface/types/hardware_interface_return_values.hpp"
-#include "rclcpp/macros.hpp"
+#include "rclcpp/logger.hpp"
 #include "rclcpp_lifecycle/node_interfaces/lifecycle_node_interface.hpp"
 #include "rclcpp_lifecycle/state.hpp"
 #include "MarvinSDK.h"
 #include <cmath>
-#include "gripper_control.h"
+#include "marvin_ros2_control/grippers/gripper_control.h"
 
 namespace marvin_ros2_control
 {
@@ -39,28 +37,34 @@ namespace marvin_ros2_control
         hardware_interface::CallbackReturn on_error(const rclcpp_lifecycle::State& previous_state) override;
 
         // Hardware interface methods
-        std::vector<hardware_interface::StateInterface> export_state_interfaces() override;
-        std::vector<hardware_interface::CommandInterface> export_command_interfaces() override;
+        std::vector<hardware_interface::StateInterface::ConstSharedPtr> on_export_state_interfaces() override;
+        std::vector<hardware_interface::CommandInterface::SharedPtr> on_export_command_interfaces() override;
         hardware_interface::return_type read(const rclcpp::Time& time, const rclcpp::Duration& period) override;
         hardware_interface::return_type write(const rclcpp::Time& time, const rclcpp::Duration& period) override;
 
     private:
+        rclcpp::Logger get_logger() const 
+        { 
+            return logger_.value();  // Safe to use value() since logger_ is initialized in on_init()
+        }
+        // Logger (initialized in on_init using get_node()->get_logger())
+        std::optional<rclcpp::Logger> logger_;
+
         // Hardware parameters
         std::string device_ip_;
-        int device_port_;
+        int device_port_ = 8080;
         double simulation_mode_;
         double read_timeout_;
         double write_timeout_;
         std::string robot_arm_config_;  // "LEFT", "RIGHT", "DUAL"
-        int robot_arm_index_;           // 0=LEFT, 1=RIGHT, 2=DUAL (在初始化时设定)
+        int robot_arm_index_ = 0;       // 0=LEFT, 1=RIGHT, 2=DUAL (在初始化时设定)
         std::string robot_ctrl_mode_;   // "POSITION", "JOINT_IMPEDANCE", "CART_IMPEDANCE"
-        int previous_message_frame_;
+        int previous_message_frame_ = 0;
         DCSS frame_data_;
 
         // Control parameters
         double max_velocity_;
         double max_acceleration_;
-        bool use_drag_mode_;
         std::vector<double> joint_imp_gain_;
         std::vector<double> joint_imp_damp_;
         std::vector<double> cart_imp_gain_;
@@ -82,8 +86,6 @@ namespace marvin_ros2_control
         bool hardware_connected_;
         bool simulation_active_;
         std::vector<std::string> joint_names_;
-        // Dobot communication handle (placeholder)
-        // void* dobot_handle_;
 
         // Helper methods
         bool connectToHardware();
@@ -95,22 +97,26 @@ namespace marvin_ros2_control
         void logJointStates();
         void setLeftArmCtrl();
         void setRightArmCtrl();
+        
+        // Helper method to create gripper based on type
+        std::unique_ptr<ModbusGripper> createGripper(Clear485Func clear_485, Send485Func send_485);
 
-        double degreeToRad(double degree)
+        static double degreeToRad(const double degree)
         {
             return degree * M_PI / 180.0;
-        };
+        }
 
-        double radToDegree(double rad)
+        static double radToDegree(const double rad)
         {
             return rad * 180.0 / M_PI;
-        };
+        }
 
         //
         // 夹爪参数
-        bool has_gripper_;
+        std::string gripper_type_;  // 夹爪类型，为空或 "none" 时表示不使用夹爪
+        bool has_gripper_ = false;
         std::vector<std::string> gripper_joint_name_;
-        size_t gripper_joint_index_;
+        size_t gripper_joint_index_ = 0;
         std::vector<double> last_gripper_position_;
         std::vector<double> gripper_position_;
         std::vector<double> gripper_velocity_;
@@ -118,7 +124,7 @@ namespace marvin_ros2_control
         std::vector<double> gripper_position_command_;
         std::vector<double> last_gripper_command_;
         std::vector<bool> gripper_stopped_;
-        bool gripper_initilized_;
+        bool gripper_initilized_ = false;
         void contains_gripper();
         std::vector<double> step_size_;
         std::thread gripper_ctrl_thread_;
@@ -134,5 +140,3 @@ namespace marvin_ros2_control
         }
     };
 } // namespace marvin_ros2_control
-
-#endif  // MARVIN_HARDWARE__MARVIN_HARDWARE_HPP_
