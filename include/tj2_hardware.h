@@ -4,6 +4,8 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <thread>
+#include <sstream>
 
 #include "hardware_interface/handle.hpp"
 #include "hardware_interface/hardware_info.hpp"
@@ -12,6 +14,7 @@
 #include "rclcpp/macros.hpp"
 #include "rclcpp_lifecycle/node_interfaces/lifecycle_node_interface.hpp"
 #include "rclcpp_lifecycle/state.hpp"
+#include "rclcpp/rclcpp.hpp"
 #include "MarvinSDK.h"
 #include <cmath>
 #include "gripper_control.h"
@@ -34,6 +37,9 @@ class MarvinHardware : public hardware_interface::SystemInterface
 {
 public:
   RCLCPP_SHARED_PTR_DEFINITIONS(MarvinHardware)
+
+  // Destructor
+  virtual ~MarvinHardware();
 
   // Hardware interface lifecycle methods
   hardware_interface::CallbackReturn on_init(const hardware_interface::HardwareInfo & info) override;
@@ -97,6 +103,12 @@ private:
   void setLeftArmCtrl();
   void setRightArmCtrl();
   rcl_interfaces::msg::SetParametersResult paramCallback(const std::vector<rclcpp::Parameter> & params);
+  void applyRobotConfiguration(int mode, int arm_side, int drag_mode, int cart_type,
+                              double max_joint_speed, double max_joint_acceleration,
+                              const std::vector<double>& joint_k_gains,
+                              const std::vector<double>& joint_d_gains,
+                              const std::vector<double>& cart_k_gains,
+                              const std::vector<double>& cart_d_gains);
   
   double degreeToRad(double degree) {
       return degree * M_PI / 180.0;

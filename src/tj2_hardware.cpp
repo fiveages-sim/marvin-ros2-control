@@ -9,10 +9,24 @@
 #include "hardware_interface/types/hardware_interface_type_values.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include <string>
+#include <sstream>
+#include <algorithm>
 
 namespace marvin_ros2_control
 {
  
+
+MarvinHardware::~MarvinHardware()
+{
+  RCLCPP_INFO(rclcpp::get_logger("MarvinHardware"), "Destroying TJ2 Hardware Interface...");
+  
+  // Ensure hardware is disconnected
+  if (hardware_connected_) {
+    disconnectFromHardware();
+  }
+  
+  RCLCPP_DEBUG(rclcpp::get_logger("MarvinHardware"), "TJ2 Hardware Interface destroyed");
+}
 
 hardware_interface::CallbackReturn MarvinHardware::on_init(
   const hardware_interface::HardwareInfo & info)
@@ -21,16 +35,37 @@ hardware_interface::CallbackReturn MarvinHardware::on_init(
 
   logger_ = std::make_shared<rclcpp::Logger>(rclcpp::get_logger("MarvinHardware"));
   clock_ = std::make_shared<rclcpp::Clock>();
-  node_ = rclcpp::Node::make_shared("MarvinHardware");
+  node_ = get_node();
   
+  // Robot operation mode: 1=Position, 2=Joint Impedance, 3=Cartesian Impedance
+  node_->declare_parameter<int>("mode", 2);
+  // Arm side: 0=left, 1=right, 2=dual (both)
+  node_->declare_parameter<int>("arm_side", 2);
+  // Drag mode: -1=don't update, 0=disable, 1=joint space drag, 2=cartesian space drag
+  node_->declare_parameter<int>("drag_mode", -1);
+  // Joint impedance K gains (7 values)
+  node_->declare_parameter<std::vector<double>>("joint_k_gains", std::vector<double>{2.0, 2.0, 2.0, 1.6, 1.0, 1.0, 1.0});
+  // Joint impedance D gains (7 values)
+  node_->declare_parameter<std::vector<double>>("joint_d_gains", std::vector<double>{0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4});
+  // Cartesian impedance K gains (7 values)
+  node_->declare_parameter<std::vector<double>>("cart_k_gains", std::vector<double>{1800.0, 1800.0, 1800.0, 40.0, 40.0, 40.0, 20.0});
+  // Cartesian impedance D gains (7 values)
+  node_->declare_parameter<std::vector<double>>("cart_d_gains", std::vector<double>{0.6, 0.6, 0.6, 0.4, 0.4, 0.4, 0.4});
+  // Cartesian impedance type
+  node_->declare_parameter<int>("cart_type", 2);
+  // Joint speed and acceleration limits
+  node_->declare_parameter<double>("max_joint_speed", 10.0);
+  node_->declare_parameter<double>("max_joint_acceleration", 10.0);
+  
+  // Legacy parameters (for backward compatibility)
   node_->declare_parameter<double>("max_velocity", 10.0);
   node_->declare_parameter<double>("max_acceleration", 10.0);
   node_->declare_parameter<bool>("use_drag_mode", false);
-  node_->declare_parameter<bool>("ctrl_mode", static_cast<int>(RobotCtrlMode::POSITION));
-  node_->declare_parameter<std::vector<double>>("joint_imp_gain", {2,2,2,1.6,1,1,1});
-  node_->declare_parameter<std::vector<double>>("joint_imp_damp", {0.4,0.4,0.4,0.4,0.4,0.4,0.4});
-  node_->declare_parameter<std::vector<double>>("cart_imp_gain", {500,500,500,10,10,10,0});
-  node_->declare_parameter<std::vector<double>>("cart_imp_damp", {0.1,0.1,0.1,0.3,0.3,1});
+  node_->declare_parameter<int>("ctrl_mode", static_cast<int>(RobotCtrlMode::POSITION));
+  node_->declare_parameter<std::vector<double>>("joint_imp_gain", std::vector<double>{2,2,2,1.6,1,1,1});
+  node_->declare_parameter<std::vector<double>>("joint_imp_damp", std::vector<double>{0.4,0.4,0.4,0.4,0.4,0.4,0.4});
+  node_->declare_parameter<std::vector<double>>("cart_imp_gain", std::vector<double>{500,500,500,10,10,10,0});
+  node_->declare_parameter<std::vector<double>>("cart_imp_damp", std::vector<double>{0.1,0.1,0.1,0.3,0.3,1});
 
   if (hardware_interface::SystemInterface::on_init(info) != hardware_interface::CallbackReturn::SUCCESS) {
     return hardware_interface::CallbackReturn::ERROR;
@@ -119,8 +154,10 @@ hardware_interface::CallbackReturn MarvinHardware::on_init(
     // Initialize hardware connection status
     hardware_connected_ = false;
     simulation_active_ = false;
-    param_callback_handle_ = node_->add_on_set_parameters_callback(
-            std::bind(&MarvinHardware::paramCallback, this, std::placeholders::_1));
+  param_callback_handle_ = node_->add_on_set_parameters_callback(
+          std::bind(&MarvinHardware::paramCallback, this, std::placeholders::_1));
+  RCLCPP_INFO(get_logger(), "Robot configuration parameters ready. Use 'ros2 param set' to change configuration dynamically.");
+    
     return hardware_interface::CallbackReturn::SUCCESS;
 }
 
@@ -130,32 +167,317 @@ MarvinHardware::paramCallback(const std::vector<rclcpp::Parameter> & params)
     rcl_interfaces::msg::SetParametersResult result;
     result.successful = true;
 
+    if (!hardware_connected_) {
+        result.successful = false;
+        result.reason = "Hardware not connected";
+        return result;
+    }
+
+    // Track if we need to apply configuration
+    bool need_config_update = false;
+    int mode = -1;
+    int arm_side = -1;
+    int drag_mode = -1;
+    int cart_type = -1;
+    double max_joint_speed = -1.0;
+    double max_joint_acceleration = -1.0;
+    std::vector<double> joint_k_gains;
+    std::vector<double> joint_d_gains;
+    std::vector<double> cart_k_gains;
+    std::vector<double> cart_d_gains;
+
     for (const auto & param : params) {
-        if (param.get_name() == "joint_imp_gain" || param.get_name() == "joint_imp_damp" && robot_ctrl_mode_ == static_cast<int>(RobotCtrlMode::JOINT_IMPEDANCE)) {
-          // change gain parameter
-          RCLCPP_INFO(get_logger(), "change impedance parameters");
+        if (param.get_name() == "mode") {
+            mode = param.as_int();
+            if (mode <= 0 || mode > 3) {
+                result.successful = false;
+                result.reason = "Invalid mode. Must be 1 (Position), 2 (Joint Impedance), or 3 (Cartesian Impedance)";
+                return result;
+            }
+            need_config_update = true;
+            RCLCPP_INFO(get_logger(), "Mode parameter changed to: %d", mode);
         }
-        if (param.get_name() == "ctrl_mode")
-        {
-          robot_ctrl_mode_ = param.as_int();
-          RCLCPP_INFO(get_logger(), "param robot ctrl mode changed to %d", robot_ctrl_mode_);
-          if (robot_arm_left_right_ == static_cast<int>(RobotArmConfig::LEFT_ARM))
-          {
-            setLeftArmCtrl();
-          }
-          else if (robot_arm_left_right_ == static_cast<int>(RobotArmConfig::RIGHT_ARM))
-          {
-            setRightArmCtrl();
-          }
-          else if(robot_arm_left_right_ == static_cast<int>(RobotArmConfig::DUAL_ARM))
-          {
-            setLeftArmCtrl();
-            setRightArmCtrl();
-          }
+        else if (param.get_name() == "arm_side") {
+            arm_side = param.as_int();
+            if (arm_side < 0 || arm_side > 2) {
+                result.successful = false;
+                result.reason = "Invalid arm_side. Must be 0 (left), 1 (right), or 2 (both)";
+                return result;
+            }
+            need_config_update = true;
+            RCLCPP_INFO(get_logger(), "Arm side parameter changed to: %d", arm_side);
+        }
+        else if (param.get_name() == "drag_mode") {
+            drag_mode = param.as_int();
+            need_config_update = true;
+            RCLCPP_INFO(get_logger(), "Drag mode parameter changed to: %d", drag_mode);
+        }
+        else if (param.get_name() == "joint_k_gains") {
+            joint_k_gains = param.as_double_array();
+            if (joint_k_gains.size() != 7) {
+                result.successful = false;
+                result.reason = "joint_k_gains must have exactly 7 values";
+                return result;
+            }
+            need_config_update = true;
+        }
+        else if (param.get_name() == "joint_d_gains") {
+            joint_d_gains = param.as_double_array();
+            if (joint_d_gains.size() != 7) {
+                result.successful = false;
+                result.reason = "joint_d_gains must have exactly 7 values";
+                return result;
+            }
+            need_config_update = true;
+        }
+        else if (param.get_name() == "cart_k_gains") {
+            cart_k_gains = param.as_double_array();
+            if (cart_k_gains.size() != 7) {
+                result.successful = false;
+                result.reason = "cart_k_gains must have exactly 7 values";
+                return result;
+            }
+            need_config_update = true;
+        }
+        else if (param.get_name() == "cart_d_gains") {
+            cart_d_gains = param.as_double_array();
+            if (cart_d_gains.size() != 7) {
+                result.successful = false;
+                result.reason = "cart_d_gains must have exactly 7 values";
+                return result;
+            }
+            need_config_update = true;
+        }
+        else if (param.get_name() == "cart_type") {
+            cart_type = param.as_int();
+            need_config_update = true;
+        }
+        else if (param.get_name() == "max_joint_speed") {
+            max_joint_speed = param.as_double();
+            if (max_joint_speed <= 0.0) {
+                result.successful = false;
+                result.reason = "max_joint_speed must be > 0";
+                return result;
+            }
+            need_config_update = true;
+        }
+        else if (param.get_name() == "max_joint_acceleration") {
+            max_joint_acceleration = param.as_double();
+            if (max_joint_acceleration <= 0.0) {
+                result.successful = false;
+                result.reason = "max_joint_acceleration must be > 0";
+                return result;
+            }
+            need_config_update = true;
+        }
+        // Legacy parameter handling
+        else if (param.get_name() == "ctrl_mode") {
+            int legacy_mode = param.as_int();
+            // Map legacy ctrl_mode to new mode: 2=position(1), 3=joint_imp(2), 4=cart_imp(3)
+            if (legacy_mode == 2) mode = 1;
+            else if (legacy_mode == 3) mode = 2;
+            else if (legacy_mode == 4) mode = 3;
+            need_config_update = true;
+            RCLCPP_WARN(get_logger(), "Using legacy ctrl_mode parameter. Consider using 'mode' instead.");
         }
     }
+
+    // Apply configuration if needed
+    if (need_config_update) {
+        applyRobotConfiguration(mode, arm_side, drag_mode, cart_type, 
+                              max_joint_speed, max_joint_acceleration,
+                              joint_k_gains, joint_d_gains, cart_k_gains, cart_d_gains);
+    }
+
     return result;
 }
+
+void MarvinHardware::applyRobotConfiguration(int mode, int arm_side, int drag_mode, int cart_type,
+                                              double max_joint_speed, double max_joint_acceleration,
+                                              const std::vector<double>& joint_k_gains,
+                                              const std::vector<double>& joint_d_gains,
+                                              const std::vector<double>& cart_k_gains,
+                                              const std::vector<double>& cart_d_gains)
+{
+    // Get current parameter values if not provided
+    if (mode == -1) {
+        mode = node_->get_parameter("mode").as_int();
+    }
+    if (arm_side == -1) {
+        arm_side = node_->get_parameter("arm_side").as_int();
+    }
+    if (drag_mode == -1) {
+        drag_mode = node_->get_parameter("drag_mode").as_int();
+    }
+    if (cart_type == -1) {
+        cart_type = node_->get_parameter("cart_type").as_int();
+    }
+    if (max_joint_speed <= 0.0) {
+        max_joint_speed = node_->get_parameter("max_joint_speed").as_double();
+    }
+    if (max_joint_acceleration <= 0.0) {
+        max_joint_acceleration = node_->get_parameter("max_joint_acceleration").as_double();
+    }
+
+    // Default KD values
+    std::vector<double> default_joint_k = {2.0, 2.0, 2.0, 1.6, 1.0, 1.0, 1.0};
+    std::vector<double> default_joint_d = {0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4};
+    std::vector<double> default_cart_k = {1800.0, 1800.0, 1800.0, 40.0, 40.0, 40.0, 20.0};
+    std::vector<double> default_cart_d = {0.6, 0.6, 0.6, 0.4, 0.4, 0.4, 0.4};
+
+    // Use provided KD or get from parameters or defaults
+    std::vector<double> final_joint_k = (!joint_k_gains.empty()) ? joint_k_gains :
+        (node_->has_parameter("joint_k_gains") && node_->get_parameter("joint_k_gains").as_double_array().size() == 7) ?
+        node_->get_parameter("joint_k_gains").as_double_array() : default_joint_k;
+    std::vector<double> final_joint_d = (!joint_d_gains.empty()) ? joint_d_gains :
+        (node_->has_parameter("joint_d_gains") && node_->get_parameter("joint_d_gains").as_double_array().size() == 7) ?
+        node_->get_parameter("joint_d_gains").as_double_array() : default_joint_d;
+    std::vector<double> final_cart_k = (!cart_k_gains.empty()) ? cart_k_gains :
+        (node_->has_parameter("cart_k_gains") && node_->get_parameter("cart_k_gains").as_double_array().size() == 7) ?
+        node_->get_parameter("cart_k_gains").as_double_array() : default_cart_k;
+    std::vector<double> final_cart_d = (!cart_d_gains.empty()) ? cart_d_gains :
+        (node_->has_parameter("cart_d_gains") && node_->get_parameter("cart_d_gains").as_double_array().size() == 7) ?
+        node_->get_parameter("cart_d_gains").as_double_array() : default_cart_d;
+
+    // Determine which arms to update
+    bool update_left = (arm_side == 0 || arm_side == 2);
+    bool update_right = (arm_side == 1 || arm_side == 2);
+
+    // Process based on selected mode
+    if (mode == 1) {
+        // Position mode
+        OnClearSet();
+        if (update_left) {
+            OnSetTargetState_A(1);  // Position mode
+        }
+        if (update_right) {
+            OnSetTargetState_B(1);  // Position mode
+        }
+        OnSetSend();
+        usleep(100000);
+        
+        robot_ctrl_mode_ = static_cast<int>(RobotCtrlMode::POSITION);
+        
+        // Set joint speed and acceleration limits
+        OnClearSet();
+        if (update_left) {
+            OnSetJointLmt_A(static_cast<int>(max_joint_speed), static_cast<int>(max_joint_acceleration));
+        }
+        if (update_right) {
+            OnSetJointLmt_B(static_cast<int>(max_joint_speed), static_cast<int>(max_joint_acceleration));
+        }
+        OnSetSend();
+        usleep(100000);
+        
+        RCLCPP_INFO(get_logger(), "Set to position mode with speed=%.1f, acceleration=%.1f", 
+                    max_joint_speed, max_joint_acceleration);
+        
+    } else if (mode == 2) {
+        // Joint impedance mode
+        double K[7], D[7];
+        for (int i = 0; i < 7; i++) {
+            K[i] = final_joint_k[i];
+            D[i] = final_joint_d[i];
+        }
+        
+        OnClearSet();
+        if (update_left) {
+            OnSetTargetState_A(3);  // Torque mode
+            OnSetImpType_A(1);      // Joint impedance
+            OnSetJointKD_A(K, D);
+        }
+        if (update_right) {
+            OnSetTargetState_B(3);  // Torque mode
+            OnSetImpType_B(1);      // Joint impedance
+            OnSetJointKD_B(K, D);
+        }
+        
+        // Update drag mode if specified
+        if (drag_mode >= 0) {
+            if (update_left) {
+                OnSetDragSpace_A(drag_mode);
+            }
+            if (update_right) {
+                OnSetDragSpace_B(drag_mode);
+            }
+        }
+        
+        OnSetSend();
+        usleep(100000);
+        
+        // Set joint speed and acceleration limits
+        OnClearSet();
+        if (update_left) {
+            OnSetJointLmt_A(static_cast<int>(max_joint_speed), static_cast<int>(max_joint_acceleration));
+        }
+        if (update_right) {
+            OnSetJointLmt_B(static_cast<int>(max_joint_speed), static_cast<int>(max_joint_acceleration));
+        }
+        OnSetSend();
+        usleep(100000);
+        
+        robot_ctrl_mode_ = static_cast<int>(RobotCtrlMode::JOINT_IMPEDANCE);
+        
+        RCLCPP_INFO(get_logger(), "Set to joint impedance mode with KD=[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f], speed=%.1f, acceleration=%.1f",
+                    K[0], K[1], K[2], K[3], K[4], K[5], K[6], max_joint_speed, max_joint_acceleration);
+        
+    } else if (mode == 3) {
+        // Cartesian impedance mode
+        double K[7], D[7];
+        for (int i = 0; i < 7; i++) {
+            K[i] = final_cart_k[i];
+            D[i] = final_cart_d[i];
+        }
+        
+        OnClearSet();
+        if (update_left) {
+            OnSetTargetState_A(3);  // Torque mode
+            OnSetImpType_A(2);      // Cartesian impedance
+            OnSetCartKD_A(K, D, cart_type);
+        }
+        if (update_right) {
+            OnSetTargetState_B(3);  // Torque mode
+            OnSetImpType_B(2);      // Cartesian impedance
+            // Right arm uses 6 values for cartesian
+            double K_right[6], D_right[6];
+            for (int i = 0; i < 6; i++) {
+                K_right[i] = final_cart_k[i];
+                D_right[i] = final_cart_d[i];
+            }
+            OnSetCartKD_B(K_right, D_right, cart_type);
+        }
+        
+        // Update drag mode if specified
+        if (drag_mode >= 0) {
+            if (update_left) {
+                OnSetDragSpace_A(drag_mode);
+            }
+            if (update_right) {
+                OnSetDragSpace_B(drag_mode);
+            }
+        }
+        
+        OnSetSend();
+        usleep(100000);
+        
+        // Set joint speed and acceleration limits
+        OnClearSet();
+        if (update_left) {
+            OnSetJointLmt_A(static_cast<int>(max_joint_speed), static_cast<int>(max_joint_acceleration));
+        }
+        if (update_right) {
+            OnSetJointLmt_B(static_cast<int>(max_joint_speed), static_cast<int>(max_joint_acceleration));
+        }
+        OnSetSend();
+        usleep(100000);
+        
+        robot_ctrl_mode_ = static_cast<int>(RobotCtrlMode::CART_IMPEDANCE);
+        
+        RCLCPP_INFO(get_logger(), "Set to cartesian impedance mode with KD=[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f], speed=%.1f, acceleration=%.1f",
+                    K[0], K[1], K[2], K[3], K[4], K[5], K[6], max_joint_speed, max_joint_acceleration);
+    }
+}
+
 
 void MarvinHardware::setLeftArmCtrl()
 {

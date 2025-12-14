@@ -200,13 +200,13 @@ namespace marvin_ros2_control
     }
 
     bool ZXGripper::initialize() {
-        acceleration_set_ = false;
-        deceleration_set_ = false;
+        acceleration_set_ = true;
+        deceleration_set_ = true;
         
         RCLCPP_INFO(logger_, "Initializing ZX Gripper (slave: 0x%02X)", SLAVE_ID);
-        
-        return writeSingleRegister(SLAVE_ID, INIT_REGISTER, INIT_VALUE,
-                                  WRITE_SINGLE_FUNCTION);
+        return true;
+        // return writeSingleRegister(SLAVE_ID, INIT_REGISTER, INIT_VALUE,
+        //                           WRITE_SINGLE_FUNCTION);
     }
 
     bool ZXGripper::move_gripper(int torque, int velocity, int position) {
@@ -226,7 +226,10 @@ namespace marvin_ros2_control
         // Write position (two registers)
         result = writeMultipleRegisters(SLAVE_ID, POSITION_REG_LOW, position_values,
                                        WRITE_MULTIPLE_FUNCTION) && result;
-        
+        RCLCPP_INFO(logger_, "ZX Gripper moving - SLAVE_ID: %d, vel: %d, trq: %d", 
+            SLAVE_ID, POSITION_REG_LOW, result);
+            
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
         // Configure acceleration if not set
         if (!acceleration_set_) {
             result = writeSingleRegister(SLAVE_ID, ACCELERATION_REG, DEFAULT_ACCELERATION,
@@ -248,7 +251,7 @@ namespace marvin_ros2_control
                                         WRITE_SINGLE_FUNCTION) && result;
             deceleration_set_ = true;
         }
-        
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
         // Trigger movement
         result = writeSingleRegister(SLAVE_ID, TRIGGER_REG, TRIGGER_VALUE,
                                     WRITE_SINGLE_FUNCTION) && result;
