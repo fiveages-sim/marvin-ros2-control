@@ -522,7 +522,7 @@ void MarvinHardware::setLeftArmCtrl()
   
   /// set maximum speed and acceleration
   OnClearSet();
-  OnSetJointLmt_A(10, 10) ;
+  OnSetJointLmt_A(40, 10) ;
   OnSetSend();
   usleep(100000);
 }
@@ -570,7 +570,7 @@ void MarvinHardware::setRightArmCtrl()
   
   /// set maximum speed and acceleration
   OnClearSet();
-  OnSetJointLmt_B(10, 10) ;
+  OnSetJointLmt_B(40, 10) ;
   OnSetSend();
   usleep(100000);
 }
@@ -768,7 +768,7 @@ void MarvinHardware::gripper_callback()
       {
         RCLCPP_INFO(rclcpp::get_logger("MarvinHardware"), "gripper %d write position %f", i, gripper_position_command_[i]);
         // write commands to gripper
-        int cur_pos_set = 256 - 256 * gripper_position_command_[i];
+        int cur_pos_set = 255 - floor(255 / 0.038373 * gripper_position_command_[i]);
         int cur_speed_set = 100;
         int cur_effort_set = 100;
         RCLCPP_INFO(rclcpp::get_logger("MarvinHardware"), "gripper write position %d", cur_pos_set);
