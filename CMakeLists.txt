@@ -14,6 +14,7 @@ find_package(hardware_interface REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
 find_package(pluginlib REQUIRED)
+find_package(gripper_hardware_common REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(EIGEN3 REQUIRED eigen3)
 
@@ -40,8 +41,10 @@ find_library(EXTERNAL_CONTROLSO NAMES "libMarvinSDK.so" PATHS ${LIB_CONTROL_DIR}
 
 # Create library
 add_library(${PROJECT_NAME} SHARED
-        src/tj2_hardware.cpp
-        src/gripper_control.cpp
+        src/marvin_hardware.cpp
+        src/grippers/gripper_control.cpp
+        src/grippers/changingtek_gripper.cpp
+        src/grippers/jd_gripper.cpp
 )
 
 add_dependencies(${PROJECT_NAME} build_marvin_sdk)
@@ -68,6 +71,7 @@ ament_target_dependencies(${PROJECT_NAME}
         rclcpp
         rclcpp_lifecycle
         pluginlib
+        gripper_hardware_common
 )
 
 # # Detect architecture and set library path

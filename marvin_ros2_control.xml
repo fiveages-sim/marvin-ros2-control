@@ -4,7 +4,7 @@
            type="marvin_ros2_control::MarvinHardware"
            base_class_type="hardware_interface::SystemInterface">
         <description>
-            TJ2 ROS2 Control Hardware Interface for single-arm control (7 DOF)
+            Marvin ROS2 Control Hardware Interface for single-arm control (7 DOF)
         </description>
     </class>
 </library>
