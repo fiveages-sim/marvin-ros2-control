@@ -123,7 +123,7 @@ hardware_interface::CallbackReturn MarvinHardware::on_init(
         // std::unique_ptr<marvin_ros2_control::ModbusGripper> gripper_ptr = std::make_unique<marvin_ros2_control::JDGripper>();
         if (robot_arm_left_right_ == static_cast<int>(RobotArmConfig::LEFT_ARM))
         {
-          gripper_ptr_.emplace_back(std::make_unique<marvin_ros2_control::JDGripper>(OnClearChDataA, OnSetChDataA));
+          gripper_ptr_.emplace_back(std::make_unique<marvin_ros2_control::JDGripper>(OnClearChDataA, OnSetChDataA, OnGetChDataA));
         }
         else
         {
@@ -146,8 +146,8 @@ hardware_interface::CallbackReturn MarvinHardware::on_init(
         //gripper_ptr_.push_back(std::move(left_gripper));
         //gripper_ptr_.push_back(std::move(right_gripper));
         gripper_ptr_.reserve(2);
-        gripper_ptr_.emplace_back(std::make_unique<marvin_ros2_control::JDGripper>(OnClearChDataA, OnSetChDataA));
-        gripper_ptr_.emplace_back(std::make_unique<marvin_ros2_control::JDGripper>(OnClearChDataB, OnSetChDataB));
+        gripper_ptr_.emplace_back(std::make_unique<marvin_ros2_control::JDGripper>(OnClearChDataA, OnSetChDataA, OnGetChDataA));
+        gripper_ptr_.emplace_back(std::make_unique<marvin_ros2_control::JDGripper>(OnClearChDataB, OnSetChDataB, OnGetChDataB));
       }
     } 
     

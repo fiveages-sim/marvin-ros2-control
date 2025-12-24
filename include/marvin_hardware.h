@@ -114,7 +114,8 @@ private:
         void setRightArmCtrl();
                 
         // Helper method to create gripper based on type
-        std::unique_ptr<ModbusGripper> createGripper(Clear485Func clear_485, Send485Func send_485);
+        std::unique_ptr<ModbusGripper> createGripper(Clear485Func clear_485, Send485Func send_485,
+                                                     GetChDataFunc get_ch_data);
         void set_tool_parameters();
 
         static double degreeToRad(const double degree)
@@ -156,6 +157,7 @@ private:
         std::vector<std::unique_ptr<marvin_ros2_control::ModbusGripper>> gripper_ptr_;
         void gripper_callback();
         bool recv_thread_func();
+        void updateGripperState(size_t gripper_idx, double position, int velocity, int torque);
         bool connect_gripper();
         void disconnect_gripper();
 

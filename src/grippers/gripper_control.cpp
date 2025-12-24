@@ -7,6 +7,7 @@ namespace marvin_ros2_control
 {
     // Initialize static logger
     rclcpp::Logger ModbusIO::logger_ = rclcpp::get_logger("modbus_io");
+    rclcpp::Logger ModbusHand::logger_ = rclcpp::get_logger("modbus_hand");
     rclcpp::Logger ModbusGripper::logger_ = rclcpp::get_logger("modbus_gripper");
 
     inline void hex_to_str(const unsigned char* data, int size, char* output, int output_size)
@@ -57,9 +58,13 @@ namespace marvin_ros2_control
     // ModbusIO Implementation
     // ==============================================
 
-    ModbusIO::ModbusIO(Clear485Func clear_485, Send485Func send_485)
-        : clear_485_(clear_485), send_485_(send_485)
+    ModbusIO::ModbusIO(Clear485Func clear_485, Send485Func send_485,
+                       GetChDataFunc on_get_ch_data)
+        : clear_485_(clear_485),
+          send_485_(send_485),
+          on_get_ch_data_(on_get_ch_data ? on_get_ch_data : OnGetChDataA)
     {
+
     }
 
     std::vector<uint16_t> ModbusIO::readRegisters(uint8_t slave_id, uint16_t start_addr,
@@ -85,7 +90,120 @@ namespace marvin_ros2_control
             RCLCPP_ERROR(logger_, "Failed to send read request");
             return {};
         }
-        std::vector<uint16_t> result = {};
+
+        // Read data using OnGetChDataA until we receive at least one frame (or attempts exhausted)
+        std::vector<uint16_t> result;
+        uint8_t data_buf[MAX_BUFFER_SIZE];
+        char hex_str1[512];
+        long set_ch1 = COM1_CHANNEL;
+
+        // Limit attempts to avoid an infinite loop, but preserve the requested read pattern
+        const int max_attempts = 50;
+        for (int attempt = 0; attempt < max_attempts; ++attempt)
+        {
+            if (!on_get_ch_data_)
+            {
+                RCLCPP_ERROR(logger_, "on_get_ch_data_ callback is null");
+                return {};
+            }
+
+            long tag = on_get_ch_data_(data_buf, &set_ch1);
+            std::this_thread::sleep_for(std::chrono::milliseconds(200)); // sleep(0.2) equivalent
+
+            if (tag >= 1)
+            {
+                hex_to_str(data_buf, static_cast<int>(tag), hex_str1, sizeof(hex_str1));
+                RCLCPP_INFO(logger_, "接收信号: %ld, 接收的HEX数据: %s", tag, hex_str1);
+
+                // Basic Modbus RTU parsing: [slave][func][byte_count][data...][crc_low][crc_high]
+                std::vector<uint8_t> response(data_buf, data_buf + static_cast<size_t>(tag));
+                if (response.size() < 5) // minimal RTU frame size
+                {
+                    continue;
+                }
+
+                // Optional: validate slave id and function code
+                if (response[0] != slave_id || response[1] != function_code)
+                {
+                    continue;
+                }
+
+                uint8_t byte_count = response[2];
+                // Ensure we have enough data bytes plus CRC
+                if (response.size() < static_cast<size_t>(3 + byte_count + 2))
+                {
+                    continue;
+                }
+
+                // Extract register values (big-endian pairs)
+                size_t reg_count = byte_count / 2;
+                result.reserve(reg_count);
+                for (size_t i = 0; i < reg_count; ++i)
+                {
+                    size_t idx = 3 + i * 2;
+                    uint16_t value = static_cast<uint16_t>(response[idx] << 8) | response[idx + 1];
+                    result.push_back(value);
+                }
+                return result;
+            }
+        }
+
+        RCLCPP_ERROR(logger_, "Modbus read timeout: no valid response after %d attempts", max_attempts);
+        return {};
+    }
+
+    bool ModbusIO::sendReadRequestAsync(uint8_t slave_id, uint16_t start_addr, uint16_t count, uint8_t function_code)
+    {
+        if (count > MAX_MODBUS_REGISTERS)
+        {
+            count = MAX_MODBUS_REGISTERS;
+            RCLCPP_WARN(logger_, "Limiting count to %zu", MAX_MODBUS_REGISTERS);
+        }
+
+        std::vector<uint8_t> data = {
+            static_cast<uint8_t>(start_addr >> 8),
+            static_cast<uint8_t>(start_addr & 0xFF),
+            static_cast<uint8_t>(count >> 8),
+            static_cast<uint8_t>(count & 0xFF)
+        };
+
+        auto request = buildRequest(slave_id, function_code, data);
+        return sendRequest(request);
+    }
+
+    std::vector<uint16_t> ModbusIO::parseModbusResponse(const uint8_t* data, size_t data_size,
+                                                        uint8_t expected_slave_id, uint8_t expected_function_code)
+    {
+        std::vector<uint16_t> result;
+        
+        if (data_size < 5) // minimal RTU frame size
+        {
+            return result;
+        }
+
+        // Validate slave id and function code
+        if (data[0] != expected_slave_id || data[1] != expected_function_code)
+        {
+            return result;
+        }
+
+        uint8_t byte_count = data[2];
+        // Ensure we have enough data bytes plus CRC
+        if (data_size < static_cast<size_t>(3 + byte_count + 2))
+        {
+            return result;
+        }
+
+        // Extract register values (big-endian pairs)
+        size_t reg_count = byte_count / 2;
+        result.reserve(reg_count);
+        for (size_t i = 0; i < reg_count; ++i)
+        {
+            size_t idx = 3 + i * 2;
+            uint16_t value = static_cast<uint16_t>(data[idx] << 8) | data[idx + 1];
+            result.push_back(value);
+        }
+        
         return result;
     }
 
@@ -148,7 +266,7 @@ namespace marvin_ros2_control
     {
         char debug_str[512];
         hex_to_str(request.data(), request.size(), debug_str, sizeof(debug_str));
-        RCLCPP_DEBUG(logger_, "Sending: %s", debug_str);
+        RCLCPP_INFO(logger_, "Sending: %s", debug_str);
 
         return send_485_((uint8_t*)request.data(), static_cast<long>(request.size()), COM1_CHANNEL);
     }
@@ -164,6 +282,7 @@ namespace marvin_ros2_control
 
             if (received > 0)
             {
+                std::cout << "Received gripper message " << received << std::endl;
                 std::vector<uint8_t> response(buffer, buffer + received);
                 return response;
             }

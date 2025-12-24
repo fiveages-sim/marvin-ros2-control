@@ -5,6 +5,11 @@
 #include <iomanip>
 #include <sstream>
 
+// Gripper hardware common utilities
+#include "gripper_hardware_common/utils/JodellCommandBuilder.h"
+#include "gripper_hardware_common/utils/ModbusConfig.h"
+#include "gripper_hardware_common/utils/PositionConverter.h"
+
 namespace marvin_ros2_control
 {
     // Initialize static logger
@@ -76,6 +81,7 @@ namespace marvin_ros2_control
             RCLCPP_ERROR(logger_, "Failed to send read request");
             return {};
         }
+        while()
         std::vector<uint16_t> result = {};
         return result;
     }
@@ -131,7 +137,7 @@ namespace marvin_ros2_control
 
     bool ModbusIO::sendRequest(const std::vector<uint8_t>& request) {
         char debug_str[512];
-        hex_to_str(request.data(), request.size(), debug_str, sizeof(debug_str));
+        hex_to_str(request.daSending:ta(), request.size(), debug_str, sizeof(debug_str));
         RCLCPP_DEBUG(logger_, "Sending: %s", debug_str);
         
         return send_485_((uint8_t*)request.data(), static_cast<long>(request.size()), COM1_CHANNEL);
@@ -142,10 +148,10 @@ namespace marvin_ros2_control
         
         for (int attempt = 0; attempt < max_attempts; attempt++) {
             long channel = COM1_CHANNEL;
-            int received = OnGetChDataA(buffer, &channel);
+            long received = OnGetChDataA(buffer, &channel);
             
             if (received > 0) {
-                std::vector<uint8_t> response(buffer, buffer + received);
+                std::vector<uint8_t> response(buffer, buffer + static_cast<size_t>(received));
                 return response;
             }
             
@@ -192,150 +198,63 @@ namespace marvin_ros2_control
     }
 
     // ==============================================
-    // ZXGripper Implementation
-    // ==============================================
-
-    ZXGripper::ZXGripper(Clear485Func clear_485, Send485Func send_485)
-        : ModbusGripper(clear_485, send_485), acceleration_set_(false), deceleration_set_(false) {
-    }
-
-    bool ZXGripper::initialize() {
-        acceleration_set_ = true;
-        deceleration_set_ = true;
-        
-        RCLCPP_INFO(logger_, "Initializing ZX Gripper (slave: 0x%02X)", SLAVE_ID);
-        return true;
-        // return writeSingleRegister(SLAVE_ID, INIT_REGISTER, INIT_VALUE,
-        //                           WRITE_SINGLE_FUNCTION);
-    }
-
-    bool ZXGripper::move_gripper(int torque, int velocity, int position) {
-        RCLCPP_INFO(logger_, "ZX Gripper moving - pos: %d, vel: %d, trq: %d", 
-                   position, velocity, torque);
-        
-        // Prepare values
-        uint16_t vel_value = static_cast<uint16_t>(velocity & 0xFFFF);
-        uint16_t trq_value = static_cast<uint16_t>(torque & 0xFFFF);
-        uint16_t pos_low = 0x0000;
-        uint16_t pos_high = static_cast<uint16_t>(position & 0xFFFF);
-        
-        std::vector<uint16_t> position_values = {pos_low, pos_high};
-        
-        bool result = true;
-        
-        // Write position (two registers)
-        result = writeMultipleRegisters(SLAVE_ID, POSITION_REG_LOW, position_values,
-                                       WRITE_MULTIPLE_FUNCTION) && result;
-        RCLCPP_INFO(logger_, "ZX Gripper moving - SLAVE_ID: %d, vel: %d, trq: %d", 
-            SLAVE_ID, POSITION_REG_LOW, result);
-            
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        // Configure acceleration if not set
-        if (!acceleration_set_) {
-            result = writeSingleRegister(SLAVE_ID, ACCELERATION_REG, DEFAULT_ACCELERATION,
-                                        WRITE_SINGLE_FUNCTION) && result;
-            acceleration_set_ = true;
-            
-            // Write velocity
-            result = writeSingleRegister(SLAVE_ID, VELOCITY_REG, vel_value,
-                                        WRITE_SINGLE_FUNCTION) && result;
-            
-            // Write torque
-            result = writeSingleRegister(SLAVE_ID, TORQUE_REG, trq_value,
-                                        WRITE_SINGLE_FUNCTION) && result;
-        }
-        
-        // Configure deceleration if not set
-        if (!deceleration_set_) {
-            result = writeSingleRegister(SLAVE_ID, DECELERATION_REG, DEFAULT_DECELERATION,
-                                        WRITE_SINGLE_FUNCTION) && result;
-            deceleration_set_ = true;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        // Trigger movement
-        result = writeSingleRegister(SLAVE_ID, TRIGGER_REG, TRIGGER_VALUE,
-                                    WRITE_SINGLE_FUNCTION) && result;
-        
-        return result;
-    }
-
-    bool ZXGripper::getStatus(int& torque, int& velocity, int& position) {
-        std::vector<uint16_t> response = readRegisters(SLAVE_ID, STATUS_REG, 2,
-                                                      READ_FUNCTION);
-        
-        bool success = response.size() >= 2;
-        
-        if (success) {
-            position = (static_cast<int32_t>(response[0]) << 16) | response[1];
-            velocity = 0;
-            torque = 0;
-        }
-        
-        return success;
-    }
-
-    void ZXGripper::deinitialize() {
-        acceleration_set_ = false;
-        deceleration_set_ = false;
-        RCLCPP_INFO(logger_, "ZX Gripper deinitialized");
-    }
-
-    void ZXGripper::resetState() {
-        acceleration_set_ = false;
-        deceleration_set_ = false;
-    }
-
-    // ==============================================
     // JDGripper Implementation
     // ==============================================
 
-    JDGripper::JDGripper(Clear485Func clear_485, Send485Func send_485)
-        : ModbusGripper(clear_485, send_485) {
+    JDGripper::JDGripper(Clear485Func clear_485, Send485Func send_485,
+                         GetChDataFunc on_get_ch_data)
+        : ModbusGripper(clear_485, send_485, on_get_ch_data) {
     }
 
     bool JDGripper::initialize() {
-        
-        RCLCPP_INFO(logger_, "Initializing ZX Gripper (slave: 0x%02X)", SLAVE_ID);
-        std::vector<uint16_t> init_value_vector = {INIT_VALUE};
-        return writeMultipleRegisters(SLAVE_ID, INIT_REGISTER, init_value_vector,
-                                  WRITE_MULTIPLE_FUNCTION);
+        RCLCPP_INFO(logger_, "Initializing JD Gripper (slave: 0x%02X)", Jodell::SLAVE_ADDRESS);
+        std::vector<uint16_t> init_value_vector = {0x0000};  // Initialization value
+        return writeMultipleRegisters(Jodell::SLAVE_ADDRESS, Jodell::INIT_REG_ADDR, init_value_vector,
+                                  Jodell::WRITE_FUNCTION);
     }
 
     /// input torque is uint8_t
     /// input velocity is uint8_t
-    /// input position is uint8_t
-    bool JDGripper::move_gripper(int trq_set, int vel_set, int pos_set) {
-        RCLCPP_INFO(logger_, "ZX Gripper moving - pos: %d, vel: %d, trq: %d", 
-                   pos_set, vel_set, trq_set);
-        /// fill in data seciont
-        uint16_t trigger = 0x09;
-        uint16_t position = pos_set << 8;
-        uint16_t speed_force = trq_set << 8 | vel_set;
-        std::vector<uint16_t> position_values = {};
-        position_values.push_back(trigger);
-        position_values.push_back(position);
-        position_values.push_back(speed_force);
+    /// input position is normalized (0.0=closed, 1.0=open)
+    bool JDGripper::move_gripper(int trq_set, int vel_set, double normalized_pos) {
+        using namespace gripper_hardware_common;
+        using namespace gripper_hardware_common::ModbusConfig;
         
-        bool result = true;
-        // Write position (two registers)
-        result = writeMultipleRegisters(SLAVE_ID,POSITION_REG,position_values,
-                                       WRITE_MULTIPLE_FUNCTION);
+        // Convert normalized position to Jodell position (0-255)
+        int pos_set = PositionConverter::Jodell::normalizedToJodell(normalized_pos);
+        
+        RCLCPP_INFO(logger_, "JD Gripper moving - normalized: %.3f (jodell: %d), vel: %d, trq: %d", 
+                   normalized_pos, pos_set, vel_set, trq_set);
+        
+        // Use JodellCommandBuilder to build the command
+        auto position_values = JodellCommandBuilder::buildCommand(pos_set, trq_set, vel_set);
+        
+        // Write position command using ModbusConfig constants
+        bool result = writeMultipleRegisters(Jodell::SLAVE_ADDRESS, Jodell::POSITION_REG_ADDR, 
+                                            position_values, Jodell::WRITE_FUNCTION);
         
         return result;
     }
 
-    bool JDGripper::getStatus(int& torque, int& velocity, int& position) {
-        std::vector<uint16_t> response = readRegisters(SLAVE_ID, STATUS_REG, READ_REG_NUM,
-                                                      READ_FUNCTION);
+    bool JDGripper::getStatus(int& torque, int& velocity, double& position) {
+        using namespace gripper_hardware_common;
+        using namespace gripper_hardware_common::ModbusConfig;
         
-        bool success = true;
-        // bool success = response.size() >= 2;
+        std::vector<uint16_t> response = readRegisters(Jodell::SLAVE_ADDRESS, Jodell::STATUS_REG_ADDR, 
+                                                      Jodell::STATUS_REG_COUNT, Jodell::READ_FUNCTION);
         
-        // if (success) {
-        //     position = (static_cast<int32_t>(response[0]) << 16) | response[1];
-        //     velocity = 0;
-        //     torque = 0;
-        // }
+        bool success = response.size() >= Jodell::STATUS_REG_COUNT;
+        
+        if (success) {
+            // Extract position from status register (high byte of register 1)
+            int status_reg_high = static_cast<int>(response[1] >> 8);
+            // Convert Jodell position to normalized (0.0=closed, 1.0=open)
+            position = PositionConverter::Jodell::jodellToNormalized(status_reg_high);
+            // Extract velocity from status register (low byte of register 2)
+            velocity = static_cast<int>(response[2] & 0xFF);
+            // Extract torque from status register (high byte of register 2)
+            torque = static_cast<int>(response[2] >> 8);
+        }
         return success;
     }
 }

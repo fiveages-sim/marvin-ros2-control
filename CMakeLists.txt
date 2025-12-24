@@ -43,8 +43,8 @@ find_library(EXTERNAL_CONTROLSO NAMES "libMarvinSDK.so" PATHS ${LIB_CONTROL_DIR}
 add_library(${PROJECT_NAME} SHARED
         src/marvin_hardware.cpp
         src/grippers/gripper_control.cpp
-        src/grippers/changingtek_gripper.cpp
         src/grippers/jd_gripper.cpp
+        src/grippers/dexterous_hand_gripper.cpp
 )
 
 add_dependencies(${PROJECT_NAME} build_marvin_sdk)

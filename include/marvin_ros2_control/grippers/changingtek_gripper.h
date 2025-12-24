@@ -2,41 +2,42 @@
 
 #include "marvin_ros2_control/grippers/gripper_control.h"
 #include "gripper_hardware_common/ChangingtekGripper.h"
+#include "gripper_hardware_common/utils/ModbusConfig.h"
 
 namespace marvin_ros2_control
 {
     /**
-     * @brief Changingtek Gripper implementation for Marvin robots
+     * @brief Template Changingtek Gripper implementation for Marvin robots
      * 
-     * Uses gripper_hardware_common utilities for position conversion,
-     * command change detection, and Modbus configuration.
+     * Common implementation for all Changingtek Gripper variants.
+     * Configuration is specified as a template parameter from ModbusConfig.
+     * 
+     * @tparam Config Modbus configuration struct (e.g., ModbusConfig::Changingtek90C, ModbusConfig::Changingtek90D)
      */
+    template<typename Config>
     class ChangingtekGripper : public ModbusGripper
     {
     public:
-        ChangingtekGripper(Clear485Func clear_485, Send485Func send_485);
+        ChangingtekGripper(Clear485Func clear_485, Send485Func send_485,
+                           GetChDataFunc on_get_ch_data = nullptr);
         bool initialize() override;
-        bool move_gripper(int torque, int velocity, int position) override;
-        bool getStatus(int& torque, int& velocity, int& position) override;
+        bool move_gripper(int torque, int velocity, double position) override;
+        bool getStatus() override;
+        void updateStatusFromResponse(const std::vector<uint16_t>& registers) override;
+        bool processReadResponse(const uint8_t* data, size_t data_size,
+                                int& torque, int& velocity, double& position) override;
         void deinitialize() override;
         void resetState() override;
 
     private:
         bool acceleration_set_;
         bool deceleration_set_;
-        double last_command_;  // Store last normalized command for change detection
-
-        // Changingtek-specific registers (not in common config)
-        static constexpr uint16_t INIT_REGISTER = 0x0100;
-        static constexpr uint16_t INIT_VALUE = 0x0001;
-        static constexpr uint16_t POSITION_REG_HIGH = 0x0103;  // POS_REG_ADDR + 1
-        static constexpr uint16_t VELOCITY_REG = 0x0104;
-        static constexpr uint16_t TORQUE_REG = 0x0105;
-        static constexpr uint16_t ACCELERATION_REG = 0x0106;
-        static constexpr uint16_t DECELERATION_REG = 0x0107;
-        static constexpr uint16_t DEFAULT_ACCELERATION = 2000;
-        static constexpr uint16_t DEFAULT_DECELERATION = 2000;
-        static constexpr uint16_t TRIGGER_VALUE = 0x0001;
     };
+
+    // Type aliases for specific variants
+    using ChangingtekGripper90C = ChangingtekGripper<gripper_hardware_common::ModbusConfig::Changingtek90C>;
+    using ChangingtekGripper90D = ChangingtekGripper<gripper_hardware_common::ModbusConfig::Changingtek90D>;
 } // namespace marvin_ros2_control
 
+// Include template implementation
+#include "marvin_ros2_control/grippers/changingtek_gripper_impl.h"
