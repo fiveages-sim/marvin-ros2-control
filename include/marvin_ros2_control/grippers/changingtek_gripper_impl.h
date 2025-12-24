@@ -114,15 +114,6 @@ namespace marvin_ros2_control
     bool ChangingtekGripper<Config>::processReadResponse(const uint8_t* data, size_t data_size,
                                                          int& torque, int& velocity, double& position)
     {
-        // Print received data in hex string format
-        char hex_str[512];
-        int pos = 0;
-        for (size_t i = 0; i < data_size && pos < sizeof(hex_str) - 3; i++)
-        {
-            pos += sprintf(hex_str + pos, "%02X ", data[i]);
-        }
-        RCLCPP_INFO(logger_, "Received response (size=%zu): %s", data_size, hex_str);
-        
         // if (data_size < 3)
         // {
         //     return false;

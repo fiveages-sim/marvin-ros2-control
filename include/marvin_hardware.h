@@ -132,8 +132,8 @@ private:
                                     double max_joint_speed, double max_joint_acceleration,
                                     const std::vector<double>& joint_k_gains,
                                     const std::vector<double>& joint_d_gains,
-                                        const std::vector<double>& cart_k_gains,
-                                        const std::vector<double>& cart_d_gains);
+                                    const std::vector<double>& cart_k_gains,
+                                    const std::vector<double>& cart_d_gains);
         void declare_node_parameters();
 
         

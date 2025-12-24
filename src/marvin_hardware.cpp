@@ -32,8 +32,8 @@ namespace marvin_ros2_control
 
     void MarvinHardware::declare_node_parameters()
     {
-        // Robot operation mode: 1=Position, 2=Joint Impedance, 3=Cartesian Impedance
-        node_->declare_parameter<int>("mode", 2);
+        // Robot operation mode: "POSITION", "JOINT_IMPEDANCE", "CART_IMPEDANCE"
+        node_->declare_parameter<std::string>("ctrl_mode", "POSITION");
         // Arm side: 0=left, 1=right, 2=dual (both)
         node_->declare_parameter<int>("arm_side", 2);
         // Drag mode: -1=don't update, 0=disable, 1=joint space drag, 2=cartesian space drag
@@ -56,11 +56,17 @@ namespace marvin_ros2_control
         node_->declare_parameter<double>("max_velocity", 10.0);
         node_->declare_parameter<double>("max_acceleration", 10.0);
         node_->declare_parameter<bool>("use_drag_mode", false);
-        node_->declare_parameter<std::string>("ctrl_mode", robot_ctrl_mode_);
         node_->declare_parameter<std::vector<double>>("joint_imp_gain", std::vector<double>{2,2,2,1.6,1,1,1});
         node_->declare_parameter<std::vector<double>>("joint_imp_damp", std::vector<double>{0.4,0.4,0.4,0.4,0.4,0.4,0.4});
         node_->declare_parameter<std::vector<double>>("cart_imp_gain", std::vector<double>{500,500,500,10,10,10,0});
         node_->declare_parameter<std::vector<double>>("cart_imp_damp", std::vector<double>{0.1,0.1,0.1,0.3,0.3,1});
+        
+        // Gripper tool parameters - declared as std::vector<double> (array of doubles)
+        // kineParam: kinematic parameters (6 values), dynPara: dynamic parameters (10 values)
+        node_->declare_parameter<std::vector<double>>("left_kine_param", std::vector<double>{0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+        node_->declare_parameter<std::vector<double>>("left_dyn_param", std::vector<double>{2.0, 0.0, 0.0, 96.411347, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+        node_->declare_parameter<std::vector<double>>("right_kine_param", std::vector<double>{0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+        node_->declare_parameter<std::vector<double>>("right_dyn_param", std::vector<double>{1.8, 0.0, 0.0, 96.411347, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
     }
     hardware_interface::CallbackReturn MarvinHardware::on_init(
         const hardware_interface::HardwareComponentInterfaceParams& params)
@@ -133,9 +139,8 @@ namespace marvin_ros2_control
             robot_arm_index_ = ARM_LEFT;
         }
 
-        // 获取控制模式参数
-        std::string ctrl_mode_raw = get_param("ctrl_mode", "POSITION");
-        robot_ctrl_mode_ = normalizeString(ctrl_mode_raw);
+        // Control mode will be read from ROS2 parameter ctrl_mode ("POSITION", "JOINT_IMPEDANCE", "CART_IMPEDANCE")
+        // after declare_node_parameters() is called
 
         // 获取夹爪类型参数
         std::string gripper_type_raw = get_param("gripper_type", "");
@@ -170,114 +175,160 @@ namespace marvin_ros2_control
         max_velocity_ = std::stod(get_param("max_velocity", "10.0"));
         max_acceleration_ = std::stod(get_param("max_acceleration", "10.0"));
    
-    RCLCPP_INFO(get_logger(), "Initializing %zu joints", num_joints);
+        RCLCPP_INFO(get_logger(), "Initializing %zu joints", num_joints);
 
-    // Resize all arrays based on the number of joints
-    hw_position_commands_.resize(num_joints, 0.0);
-    hw_velocity_commands_.resize(num_joints, 0.0);
-    hw_position_states_.resize(num_joints, 0.0);
-    hw_velocity_states_.resize(num_joints, 0.0);
-    hw_effort_states_.resize(num_joints, 0.0);
+        // Resize all arrays based on the number of joints
+        hw_position_commands_.resize(num_joints, 0.0);
+        hw_velocity_commands_.resize(num_joints, 0.0);
+        hw_position_states_.resize(num_joints, 0.0);
+        hw_velocity_states_.resize(num_joints, 0.0);
+        hw_effort_states_.resize(num_joints, 0.0);
 
-    // 初始化夹爪参数 如果有的话
+        // 初始化夹爪参数 如果有的话
         // 只有当 gripper_type 不为空且不为 "none" 时才考虑夹爪配置
-    has_gripper_ = false;
-    gripper_joint_index_ = -1;
-    gripper_initilized_ = false;
-    gripper_joint_name_ = {};
+        has_gripper_ = false;
+        gripper_joint_index_ = -1;
+        gripper_initilized_ = false;
+        gripper_joint_name_ = {};
         
         // 无论是否有夹爪，都需要调用contains_gripper()来填充joint_names_向量
         // 该函数会根据gripper_type_决定是否检测夹爪关节，并将非夹爪关节添加到joint_names_中
-    contains_gripper();
-    RCLCPP_INFO(get_logger(), "has_gripper_: %d", has_gripper_);
-    RCLCPP_INFO(get_logger(), "gripper_type_: %s", gripper_type_.c_str());
-    if (has_gripper_ && !gripper_type_.empty() && gripper_type_ != "NONE")
-    {
+        contains_gripper();
+        RCLCPP_INFO(get_logger(), "has_gripper_: %d", has_gripper_);
         RCLCPP_INFO(get_logger(), "gripper_type_: %s", gripper_type_.c_str());
-        if (robot_arm_index_ == ARM_LEFT || robot_arm_index_ == ARM_RIGHT)
+        
+        if (has_gripper_ && !gripper_type_.empty() && gripper_type_ != "NONE")
         {
-            gripper_position_command_ = {-1.0};
-            gripper_position_ = {0.0};
-            gripper_velocity_ = {0.0};
-            gripper_effort_ = {0.0};
-            last_gripper_command_ = {-1.0};
-            last_gripper_position_ = {-1.0};
-            gripper_stopped_ = {true};
-            step_size_ = {0.0};
-            gripper_ptr_.reserve(1);
-            if (robot_arm_index_ == ARM_LEFT)
+            RCLCPP_INFO(get_logger(), "gripper_type_: %s", gripper_type_.c_str());
+            if (robot_arm_index_ == ARM_LEFT || robot_arm_index_ == ARM_RIGHT)
             {
-            gripper_ptr_.emplace_back(createGripper(OnClearChDataA, OnSetChDataA, OnGetChDataA));
-            }
-            else
-            {
-            gripper_ptr_.emplace_back(createGripper(OnClearChDataB, OnSetChDataB, OnGetChDataB));
-            }
-        }
-        else if (robot_arm_index_ == ARM_DUAL)
-        {
-            gripper_position_command_ = {-1.0, -1.0};
-            if (has_gripper_ && !gripper_type_.empty() && gripper_type_ != "NONE")
-            {
-                if (robot_arm_index_ == ARM_LEFT || robot_arm_index_ == ARM_RIGHT)
+                gripper_position_command_ = {-1.0};
+                gripper_position_ = {0.0};
+                gripper_velocity_ = {0.0};
+                gripper_effort_ = {0.0};
+                last_gripper_command_ = {-1.0};
+                last_gripper_position_ = {-1.0};
+                gripper_stopped_ = {true};
+                step_size_ = {0.0};
+                gripper_ptr_.reserve(1);
+                if (robot_arm_index_ == ARM_LEFT)
                 {
-                    gripper_position_command_ = {-1.0};
-                    gripper_position_ = {0.0};
-                    gripper_velocity_ = {0.0};
-                    gripper_effort_ = {0.0};
-                    last_gripper_command_ = {-1.0};
-                    last_gripper_position_ = {-1.0};
-                    gripper_stopped_ = {true};
-                    step_size_ = {0.0};
-                    gripper_ptr_.reserve(1);
-                    if (robot_arm_index_ == ARM_LEFT)
-                    {
                     gripper_ptr_.emplace_back(createGripper(OnClearChDataA, OnSetChDataA, OnGetChDataA));
-                    }
-                    else
-                    {
-                    gripper_ptr_.emplace_back(createGripper(OnClearChDataB, OnSetChDataB, OnGetChDataB));
-                    }
                 }
-                else if (robot_arm_index_ == ARM_DUAL)
+                else
                 {
-                    gripper_position_command_ = {-1.0, -1.0};
-                    gripper_position_ = {0.0, 0.0};
-                    gripper_velocity_ = {0.0, 0.0};
-                    gripper_effort_ = {0.0, 0.0};
-                    last_gripper_command_ = {-1.0, -1.0};
-                    last_gripper_position_ = {-1.0, -1.0};
-                    gripper_stopped_ = {true, true};
-                    step_size_ = {0.0, 0.0};
-                    gripper_ptr_.reserve(2);
-                    gripper_ptr_.emplace_back(createGripper(OnClearChDataA, OnSetChDataA, OnGetChDataA));
                     gripper_ptr_.emplace_back(createGripper(OnClearChDataB, OnSetChDataB, OnGetChDataB));
                 }
-            } 
-            gripper_position_ = {0.0, 0.0};
-            gripper_velocity_ = {0.0, 0.0};
-            gripper_effort_ = {0.0, 0.0};
-            last_gripper_command_ = {-1.0, -1.0};
-            last_gripper_position_ = {-1.0, -1.0};
-            gripper_stopped_ = {true, true};
-            step_size_ = {0.0, 0.0};
-            gripper_ptr_.reserve(2);
-            gripper_ptr_.emplace_back(createGripper(OnClearChDataA, OnSetChDataA, OnGetChDataA));
-            gripper_ptr_.emplace_back(createGripper(OnClearChDataB, OnSetChDataB, OnGetChDataB));
+            }
+            else if (robot_arm_index_ == ARM_DUAL)
+            {
+                gripper_position_command_ = {-1.0, -1.0};
+                if (has_gripper_ && !gripper_type_.empty() && gripper_type_ != "NONE")
+                {
+                    if (robot_arm_index_ == ARM_LEFT || robot_arm_index_ == ARM_RIGHT)
+                    {
+                        gripper_position_command_ = {-1.0};
+                        gripper_position_ = {0.0};
+                        gripper_velocity_ = {0.0};
+                        gripper_effort_ = {0.0};
+                        last_gripper_command_ = {-1.0};
+                        last_gripper_position_ = {-1.0};
+                        gripper_stopped_ = {true};
+                        step_size_ = {0.0};
+                        gripper_ptr_.reserve(1);
+                        if (robot_arm_index_ == ARM_LEFT)
+                        {
+                            gripper_ptr_.emplace_back(createGripper(OnClearChDataA, OnSetChDataA, OnGetChDataA));
+                        }
+                        else
+                        {
+                            gripper_ptr_.emplace_back(createGripper(OnClearChDataB, OnSetChDataB, OnGetChDataB));
+                        }
+                    }
+                    else if (robot_arm_index_ == ARM_DUAL)
+                    {
+                        gripper_position_command_ = {-1.0, -1.0};
+                        gripper_position_ = {0.0, 0.0};
+                        gripper_velocity_ = {0.0, 0.0};
+                        gripper_effort_ = {0.0, 0.0};
+                        last_gripper_command_ = {-1.0, -1.0};
+                        last_gripper_position_ = {-1.0, -1.0};
+                        gripper_stopped_ = {true, true};
+                        step_size_ = {0.0, 0.0};
+                        gripper_ptr_.reserve(2);
+                        gripper_ptr_.emplace_back(createGripper(OnClearChDataA, OnSetChDataA, OnGetChDataA));
+                        gripper_ptr_.emplace_back(createGripper(OnClearChDataB, OnSetChDataB, OnGetChDataB));
+                    }
+                } 
+                gripper_position_ = {0.0, 0.0};
+                gripper_velocity_ = {0.0, 0.0};
+                gripper_effort_ = {0.0, 0.0};
+                last_gripper_command_ = {-1.0, -1.0};
+                last_gripper_position_ = {-1.0, -1.0};
+                gripper_stopped_ = {true, true};
+                step_size_ = {0.0, 0.0};
+                gripper_ptr_.reserve(2);
+                gripper_ptr_.emplace_back(createGripper(OnClearChDataA, OnSetChDataA, OnGetChDataA));
+                gripper_ptr_.emplace_back(createGripper(OnClearChDataB, OnSetChDataB, OnGetChDataB));
+            }
         }
-    } 
-    
+        
         // Initialize hardware connection status
         hardware_connected_ = false;
         simulation_active_ = false;
         declare_node_parameters();
+        
+        // Read ctrl_mode parameter and set robot_ctrl_mode_ string accordingly
+        std::string ctrl_mode_raw = node_->get_parameter("ctrl_mode").as_string();
+        robot_ctrl_mode_ = normalizeString(ctrl_mode_raw);
+        RCLCPP_INFO(get_logger(), "Robot control mode set to: %s (from ctrl_mode parameter: %s)", robot_ctrl_mode_.c_str(), ctrl_mode_raw.c_str());
+        
+        // Initialize kineParam and dynPara - read from node parameters (declared above)
+        std::vector<double> default_left_kine = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+        std::vector<double> default_left_dyn = {2.0, 0.0, 0.0, 96.411347, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+        std::vector<double> default_right_kine = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+        std::vector<double> default_right_dyn = {1.8, 0.0, 0.0, 96.411347, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+        
+        // Read from node parameters (already declared as std::vector<double> in declare_node_parameters)
+        leftkineParam_ = node_->get_parameter("left_kine_param").as_double_array();
+        if (leftkineParam_.size() != 6) leftkineParam_.resize(6, 0.0);
+        
+        leftdynParam_ = node_->get_parameter("left_dyn_param").as_double_array();
+        if (leftdynParam_.size() != 10)
+        {
+            if (has_gripper_ && !gripper_type_.empty() && gripper_type_ != "NONE")
+            {
+                leftdynParam_ = default_left_dyn;
+            }
+            else
+            {
+                leftdynParam_.resize(10, 0.0);
+            }
+        }
+        
+        rightkineParam_ = node_->get_parameter("right_kine_param").as_double_array();
+        if (rightkineParam_.size() != 6) rightkineParam_.resize(6, 0.0);
+        
+        rightdynParam_ = node_->get_parameter("right_dyn_param").as_double_array();
+        if (rightdynParam_.size() != 10)
+        {
+            if (has_gripper_ && !gripper_type_.empty() && gripper_type_ != "NONE")
+            {
+                rightdynParam_ = default_right_dyn;
+            }
+            else
+            {
+                rightdynParam_.resize(10, 0.0);
+            }
+        }
+        
         param_callback_handle_ = node_->add_on_set_parameters_callback(
                 std::bind(&MarvinHardware::paramCallback, this, std::placeholders::_1));
         RCLCPP_INFO(get_logger(), "Robot configuration parameters ready. Use 'ros2 param set' to change configuration dynamically.");
             
         RCLCPP_INFO(get_logger(), "Marvin Hardware Interface initialized successfully");
         return hardware_interface::CallbackReturn::SUCCESS;
-}
+    }
 
 rcl_interfaces::msg::SetParametersResult
 MarvinHardware::paramCallback(const std::vector<rclcpp::Parameter> & params)
@@ -293,7 +344,8 @@ MarvinHardware::paramCallback(const std::vector<rclcpp::Parameter> & params)
 
     // Track if we need to apply configuration
     bool need_config_update = false;
-    int mode = -1;
+    bool ctrl_mode_changed = false;
+    std::string ctrl_mode = "";
     int arm_side = -1;
     int drag_mode = -1;
     int cart_type = -1;
@@ -305,15 +357,19 @@ MarvinHardware::paramCallback(const std::vector<rclcpp::Parameter> & params)
     std::vector<double> cart_d_gains;
 
     for (const auto & param : params) {
-        if (param.get_name() == "mode") {
-            mode = param.as_int();
-            if (mode <= 0 || mode > 3) {
+        if (param.get_name() == "ctrl_mode") {
+            std::string ctrl_mode_str = param.as_string();
+            std::string normalized_mode = normalizeString(ctrl_mode_str);
+            if (normalized_mode != "POSITION" && normalized_mode != "JOINT_IMPEDANCE" && normalized_mode != "CART_IMPEDANCE") {
                 result.successful = false;
-                result.reason = "Invalid mode. Must be 1 (Position), 2 (Joint Impedance), or 3 (Cartesian Impedance)";
+                result.reason = "Invalid ctrl_mode. Must be 'POSITION', 'JOINT_IMPEDANCE', or 'CART_IMPEDANCE'";
                 return result;
             }
+            ctrl_mode = normalized_mode;
+            robot_ctrl_mode_ = normalized_mode;
             need_config_update = true;
-            RCLCPP_INFO(get_logger(), "Mode parameter changed to: %d", mode);
+            ctrl_mode_changed = true;
+            RCLCPP_INFO(get_logger(), "ctrl_mode parameter changed to: %s", normalized_mode.c_str());
         }
         else if (param.get_name() == "arm_side") {
             arm_side = param.as_int();
@@ -388,23 +444,82 @@ MarvinHardware::paramCallback(const std::vector<rclcpp::Parameter> & params)
             }
             need_config_update = true;
         }
-        // Legacy parameter handling
-        else if (param.get_name() == "ctrl_mode") {
-            int legacy_mode = param.as_int();
-            // Map legacy ctrl_mode to new mode: 2=position(1), 3=joint_imp(2), 4=cart_imp(3)
-            if (legacy_mode == 2) mode = 1;
-            else if (legacy_mode == 3) mode = 2;
-            else if (legacy_mode == 4) mode = 3;
-            need_config_update = true;
-            RCLCPP_WARN(get_logger(), "Using legacy ctrl_mode parameter. Consider using 'mode' instead.");
+        else if (param.get_name() == "left_dyn_param") {
+            std::vector<double> new_left_dyn = param.as_double_array();
+            if (new_left_dyn.size() != 10) {
+                result.successful = false;
+                result.reason = "left_dyn_param must have exactly 10 values";
+                return result;
+            }
+            leftdynParam_ = new_left_dyn;
+            RCLCPP_INFO(get_logger(), "Left dynParam updated via parameter");
+            // Update the tool parameters on the hardware
+            if (robot_arm_index_ == ARM_LEFT || robot_arm_index_ == ARM_DUAL) {
+                setLeftArmCtrl();
+            }
+        }
+        else if (param.get_name() == "right_dyn_param") {
+            std::vector<double> new_right_dyn = param.as_double_array();
+            if (new_right_dyn.size() != 10) {
+                result.successful = false;
+                result.reason = "right_dyn_param must have exactly 10 values";
+                return result;
+            }
+            rightdynParam_ = new_right_dyn;
+            RCLCPP_INFO(get_logger(), "Right dynParam updated via parameter");
+            // Update the tool parameters on the hardware
+            if (robot_arm_index_ == ARM_RIGHT || robot_arm_index_ == ARM_DUAL) {
+                setRightArmCtrl();
+            }
+        }
+        else if (param.get_name() == "left_kine_param") {
+            std::vector<double> new_left_kine = param.as_double_array();
+            if (new_left_kine.size() != 6) {
+                result.successful = false;
+                result.reason = "left_kine_param must have exactly 6 values";
+                return result;
+            }
+            leftkineParam_ = new_left_kine;
+            RCLCPP_INFO(get_logger(), "Left kineParam updated via parameter");
+        }
+        else if (param.get_name() == "right_kine_param") {
+            std::vector<double> new_right_kine = param.as_double_array();
+            if (new_right_kine.size() != 6) {
+                result.successful = false;
+                result.reason = "right_kine_param must have exactly 6 values";
+                return result;
+            }
+            rightkineParam_ = new_right_kine;
+            RCLCPP_INFO(get_logger(), "Right kineParam updated via parameter");
         }
     }
 
     // Apply configuration if needed
     if (need_config_update) {
+        // Convert string ctrl_mode to integer mode locally
+        int mode = -1;
+        if (!ctrl_mode.empty()) {
+            if (ctrl_mode == "POSITION") {
+                mode = 1;
+            } else if (ctrl_mode == "JOINT_IMPEDANCE") {
+                mode = 2;
+            } else if (ctrl_mode == "CART_IMPEDANCE") {
+                mode = 3;
+            }
+        }
         applyRobotConfiguration(mode, arm_side, drag_mode, cart_type, 
                               max_joint_speed, max_joint_acceleration,
                               joint_k_gains, joint_d_gains, cart_k_gains, cart_d_gains);
+        
+        // If ctrl_mode changed, update the arm control mode by calling setLeftArmCtrl/setRightArmCtrl
+        if (ctrl_mode_changed) {
+            if (robot_arm_index_ == ARM_LEFT || robot_arm_index_ == ARM_DUAL) {
+                setLeftArmCtrl();
+            }
+            if (robot_arm_index_ == ARM_RIGHT || robot_arm_index_ == ARM_DUAL) {
+                setRightArmCtrl();
+            }
+        }
     }
 
     return result;
@@ -419,7 +534,26 @@ void MarvinHardware::applyRobotConfiguration(int mode, int arm_side, int drag_mo
 {
     // Get current parameter values if not provided
     if (mode == -1) {
-        mode = node_->get_parameter("mode").as_int();
+        std::string ctrl_mode_str = node_->get_parameter("ctrl_mode").as_string();
+        std::string normalized_mode = normalizeString(ctrl_mode_str);
+        if (normalized_mode == "POSITION") {
+            mode = 1;
+        } else if (normalized_mode == "JOINT_IMPEDANCE") {
+            mode = 2;
+        } else if (normalized_mode == "CART_IMPEDANCE") {
+            mode = 3;
+        } else {
+            RCLCPP_WARN(get_logger(), "Invalid ctrl_mode value: %s, defaulting to POSITION", ctrl_mode_str.c_str());
+            mode = 1;
+        }
+    }
+    // Update robot_ctrl_mode_ to match the mode we're applying
+    if (mode == 1) {
+        robot_ctrl_mode_ = "POSITION";
+    } else if (mode == 2) {
+        robot_ctrl_mode_ = "JOINT_IMPEDANCE";
+    } else if (mode == 3) {
+        robot_ctrl_mode_ = "CART_IMPEDANCE";
     }
     if (arm_side == -1) {
         arm_side = node_->get_parameter("arm_side").as_int();
@@ -473,8 +607,6 @@ void MarvinHardware::applyRobotConfiguration(int mode, int arm_side, int drag_mo
         }
         OnSetSend();
         usleep(100000);
-        
-        robot_ctrl_mode_ = "POSITION";
         
         // Set joint speed and acceleration limits
         OnClearSet();
@@ -534,8 +666,6 @@ void MarvinHardware::applyRobotConfiguration(int mode, int arm_side, int drag_mo
         OnSetSend();
         usleep(100000);
         
-        robot_ctrl_mode_ = "JOINT_IMPEDANCE";
-        
         RCLCPP_INFO(get_logger(), "Set to joint impedance mode with KD=[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f], speed=%.1f, acceleration=%.1f",
                     K[0], K[1], K[2], K[3], K[4], K[5], K[6], max_joint_speed, max_joint_acceleration);
         
@@ -589,8 +719,6 @@ void MarvinHardware::applyRobotConfiguration(int mode, int arm_side, int drag_mo
         OnSetSend();
         usleep(100000);
         
-        robot_ctrl_mode_ = "CART_IMPEDANCE";
-        
         RCLCPP_INFO(get_logger(), "Set to cartesian impedance mode with KD=[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f], speed=%.1f, acceleration=%.1f",
                     K[0], K[1], K[2], K[3], K[4], K[5], K[6], max_joint_speed, max_joint_acceleration);
     }
@@ -600,8 +728,10 @@ void MarvinHardware::applyRobotConfiguration(int mode, int arm_side, int drag_mo
     void MarvinHardware::setLeftArmCtrl()
     {
         /// clear error first
-        double kineParam[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
-        double dynPara[10] = {2.0, 0.0, 0.0, 96.411347, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+        // Ensure parameters are initialized
+        if (leftkineParam_.size() != 6) leftkineParam_.resize(6, 0.0);
+        if (leftdynParam_.size() != 10) leftdynParam_.resize(10, 0.0);
+        
         OnClearSet();
         OnClearErr_A();
         RCLCPP_INFO(get_logger(), "set tool load parameters");
@@ -619,7 +749,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int arm_side, int drag_mo
         {
             OnClearSet();
             OnSetTargetState_A(3); //3:torque mode; 1:position mode
-            OnSetTool_A(kineParam, dynPara);
+            OnSetTool_A(leftkineParam_.data(), leftdynParam_.data());
             if (robot_ctrl_mode_ == "JOINT_IMPEDANCE")
             {
                 // 使用从硬件参数中读取的阻抗参数
@@ -682,8 +812,10 @@ void MarvinHardware::applyRobotConfiguration(int mode, int arm_side, int drag_mo
     void MarvinHardware::setRightArmCtrl()
     {
         /// clear error first
-        double kineParam[6] = {0, 0, 0, 0, 0, 0};
-        double dynPara[10] = {1.8, 0.0, 0.0, 96.411347, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+        // Ensure parameters are initialized
+        if (rightkineParam_.size() != 6) rightkineParam_.resize(6, 0.0);
+        if (rightdynParam_.size() != 10) rightdynParam_.resize(10, 0.0);
+        
         OnClearSet();
         OnClearErr_B();
 
@@ -701,7 +833,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int arm_side, int drag_mo
         {
             OnClearSet();
             OnSetTargetState_B(3); //3:torque mode; 1:position mode
-            OnSetTool_B(kineParam, dynPara);
+            OnSetTool_B(rightkineParam_.data(), rightdynParam_.data());
             if (robot_ctrl_mode_ == "JOINT_IMPEDANCE")
             {
                 // 使用从硬件参数中读取的阻抗参数
@@ -901,6 +1033,22 @@ void MarvinHardware::applyRobotConfiguration(int mode, int arm_side, int drag_mo
         OnSetSend();
         usleep(100000);
 
+        // Initialize gripper parameters (default to all zeros if no gripper)
+        // This must be done before setLeftArmCtrl/setRightArmCtrl
+        leftkineParam_.resize(6, 0.0);
+        leftdynParam_.resize(10, 0.0);
+        rightkineParam_.resize(6, 0.0);
+        rightdynParam_.resize(10, 0.0);
+        
+        // Connect and initialize gripper (this will update kineParam and dynPara if gripper detected)
+        if (has_gripper_)
+        {
+            bool gripper_connected = connect_gripper();
+            if (!gripper_connected)
+            {
+                RCLCPP_WARN(get_logger(), "Gripper initialization failed, using default (zero) parameters");
+            }
+        }
 
         if (robot_arm_index_ == ARM_LEFT)
         {
@@ -916,6 +1064,21 @@ void MarvinHardware::applyRobotConfiguration(int mode, int arm_side, int drag_mo
             setRightArmCtrl();
         }
 
+        // Apply robot operation mode from ROS2 parameter ctrl_mode (default is "POSITION")
+        // This reads the ctrl_mode parameter and applies the configuration
+        // Convert robot_ctrl_mode_ string to integer mode locally
+        int mode = -1;
+        if (robot_ctrl_mode_ == "POSITION") {
+            mode = 1;
+        } else if (robot_ctrl_mode_ == "JOINT_IMPEDANCE") {
+            mode = 2;
+        } else if (robot_ctrl_mode_ == "CART_IMPEDANCE") {
+            mode = 3;
+        }
+        applyRobotConfiguration(mode, -1, -1, -1, -1.0, -1.0, 
+                                std::vector<double>(), std::vector<double>(), 
+                                std::vector<double>(), std::vector<double>());
+
         OnGetBuf(&frame_data_);
         RCLCPP_INFO(get_logger(), "current state of A arm:%d\n",
                     frame_data_.m_State[0].m_CurState);
@@ -925,32 +1088,28 @@ void MarvinHardware::applyRobotConfiguration(int mode, int arm_side, int drag_mo
         RCLCPP_INFO(get_logger(), "cmd of vel and acc:%d %d\n",
                     frame_data_.m_In[0].m_Joint_Vel_Ratio, frame_data_.m_In[0].m_Joint_Acc_Ratio);
 
-        // connect to gripper
-        if (has_gripper_)
+        // Start gripper control threads if gripper is connected
+        if (has_gripper_ && !gripper_ptr_.empty())
         {
-            bool gripper_connected = connect_gripper();
-            if (gripper_connected)
-            {
-                RCLCPP_INFO(get_logger(), "Gripper Connected");
-                // start gripper control thread
-                gripper_ctrl_thread_ = std::thread(&MarvinHardware::gripper_callback, this);
-                gripper_ctrl_thread_.detach();
-                std::thread recv_thread(&MarvinHardware::recv_thread_func, this);
-                recv_thread.detach();
-                // read onceon_activateon_activate
-                // int cur_pos_status = 0;
-                // int cur_speed_status = 0;
-                // int cur_effort_status = 0;
-                // bool success = ModbusGripper::getStatus(cur_effort_status, cur_speed_status, cur_pos_status, OnClearChDataA);
-                // RCLCPP_INFO(get_logger(), "gripper read position %d", cur_pos_status);
-                // gripper_position_ = (9000 - cur_pos_status) / 9000.0;
-                // gripper_position_ = 0.0;
-            }
-            else
-            {
-                RCLCPP_ERROR(get_logger(), "Gripper Not Connected");
-                return hardware_interface::CallbackReturn::ERROR;
-            }
+            RCLCPP_INFO(get_logger(), "Gripper Connected");
+            // start gripper control thread
+            gripper_ctrl_thread_ = std::thread(&MarvinHardware::gripper_callback, this);
+            gripper_ctrl_thread_.detach();
+            std::thread recv_thread(&MarvinHardware::recv_thread_func, this);
+            recv_thread.detach();
+            // read once on_activate
+            // int cur_pos_status = 0;
+            // int cur_speed_status = 0;
+            // int cur_effort_status = 0;
+            // bool success = ModbusGripper::getStatus(cur_effort_status, cur_speed_status, cur_pos_status, OnClearChDataA);
+            // RCLCPP_INFO(get_logger(), "gripper read position %d", cur_pos_status);
+            // gripper_position_ = (9000 - cur_pos_status) / 9000.0;
+            // gripper_position_ = 0.0;
+        }
+        else
+        {
+            RCLCPP_ERROR(get_logger(), "Gripper Not Connected");
+            return hardware_interface::CallbackReturn::ERROR;
         }
         RCLCPP_INFO(get_logger(), "Marvin Hardware Interface activated successfully");
         return hardware_interface::CallbackReturn::SUCCESS;
