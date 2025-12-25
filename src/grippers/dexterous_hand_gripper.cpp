@@ -21,9 +21,9 @@ namespace marvin_ros2_control
     bool DexterousHandGripper::move_gripper(int torque, int velocity, double normalized_pos)
     {
         // For compatibility with base interface, apply same values to all 7 joints
-        std::vector<int> torques(7, torque);
-        std::vector<int> velocities(7, velocity);
-        std::vector<double> positions(7, normalized_pos);
+        std::vector torques(7, torque);
+        std::vector velocities(7, velocity);
+        std::vector positions(7, normalized_pos);
         return move_gripper(torques, velocities, positions);
     }
 
@@ -41,7 +41,7 @@ namespace marvin_ros2_control
 
         // Joint order: 0=Thumb_Pitch, 1=Thumb_Yaw, 2=Index_Pitch, 3=Middle_Pitch, 4=Ring_Pitch, 5=Little_Pitch, 6=Thumb_Roll
         // Position registers
-        std::vector<uint16_t> position_regs = {
+        std::vector position_regs = {
             THUMB_PITCH_REG,      // 0
             THUMB_YAW_REG,        // 1
             INDEX_PITCH_REG,      // 2
@@ -52,7 +52,7 @@ namespace marvin_ros2_control
         };
 
         // Torque registers
-        std::vector<uint16_t> torque_regs = {
+        std::vector torque_regs = {
             THUMB_PITCH_TORQUE_REG,      // 0
             THUMB_YAW_TORQUE_REG,        // 1
             INDEX_PITCH_TORQUE_REG,      // 2
@@ -63,7 +63,7 @@ namespace marvin_ros2_control
         };
 
         // Speed registers
-        std::vector<uint16_t> speed_regs = {
+        std::vector speed_regs = {
             THUMB_PITCH_SPEED_REG,      // 0
             THUMB_YAW_SPEED_REG,        // 1
             INDEX_PITCH_SPEED_REG,      // 2

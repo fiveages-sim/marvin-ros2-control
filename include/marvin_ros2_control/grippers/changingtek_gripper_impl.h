@@ -47,7 +47,6 @@ namespace marvin_ros2_control
         uint16_t pos_high = static_cast<uint16_t>(position & 0xFFFF);
         
         std::vector<uint16_t> position_values = {pos_low, pos_high};
-        static constexpr uint16_t INIT_REG_ADDR = 0x0100;
         bool result = true;
         
         // Write position (two registers) - use Config constants

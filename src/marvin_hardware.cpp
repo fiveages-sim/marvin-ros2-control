@@ -1041,13 +1041,19 @@ void MarvinHardware::applyRobotConfiguration(int mode, int arm_side, int drag_mo
         rightdynParam_.resize(10, 0.0);
         
         // Connect and initialize gripper (this will update kineParam and dynPara if gripper detected)
-        if (has_gripper_)
+        // 只有在配置了夹爪类型时才尝试连接夹爪
+        if (has_gripper_ && !gripper_type_.empty() && gripper_type_ != "NONE" && !gripper_ptr_.empty())
         {
             bool gripper_connected = connect_gripper();
             if (!gripper_connected)
             {
                 RCLCPP_WARN(get_logger(), "Gripper initialization failed, using default (zero) parameters");
             }
+        }
+        else if (!gripper_type_.empty() && gripper_type_ != "NONE")
+        {
+            // 配置了夹爪类型但没有检测到夹爪关节或创建夹爪对象失败
+            RCLCPP_WARN(get_logger(), "Gripper type configured but no gripper detected or created");
         }
 
         if (robot_arm_index_ == ARM_LEFT)
@@ -1088,8 +1094,9 @@ void MarvinHardware::applyRobotConfiguration(int mode, int arm_side, int drag_mo
         RCLCPP_INFO(get_logger(), "cmd of vel and acc:%d %d\n",
                     frame_data_.m_In[0].m_Joint_Vel_Ratio, frame_data_.m_In[0].m_Joint_Acc_Ratio);
 
-        // Start gripper control threads if gripper is connected
-        if (has_gripper_ && !gripper_ptr_.empty())
+        // Start gripper control threads if gripper is configured and connected
+        // 只有在配置了夹爪类型且成功创建了夹爪对象时才启动控制线程
+        if (has_gripper_ && !gripper_type_.empty() && gripper_type_ != "NONE" && !gripper_ptr_.empty())
         {
             RCLCPP_INFO(get_logger(), "Gripper Connected");
             // start gripper control thread
@@ -1108,8 +1115,18 @@ void MarvinHardware::applyRobotConfiguration(int mode, int arm_side, int drag_mo
         }
         else
         {
-            RCLCPP_ERROR(get_logger(), "Gripper Not Connected");
-            return hardware_interface::CallbackReturn::ERROR;
+            // 没有配置夹爪是正常情况，不应该返回错误
+            if (!gripper_type_.empty() && gripper_type_ != "NONE")
+            {
+                // 配置了夹爪类型但连接失败
+                RCLCPP_ERROR(get_logger(), "Gripper type configured but connection failed");
+                return hardware_interface::CallbackReturn::ERROR;
+            }
+            else
+            {
+                // 没有配置夹爪，这是正常情况
+                RCLCPP_INFO(get_logger(), "No gripper configured, continuing without gripper");
+            }
         }
         RCLCPP_INFO(get_logger(), "Marvin Hardware Interface activated successfully");
         return hardware_interface::CallbackReturn::SUCCESS;
