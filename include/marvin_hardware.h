@@ -5,7 +5,6 @@
 #include <string>
 #include <vector>
 #include <thread>
-#include <sstream>
 
 #include "hardware_interface/handle.hpp"
 #include "hardware_interface/system_interface.hpp"
@@ -62,9 +61,6 @@ private:
         std::shared_ptr<rclcpp::Node> node_;
         std::string device_ip_;
         int device_port_ = 8080;
-        double simulation_mode_;
-        double read_timeout_;
-        double write_timeout_;
         std::string robot_arm_config_;  // "LEFT", "RIGHT", "DUAL"
         int robot_arm_index_ = 0;       // 0=LEFT, 1=RIGHT, 2=DUAL (在初始化时设定)
         std::string robot_ctrl_mode_;   // "POSITION", "JOINT_IMPEDANCE", "CART_IMPEDANCE"
@@ -72,23 +68,25 @@ private:
         DCSS frame_data_;
 
         // Control parameters
-        double max_velocity_;
-        double max_acceleration_;
-        std::vector<double> joint_imp_gain_;
-        std::vector<double> joint_imp_damp_;
-        std::vector<double> cart_imp_gain_;
-        std::vector<double> cart_imp_damp_;
+        // 这些成员变量是 ROS2 参数的缓存值，命名与参数保持一致，减少歧义
+        double max_joint_speed_;
+        double max_joint_acceleration_;
+        std::vector<double> joint_k_gains_;
+        std::vector<double> joint_d_gains_;
+        std::vector<double> cart_k_gains_;
+        std::vector<double> cart_d_gains_;
         std::vector<double> leftdynParam_;
         std::vector<double> leftkineParam_;
         std::vector<double> rightdynParam_;
         std::vector<double> rightkineParam_;
-        std::shared_ptr<rclcpp::Clock> clock_;
         // Joint data storage
         std::vector<double> hw_position_commands_;
         std::vector<double> hw_velocity_commands_;
         std::vector<double> hw_position_states_;
         std::vector<double> hw_velocity_states_;
         std::vector<double> hw_effort_states_;
+        // 复用的写入缓存（避免在 write() 控制回路中频繁分配/扩容导致抖动）
+        std::vector<double> hw_commands_deg_buffer_;
 
         // Joint limits from URDF
         std::vector<double> position_lower_limits_;
@@ -98,7 +96,6 @@ private:
 
         // Connection status
         bool hardware_connected_;
-        bool simulation_active_;
         rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_callback_handle_;
         std::vector<std::string> joint_names_;
 
@@ -107,11 +104,7 @@ private:
         void disconnectFromHardware();
         bool readFromHardware(bool initial_frame);
         bool writeToHardware(std::vector<double>& hw_commands);
-        void simulateHardware(const rclcpp::Duration& period);
-        bool initializeJointLimits();
-        void logJointStates();
-        void setLeftArmCtrl();
-        void setRightArmCtrl();
+        void setArmCtrlInternal(int arm_index);
                 
         // Helper method to create gripper based on type
         std::unique_ptr<ModbusGripper> createGripper(Clear485Func clear_485, Send485Func send_485,
@@ -127,8 +120,20 @@ private:
         {
             return rad * 180.0 / M_PI;
         }
+        
+        // 辅助方法：获取节点参数，如果不存在则自动声明
+        template<typename T>
+        T get_node_param(const std::string& name, const T& default_val)
+        {
+            if (!node_->has_parameter(name)) {
+                node_->declare_parameter<T>(name, default_val);
+            }
+            // rclcpp::Parameter 使用 get_value<T>() 获取强类型值
+            return node_->get_parameter(name).get_value<T>();
+        }
+        
         rcl_interfaces::msg::SetParametersResult paramCallback(const std::vector<rclcpp::Parameter> & params);
-        void applyRobotConfiguration(int mode, int arm_side, int drag_mode, int cart_type,
+        void applyRobotConfiguration(int mode, int drag_mode, int cart_type,
                                     double max_joint_speed, double max_joint_acceleration,
                                     const std::vector<double>& joint_k_gains,
                                     const std::vector<double>& joint_d_gains,
@@ -161,10 +166,6 @@ private:
         bool connect_gripper();
         void disconnect_gripper();
 
-        void splitIPToCharArrays(const char* ipStr, char octet1[4], char octet2[4], char octet3[4], char octet4[4])
-        {
-            sscanf(ipStr, "%3[^.].%3[^.].%3[^.].%3[^.]", octet1, octet2, octet3, octet4);
-        }
     };
 } // namespace marvin_ros2_control
 

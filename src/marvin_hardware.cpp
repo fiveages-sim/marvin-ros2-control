@@ -8,6 +8,8 @@
 #include <sstream>
 #include <algorithm>
 #include <cctype>
+#include <set>
+#include <unordered_map>
 #include "pluginlib/class_list_macros.hpp"
 #include "hardware_interface/types/hardware_interface_type_values.hpp"
 #include "rclcpp/rclcpp.hpp"
@@ -30,44 +32,192 @@ namespace marvin_ros2_control
         return result;
     }
 
+    // 默认参数（单一来源）：同时用于 declare_node_parameters / on_init / applyRobotConfiguration
+    static const std::vector<double> kDefaultJointKGains = {2.0, 2.0, 2.0, 1.6, 1.0, 1.0, 1.0};
+    static const std::vector<double> kDefaultJointDGains = {0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4};
+    static const std::vector<double> kDefaultCartKGains  = {1800.0, 1800.0, 1800.0, 40.0, 40.0, 40.0, 20.0};
+    static const std::vector<double> kDefaultCartDGains  = {0.6, 0.6, 0.6, 0.4, 0.4, 0.4, 0.4};
+
+    static const std::vector<double> kDefaultLeftKineParam  = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    static const std::vector<double> kDefaultLeftDynParam   = {2.0, 0.0, 0.0, 96.411347, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    static const std::vector<double> kDefaultRightKineParam = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    static const std::vector<double> kDefaultRightDynParam  = {1.8, 0.0, 0.0, 96.411347, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+
+    // ctrl_mode 相关：字符串 <-> 内部 mode(int) 的单一转换来源
+    // mode: 1=POSITION, 2=JOINT_IMPEDANCE, 3=CART_IMPEDANCE
+    static int ctrlModeStringToMode(const std::string& ctrl_mode_raw, const rclcpp::Logger& logger)
+    {
+        const std::string normalized = normalizeString(ctrl_mode_raw);
+        if (normalized == "POSITION") return 1;
+        if (normalized == "JOINT_IMPEDANCE") return 2;
+        if (normalized == "CART_IMPEDANCE") return 3;
+        RCLCPP_WARN(logger, "Invalid ctrl_mode value: %s, defaulting to POSITION", ctrl_mode_raw.c_str());
+        return 1;
+    }
+
+    static const char* modeToCtrlModeString(int mode)
+    {
+        switch (mode) {
+            case 1: return "POSITION";
+            case 2: return "JOINT_IMPEDANCE";
+            case 3: return "CART_IMPEDANCE";
+            default: return "POSITION";
+        }
+    }
+
+    // 辅助函数：解析 hardware_parameters 中的数组字符串为 vector<double>
+    // 支持形如 "[1,2,3]"、"1, 2, 3"、"1 2 3" 等格式
+    static std::vector<double> parseDoubleArrayLoose(const std::string& str, const std::vector<double>& default_val)
+    {
+        if (str.empty()) {
+            return default_val;
+        }
+        std::string cleaned = str;
+        cleaned.erase(std::remove(cleaned.begin(), cleaned.end(), '['), cleaned.end());
+        cleaned.erase(std::remove(cleaned.begin(), cleaned.end(), ']'), cleaned.end());
+        std::replace(cleaned.begin(), cleaned.end(), ',', ' ');
+
+        std::istringstream iss(cleaned);
+        std::vector<double> result;
+        double v = 0.0;
+        while (iss >> v) {
+            result.push_back(v);
+        }
+        return result.empty() ? default_val : result;
+    }
+
+    // rclcpp 参数类型映射（用于 declare_node_parameters 的类型检查）
+    template<typename T>
+    static constexpr rclcpp::ParameterType paramTypeOf();
+
+    template<>
+    constexpr rclcpp::ParameterType paramTypeOf<std::string>() { return rclcpp::ParameterType::PARAMETER_STRING; }
+    template<>
+    constexpr rclcpp::ParameterType paramTypeOf<int>() { return rclcpp::ParameterType::PARAMETER_INTEGER; }
+    template<>
+    constexpr rclcpp::ParameterType paramTypeOf<double>() { return rclcpp::ParameterType::PARAMETER_DOUBLE; }
+    template<>
+    constexpr rclcpp::ParameterType paramTypeOf<bool>() { return rclcpp::ParameterType::PARAMETER_BOOL; }
+    template<>
+    constexpr rclcpp::ParameterType paramTypeOf<std::vector<double>>() { return rclcpp::ParameterType::PARAMETER_DOUBLE_ARRAY; }
+
+    static bool parseBoolLoose(const std::string& str, bool default_val)
+    {
+        const std::string s = normalizeString(str);
+        if (s == "TRUE" || s == "1" || s == "YES" || s == "ON") return true;
+        if (s == "FALSE" || s == "0" || s == "NO" || s == "OFF") return false;
+        return default_val;
+    }
+
     void MarvinHardware::declare_node_parameters()
     {
+        // 目标：优先使用 hardware_interface 的 info_.hardware_parameters 作为“初始值来源”，
+        // 然后用该初始值声明为 ROS2 node 参数，便于后续 ros2 param set 动态修改。
+        //
+        // 规则：
+        // - 如果参数已存在且类型正确：尊重现有值（可能来自 launch 覆盖/之前声明），不覆盖
+        // - 如果参数已存在但类型不对：undeclare 后按正确类型重新 declare（避免类型冲突）
+        // - 如果参数不存在：从 hardware_parameters 取值（若有）否则用默认值 declare
+
+        const auto hw_find = [this](const std::string& name) -> const std::string* {
+            auto it = info_.hardware_parameters.find(name);
+            if (it == info_.hardware_parameters.end()) {
+                return nullptr;
+            }
+            return &it->second;
+        };
+
+        const auto ensure_param = [this](const std::string& name, const auto& default_val, const std::string* hw_val, const auto& parse_fn) {
+            using T = std::decay_t<decltype(default_val)>;
+            if (node_->has_parameter(name)) {
+                if (node_->get_parameter(name).get_type() != paramTypeOf<T>()) {
+                    try { node_->undeclare_parameter(name); } catch (...) {}
+                } else {
+                    return; // 已存在且类型正确：尊重现有值
+                }
+            }
+
+            if (!node_->has_parameter(name)) {
+                const T val = hw_val ? parse_fn(*hw_val, default_val) : default_val;
+                node_->declare_parameter<T>(name, val);
+            }
+        };
+
+        // 对 array 参数额外校验长度：类型正确但长度不对也会强制重声明，避免后续运行期兜底/越界风险
+        const auto ensure_double_array_sized = [this, &hw_find](const std::string& name,
+                                                               const std::vector<double>& default_val,
+                                                               size_t expected_size) {
+            const std::string* hw_val = hw_find(name);
+
+            if (node_->has_parameter(name)) {
+                if (node_->get_parameter(name).get_type() != rclcpp::ParameterType::PARAMETER_DOUBLE_ARRAY) {
+                    try { node_->undeclare_parameter(name); } catch (...) {}
+                } else {
+                    // 类型正确，校验长度
+                    try {
+                        const auto current = node_->get_parameter(name).get_value<std::vector<double>>();
+                        if (current.size() == expected_size) {
+                            return; // 已存在且长度正确：尊重现有值
+                        }
+                    } catch (...) {
+                        // fallthrough: undeclare + redeclare
+                    }
+                    try { node_->undeclare_parameter(name); } catch (...) {}
+                }
+            }
+
+            if (!node_->has_parameter(name)) {
+                std::vector<double> val = hw_val ? parseDoubleArrayLoose(*hw_val, default_val) : default_val;
+                if (val.size() != expected_size) {
+                    val = default_val;
+                }
+                node_->declare_parameter<std::vector<double>>(name, val);
+            }
+        };
+
+        // 基础配置（之前通过 get_param 从 hardware_parameters 读的，也顺便声明成 ROS2 参数）
+        ensure_param("arm_type", std::string("LEFT"), hw_find("arm_type"),
+                     [](const std::string& s, const std::string& def) { (void)def; return s; });
+        ensure_param("gripper_type", std::string(""), hw_find("gripper_type"),
+                     [](const std::string& s, const std::string& def) { (void)def; return s; });
+        ensure_param("device_ip", std::string("192.168.1.190"), hw_find("device_ip"),
+                     [](const std::string& s, const std::string& def) { (void)def; return s; });
+        ensure_param("device_port", 8080, hw_find("device_port"),
+                     [](const std::string& s, int def) { try { return std::stoi(s); } catch (...) { return def; } });
+
         // Robot operation mode: "POSITION", "JOINT_IMPEDANCE", "CART_IMPEDANCE"
-        node_->declare_parameter<std::string>("ctrl_mode", "POSITION");
-        // Arm side: 0=left, 1=right, 2=dual (both)
-        node_->declare_parameter<int>("arm_side", 2);
+        ensure_param("ctrl_mode", std::string("POSITION"), hw_find("ctrl_mode"),
+                     [](const std::string& s, const std::string& def) { (void)def; return s; });
         // Drag mode: -1=don't update, 0=disable, 1=joint space drag, 2=cartesian space drag
-        node_->declare_parameter<int>("drag_mode", -1);
+        ensure_param("drag_mode", -1, hw_find("drag_mode"),
+                     [](const std::string& s, int def) { try { return std::stoi(s); } catch (...) { return def; } });
         // Joint impedance K gains (7 values)
-        node_->declare_parameter<std::vector<double>>("joint_k_gains", std::vector<double>{2.0, 2.0, 2.0, 1.6, 1.0, 1.0, 1.0});
+        ensure_double_array_sized("joint_k_gains", kDefaultJointKGains, 7);
         // Joint impedance D gains (7 values)
-        node_->declare_parameter<std::vector<double>>("joint_d_gains", std::vector<double>{0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4});
+        ensure_double_array_sized("joint_d_gains", kDefaultJointDGains, 7);
         // Cartesian impedance K gains (7 values)
-        node_->declare_parameter<std::vector<double>>("cart_k_gains", std::vector<double>{1800.0, 1800.0, 1800.0, 40.0, 40.0, 40.0, 20.0});
+        ensure_double_array_sized("cart_k_gains", kDefaultCartKGains, 7);
         // Cartesian impedance D gains (7 values)
-        node_->declare_parameter<std::vector<double>>("cart_d_gains", std::vector<double>{0.6, 0.6, 0.6, 0.4, 0.4, 0.4, 0.4});
+        ensure_double_array_sized("cart_d_gains", kDefaultCartDGains, 7);
         // Cartesian impedance type
-        node_->declare_parameter<int>("cart_type", 2);
+        ensure_param("cart_type", 2, hw_find("cart_type"),
+                     [](const std::string& s, int def) { try { return std::stoi(s); } catch (...) { return def; } });
         // Joint speed and acceleration limits
-        node_->declare_parameter<double>("max_joint_speed", 10.0);
-        node_->declare_parameter<double>("max_joint_acceleration", 10.0);
-        
-        // Legacy parameters (for backward compatibility)
-        node_->declare_parameter<double>("max_velocity", 10.0);
-        node_->declare_parameter<double>("max_acceleration", 10.0);
-        node_->declare_parameter<bool>("use_drag_mode", false);
-        node_->declare_parameter<std::vector<double>>("joint_imp_gain", std::vector<double>{2,2,2,1.6,1,1,1});
-        node_->declare_parameter<std::vector<double>>("joint_imp_damp", std::vector<double>{0.4,0.4,0.4,0.4,0.4,0.4,0.4});
-        node_->declare_parameter<std::vector<double>>("cart_imp_gain", std::vector<double>{500,500,500,10,10,10,0});
-        node_->declare_parameter<std::vector<double>>("cart_imp_damp", std::vector<double>{0.1,0.1,0.1,0.3,0.3,1});
-        
+        ensure_param("max_joint_speed", 10.0, hw_find("max_joint_speed"),
+                     [](const std::string& s, double def) { try { return std::stod(s); } catch (...) { return def; } });
+        ensure_param("max_joint_acceleration", 10.0, hw_find("max_joint_acceleration"),
+                     [](const std::string& s, double def) { try { return std::stod(s); } catch (...) { return def; } });
+        ensure_param("use_drag_mode", false, hw_find("use_drag_mode"),
+                     [](const std::string& s, bool def) { return parseBoolLoose(s, def); });
+
         // Gripper tool parameters - declared as std::vector<double> (array of doubles)
         // kineParam: kinematic parameters (6 values), dynPara: dynamic parameters (10 values)
-        node_->declare_parameter<std::vector<double>>("left_kine_param", std::vector<double>{0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
-        node_->declare_parameter<std::vector<double>>("left_dyn_param", std::vector<double>{2.0, 0.0, 0.0, 96.411347, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
-        node_->declare_parameter<std::vector<double>>("right_kine_param", std::vector<double>{0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
-        node_->declare_parameter<std::vector<double>>("right_dyn_param", std::vector<double>{1.8, 0.0, 0.0, 96.411347, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+        ensure_double_array_sized("left_kine_param", kDefaultLeftKineParam, 6);
+        ensure_double_array_sized("left_dyn_param", kDefaultLeftDynParam, 10);
+        ensure_double_array_sized("right_kine_param", kDefaultRightKineParam, 6);
+        ensure_double_array_sized("right_dyn_param", kDefaultRightDynParam, 10);
     }
+    
     hardware_interface::CallbackReturn MarvinHardware::on_init(
         const hardware_interface::HardwareComponentInterfaceParams& params)
     {
@@ -78,43 +228,16 @@ namespace marvin_ros2_control
 
         node_ = get_node();
         logger_ = get_node()->get_logger();
-        clock_ = std::make_shared<rclcpp::Clock>();
         RCLCPP_INFO(get_logger(), "Initializing Marvin Hardware Interface...");
 
-        
-        // 解析配置参数
-        const auto get_param = [this](const std::string& name, const std::string& default_val) {
-            if (auto it = info_.hardware_parameters.find(name); 
-                it != info_.hardware_parameters.end()) {
-                return it->second;
-            }
-            return default_val;
-        };
-
-        // 解析数组参数的辅助函数
-        const auto parse_double_array = [](const std::string& str, const std::vector<double>& default_val) -> std::vector<double> {
-            if (str.empty()) {
-                return default_val;
-            }
-            std::vector<double> result;
-            std::string cleaned = str;
-            cleaned.erase(std::remove(cleaned.begin(), cleaned.end(), '['), cleaned.end());
-            cleaned.erase(std::remove(cleaned.begin(), cleaned.end(), ']'), cleaned.end());
-            std::istringstream iss(cleaned);
-            std::string token;
-            while (std::getline(iss, token, ',')) {
-                if (!token.empty()) {
-                    result.push_back(std::stod(token));
-                }
-            }
-            return result.empty() ? default_val : result;
-        };
+        // 先把 hardware_parameters 的初始值灌入并声明成 ROS2 参数（便于后续动态修改）
+        declare_node_parameters();
         
         // Get the number of joints from the hardware info
         size_t num_joints = params.hardware_info.joints.size();
 
         // 获取机器人配置参数
-        std::string arm_config_raw = get_param("arm_type", "LEFT");
+        std::string arm_config_raw = get_node_param("arm_type", std::string("LEFT"));
         std::string arm_config_normalized = normalizeString(arm_config_raw);
 
         if (arm_config_normalized == "LEFT")
@@ -143,37 +266,15 @@ namespace marvin_ros2_control
         // after declare_node_parameters() is called
 
         // 获取夹爪类型参数
-        std::string gripper_type_raw = get_param("gripper_type", "");
+        std::string gripper_type_raw = get_node_param("gripper_type", std::string(""));
         gripper_type_ = normalizeString(gripper_type_raw);
 
-        RCLCPP_INFO(get_logger(), "Robot arm configuration: %s", robot_arm_config_.c_str());
-        RCLCPP_INFO(get_logger(), "Control mode: %s", robot_ctrl_mode_.c_str());
-        RCLCPP_INFO(get_logger(), "Gripper type: %s", gripper_type_.empty() ? "none" : gripper_type_.c_str());
-
         // 获取硬件连接参数
-        device_ip_ = get_param("device_ip", "192.168.10.190");
-        device_port_ = std::stoi(get_param("device_port", "8080"));
+        device_ip_ = get_node_param("device_ip", std::string("192.168.1.190"));
+        device_port_ = get_node_param("device_port", 8080);
         RCLCPP_INFO(get_logger(), "Device IP: %s, Port: %d", device_ip_.c_str(), device_port_);
 
-        // 根据控制模式解析对应的阻抗参数
-        if (robot_ctrl_mode_ == "JOINT_IMPEDANCE")
-        {
-            std::string joint_imp_gain_str = get_param("joint_imp_gain", "");
-            std::string joint_imp_damp_str = get_param("joint_imp_damp", "");
-            joint_imp_gain_ = parse_double_array(joint_imp_gain_str, {2, 2, 2, 1.6, 1, 1, 1});
-            joint_imp_damp_ = parse_double_array(joint_imp_damp_str, {0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4});
-        }
-        else if (robot_ctrl_mode_ == "CART_IMPEDANCE")
-        {
-            std::string cart_imp_gain_str = get_param("cart_imp_gain", "");
-            std::string cart_imp_damp_str = get_param("cart_imp_damp", "");
-            cart_imp_gain_ = parse_double_array(cart_imp_gain_str, {500, 500, 500, 10, 10, 10, 0});
-            cart_imp_damp_ = parse_double_array(cart_imp_damp_str, {0.1, 0.1, 0.1, 0.3, 0.3, 1});
-        }
-
-        // 获取其他参数
-        max_velocity_ = std::stod(get_param("max_velocity", "10.0"));
-        max_acceleration_ = std::stod(get_param("max_acceleration", "10.0"));
+        // 获取其他参数（将在 declare_node_parameters() 之后从节点参数读取）
    
         RCLCPP_INFO(get_logger(), "Initializing %zu joints", num_joints);
 
@@ -183,6 +284,8 @@ namespace marvin_ros2_control
         hw_position_states_.resize(num_joints, 0.0);
         hw_velocity_states_.resize(num_joints, 0.0);
         hw_effort_states_.resize(num_joints, 0.0);
+        // Pre-allocate command buffer used in write() to avoid per-cycle allocations
+        hw_commands_deg_buffer_.resize(num_joints, 0.0);
 
         // 初始化夹爪参数 如果有的话
         // 只有当 gripper_type 不为空且不为 "none" 时才考虑夹爪配置
@@ -197,108 +300,75 @@ namespace marvin_ros2_control
         RCLCPP_INFO(get_logger(), "has_gripper_: %d", has_gripper_);
         RCLCPP_INFO(get_logger(), "gripper_type_: %s", gripper_type_.c_str());
         
+        // 构建夹爪对象与其 command/state 缓存（严格保证：单臂=1个，双臂=2个；避免重复创建导致通道干扰）
+        gripper_ptr_.clear();
         if (has_gripper_ && !gripper_type_.empty() && gripper_type_ != "NONE")
         {
-            RCLCPP_INFO(get_logger(), "gripper_type_: %s", gripper_type_.c_str());
-            if (robot_arm_index_ == ARM_LEFT || robot_arm_index_ == ARM_RIGHT)
+            const size_t expected_grippers = (robot_arm_index_ == ARM_DUAL) ? 2 : 1;
+
+            gripper_position_command_.assign(expected_grippers, -1.0);
+            gripper_position_.assign(expected_grippers, 0.0);
+            gripper_velocity_.assign(expected_grippers, 0.0);
+            gripper_effort_.assign(expected_grippers, 0.0);
+            last_gripper_command_.assign(expected_grippers, -1.0);
+            last_gripper_position_.assign(expected_grippers, -1.0);
+            gripper_stopped_.assign(expected_grippers, true);
+            step_size_.assign(expected_grippers, 0.0);
+
+            gripper_ptr_.reserve(expected_grippers);
+            if (robot_arm_index_ == ARM_LEFT)
             {
-                gripper_position_command_ = {-1.0};
-                gripper_position_ = {0.0};
-                gripper_velocity_ = {0.0};
-                gripper_effort_ = {0.0};
-                last_gripper_command_ = {-1.0};
-                last_gripper_position_ = {-1.0};
-                gripper_stopped_ = {true};
-                step_size_ = {0.0};
-                gripper_ptr_.reserve(1);
-                if (robot_arm_index_ == ARM_LEFT)
-                {
-                    gripper_ptr_.emplace_back(createGripper(OnClearChDataA, OnSetChDataA, OnGetChDataA));
-                }
-                else
-                {
-                    gripper_ptr_.emplace_back(createGripper(OnClearChDataB, OnSetChDataB, OnGetChDataB));
-                }
+                // Left arm gripper uses A channel
+                gripper_ptr_.emplace_back(createGripper(OnClearChDataA, OnSetChDataA, OnGetChDataA));
+            }
+            else if (robot_arm_index_ == ARM_RIGHT)
+            {
+                // Right arm gripper uses B channel
+                gripper_ptr_.emplace_back(createGripper(OnClearChDataB, OnSetChDataB, OnGetChDataB));
             }
             else if (robot_arm_index_ == ARM_DUAL)
             {
-                gripper_position_command_ = {-1.0, -1.0};
-                if (has_gripper_ && !gripper_type_.empty() && gripper_type_ != "NONE")
-                {
-                    if (robot_arm_index_ == ARM_LEFT || robot_arm_index_ == ARM_RIGHT)
-                    {
-                        gripper_position_command_ = {-1.0};
-                        gripper_position_ = {0.0};
-                        gripper_velocity_ = {0.0};
-                        gripper_effort_ = {0.0};
-                        last_gripper_command_ = {-1.0};
-                        last_gripper_position_ = {-1.0};
-                        gripper_stopped_ = {true};
-                        step_size_ = {0.0};
-                        gripper_ptr_.reserve(1);
-                        if (robot_arm_index_ == ARM_LEFT)
-                        {
-                            gripper_ptr_.emplace_back(createGripper(OnClearChDataA, OnSetChDataA, OnGetChDataA));
-                        }
-                        else
-                        {
-                            gripper_ptr_.emplace_back(createGripper(OnClearChDataB, OnSetChDataB, OnGetChDataB));
-                        }
-                    }
-                    else if (robot_arm_index_ == ARM_DUAL)
-                    {
-                        gripper_position_command_ = {-1.0, -1.0};
-                        gripper_position_ = {0.0, 0.0};
-                        gripper_velocity_ = {0.0, 0.0};
-                        gripper_effort_ = {0.0, 0.0};
-                        last_gripper_command_ = {-1.0, -1.0};
-                        last_gripper_position_ = {-1.0, -1.0};
-                        gripper_stopped_ = {true, true};
-                        step_size_ = {0.0, 0.0};
-                        gripper_ptr_.reserve(2);
-                        gripper_ptr_.emplace_back(createGripper(OnClearChDataA, OnSetChDataA, OnGetChDataA));
-                        gripper_ptr_.emplace_back(createGripper(OnClearChDataB, OnSetChDataB, OnGetChDataB));
-                    }
-                } 
-                gripper_position_ = {0.0, 0.0};
-                gripper_velocity_ = {0.0, 0.0};
-                gripper_effort_ = {0.0, 0.0};
-                last_gripper_command_ = {-1.0, -1.0};
-                last_gripper_position_ = {-1.0, -1.0};
-                gripper_stopped_ = {true, true};
-                step_size_ = {0.0, 0.0};
-                gripper_ptr_.reserve(2);
+                // Dual arm: [0]=A(left), [1]=B(right)
                 gripper_ptr_.emplace_back(createGripper(OnClearChDataA, OnSetChDataA, OnGetChDataA));
                 gripper_ptr_.emplace_back(createGripper(OnClearChDataB, OnSetChDataB, OnGetChDataB));
             }
+
+            RCLCPP_INFO(get_logger(),
+                        "Gripper init: arm_type=%s, gripper_type=%s, detected_gripper_joints=%zu, created_grippers=%zu",
+                        robot_arm_config_.c_str(), gripper_type_.c_str(), gripper_joint_name_.size(), gripper_ptr_.size());
         }
         
         // Initialize hardware connection status
         hardware_connected_ = false;
-        simulation_active_ = false;
-        declare_node_parameters();
+        
+        // 读取关节速度和加速度限制参数（如果不存在则自动声明）
+        max_joint_speed_ = get_node_param("max_joint_speed", 10.0);
+        max_joint_acceleration_ = get_node_param("max_joint_acceleration", 10.0);
         
         // Read ctrl_mode parameter and set robot_ctrl_mode_ string accordingly
-        std::string ctrl_mode_raw = node_->get_parameter("ctrl_mode").as_string();
+        std::string ctrl_mode_raw = get_node_param("ctrl_mode", std::string("POSITION"));
         robot_ctrl_mode_ = normalizeString(ctrl_mode_raw);
         RCLCPP_INFO(get_logger(), "Robot control mode set to: %s (from ctrl_mode parameter: %s)", robot_ctrl_mode_.c_str(), ctrl_mode_raw.c_str());
+
+        // 初始化阻抗参数缓存（供 setArmCtrlInternal 使用）
+        joint_k_gains_ = get_node_param("joint_k_gains", kDefaultJointKGains);
+        joint_d_gains_ = get_node_param("joint_d_gains", kDefaultJointDGains);
+        cart_k_gains_  = get_node_param("cart_k_gains", kDefaultCartKGains);
+        cart_d_gains_  = get_node_param("cart_d_gains", kDefaultCartDGains);
+
+        RCLCPP_INFO(get_logger(), "Robot arm configuration: %s", robot_arm_config_.c_str());
+        RCLCPP_INFO(get_logger(), "Gripper type: %s", gripper_type_.empty() ? "none" : gripper_type_.c_str());
         
-        // Initialize kineParam and dynPara - read from node parameters (declared above)
-        std::vector<double> default_left_kine = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
-        std::vector<double> default_left_dyn = {2.0, 0.0, 0.0, 96.411347, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
-        std::vector<double> default_right_kine = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
-        std::vector<double> default_right_dyn = {1.8, 0.0, 0.0, 96.411347, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
-        
-        // Read from node parameters (already declared as std::vector<double> in declare_node_parameters)
-        leftkineParam_ = node_->get_parameter("left_kine_param").as_double_array();
+        // Initialize kineParam and dynPara - read from node parameters (如果不存在则自动声明)
+        leftkineParam_ = get_node_param("left_kine_param", kDefaultLeftKineParam);
         if (leftkineParam_.size() != 6) leftkineParam_.resize(6, 0.0);
         
-        leftdynParam_ = node_->get_parameter("left_dyn_param").as_double_array();
+        leftdynParam_ = get_node_param("left_dyn_param", kDefaultLeftDynParam);
         if (leftdynParam_.size() != 10)
         {
             if (has_gripper_ && !gripper_type_.empty() && gripper_type_ != "NONE")
             {
-                leftdynParam_ = default_left_dyn;
+                leftdynParam_ = kDefaultLeftDynParam;
             }
             else
             {
@@ -306,15 +376,15 @@ namespace marvin_ros2_control
             }
         }
         
-        rightkineParam_ = node_->get_parameter("right_kine_param").as_double_array();
+        rightkineParam_ = get_node_param("right_kine_param", kDefaultRightKineParam);
         if (rightkineParam_.size() != 6) rightkineParam_.resize(6, 0.0);
         
-        rightdynParam_ = node_->get_parameter("right_dyn_param").as_double_array();
+        rightdynParam_ = get_node_param("right_dyn_param", kDefaultRightDynParam);
         if (rightdynParam_.size() != 10)
         {
             if (has_gripper_ && !gripper_type_.empty() && gripper_type_ != "NONE")
             {
-                rightdynParam_ = default_right_dyn;
+                rightdynParam_ = kDefaultRightDynParam;
             }
             else
             {
@@ -346,7 +416,6 @@ MarvinHardware::paramCallback(const std::vector<rclcpp::Parameter> & params)
     bool need_config_update = false;
     bool ctrl_mode_changed = false;
     std::string ctrl_mode = "";
-    int arm_side = -1;
     int drag_mode = -1;
     int cart_type = -1;
     double max_joint_speed = -1.0;
@@ -359,27 +428,12 @@ MarvinHardware::paramCallback(const std::vector<rclcpp::Parameter> & params)
     for (const auto & param : params) {
         if (param.get_name() == "ctrl_mode") {
             std::string ctrl_mode_str = param.as_string();
-            std::string normalized_mode = normalizeString(ctrl_mode_str);
-            if (normalized_mode != "POSITION" && normalized_mode != "JOINT_IMPEDANCE" && normalized_mode != "CART_IMPEDANCE") {
-                result.successful = false;
-                result.reason = "Invalid ctrl_mode. Must be 'POSITION', 'JOINT_IMPEDANCE', or 'CART_IMPEDANCE'";
-                return result;
-            }
-            ctrl_mode = normalized_mode;
-            robot_ctrl_mode_ = normalized_mode;
+            const int mode = ctrlModeStringToMode(ctrl_mode_str, get_logger());
+            ctrl_mode = modeToCtrlModeString(mode);
+            robot_ctrl_mode_ = ctrl_mode;
             need_config_update = true;
             ctrl_mode_changed = true;
-            RCLCPP_INFO(get_logger(), "ctrl_mode parameter changed to: %s", normalized_mode.c_str());
-        }
-        else if (param.get_name() == "arm_side") {
-            arm_side = param.as_int();
-            if (arm_side < 0 || arm_side > 2) {
-                result.successful = false;
-                result.reason = "Invalid arm_side. Must be 0 (left), 1 (right), or 2 (both)";
-                return result;
-            }
-            need_config_update = true;
-            RCLCPP_INFO(get_logger(), "Arm side parameter changed to: %d", arm_side);
+            RCLCPP_INFO(get_logger(), "ctrl_mode parameter changed to: %s", ctrl_mode.c_str());
         }
         else if (param.get_name() == "drag_mode") {
             drag_mode = param.as_int();
@@ -455,7 +509,7 @@ MarvinHardware::paramCallback(const std::vector<rclcpp::Parameter> & params)
             RCLCPP_INFO(get_logger(), "Left dynParam updated via parameter");
             // Update the tool parameters on the hardware
             if (robot_arm_index_ == ARM_LEFT || robot_arm_index_ == ARM_DUAL) {
-                setLeftArmCtrl();
+                setArmCtrlInternal(ARM_LEFT);
             }
         }
         else if (param.get_name() == "right_dyn_param") {
@@ -469,7 +523,7 @@ MarvinHardware::paramCallback(const std::vector<rclcpp::Parameter> & params)
             RCLCPP_INFO(get_logger(), "Right dynParam updated via parameter");
             // Update the tool parameters on the hardware
             if (robot_arm_index_ == ARM_RIGHT || robot_arm_index_ == ARM_DUAL) {
-                setRightArmCtrl();
+                setArmCtrlInternal(ARM_RIGHT);
             }
         }
         else if (param.get_name() == "left_kine_param") {
@@ -496,28 +550,18 @@ MarvinHardware::paramCallback(const std::vector<rclcpp::Parameter> & params)
 
     // Apply configuration if needed
     if (need_config_update) {
-        // Convert string ctrl_mode to integer mode locally
-        int mode = -1;
-        if (!ctrl_mode.empty()) {
-            if (ctrl_mode == "POSITION") {
-                mode = 1;
-            } else if (ctrl_mode == "JOINT_IMPEDANCE") {
-                mode = 2;
-            } else if (ctrl_mode == "CART_IMPEDANCE") {
-                mode = 3;
-            }
-        }
-        applyRobotConfiguration(mode, arm_side, drag_mode, cart_type, 
+        const int mode = ctrl_mode.empty() ? -1 : ctrlModeStringToMode(ctrl_mode, get_logger());
+        applyRobotConfiguration(mode, drag_mode, cart_type,
                               max_joint_speed, max_joint_acceleration,
                               joint_k_gains, joint_d_gains, cart_k_gains, cart_d_gains);
         
-        // If ctrl_mode changed, update the arm control mode by calling setLeftArmCtrl/setRightArmCtrl
+        // If ctrl_mode changed, update the arm control mode
         if (ctrl_mode_changed) {
             if (robot_arm_index_ == ARM_LEFT || robot_arm_index_ == ARM_DUAL) {
-                setLeftArmCtrl();
+                setArmCtrlInternal(ARM_LEFT);
             }
             if (robot_arm_index_ == ARM_RIGHT || robot_arm_index_ == ARM_DUAL) {
-                setRightArmCtrl();
+                setArmCtrlInternal(ARM_RIGHT);
             }
         }
     }
@@ -525,75 +569,82 @@ MarvinHardware::paramCallback(const std::vector<rclcpp::Parameter> & params)
     return result;
 }
 
-void MarvinHardware::applyRobotConfiguration(int mode, int arm_side, int drag_mode, int cart_type,
+void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_type,
                                               double max_joint_speed, double max_joint_acceleration,
                                               const std::vector<double>& joint_k_gains,
                                               const std::vector<double>& joint_d_gains,
                                               const std::vector<double>& cart_k_gains,
                                               const std::vector<double>& cart_d_gains)
 {
+    const auto send_and_sleep = []() {
+        OnSetSend();
+        usleep(100000);
+    };
+    const auto apply_drag_mode_if_needed = [&](bool update_left, bool update_right) {
+        if (drag_mode >= 0) {
+            if (update_left) {
+                OnSetDragSpace_A(drag_mode);
+            }
+            if (update_right) {
+                OnSetDragSpace_B(drag_mode);
+            }
+        }
+    };
+    const auto apply_joint_limits = [&](bool update_left, bool update_right) {
+        OnClearSet();
+        if (update_left) {
+            OnSetJointLmt_A(static_cast<int>(max_joint_speed), static_cast<int>(max_joint_acceleration));
+        }
+        if (update_right) {
+            OnSetJointLmt_B(static_cast<int>(max_joint_speed), static_cast<int>(max_joint_acceleration));
+        }
+        send_and_sleep();
+    };
+
     // Get current parameter values if not provided
     if (mode == -1) {
-        std::string ctrl_mode_str = node_->get_parameter("ctrl_mode").as_string();
-        std::string normalized_mode = normalizeString(ctrl_mode_str);
-        if (normalized_mode == "POSITION") {
-            mode = 1;
-        } else if (normalized_mode == "JOINT_IMPEDANCE") {
-            mode = 2;
-        } else if (normalized_mode == "CART_IMPEDANCE") {
-            mode = 3;
-        } else {
-            RCLCPP_WARN(get_logger(), "Invalid ctrl_mode value: %s, defaulting to POSITION", ctrl_mode_str.c_str());
-            mode = 1;
-        }
+        const std::string ctrl_mode_str = get_node_param("ctrl_mode", std::string("POSITION"));
+        mode = ctrlModeStringToMode(ctrl_mode_str, get_logger());
     }
-    // Update robot_ctrl_mode_ to match the mode we're applying
-    if (mode == 1) {
-        robot_ctrl_mode_ = "POSITION";
-    } else if (mode == 2) {
-        robot_ctrl_mode_ = "JOINT_IMPEDANCE";
-    } else if (mode == 3) {
-        robot_ctrl_mode_ = "CART_IMPEDANCE";
-    }
-    if (arm_side == -1) {
-        arm_side = node_->get_parameter("arm_side").as_int();
-    }
+    robot_ctrl_mode_ = modeToCtrlModeString(mode);
     if (drag_mode == -1) {
-        drag_mode = node_->get_parameter("drag_mode").as_int();
+        drag_mode = get_node_param("drag_mode", -1);
     }
     if (cart_type == -1) {
-        cart_type = node_->get_parameter("cart_type").as_int();
+        cart_type = get_node_param("cart_type", 2);
     }
     if (max_joint_speed <= 0.0) {
-        max_joint_speed = node_->get_parameter("max_joint_speed").as_double();
+        max_joint_speed = get_node_param("max_joint_speed", 10.0);
     }
     if (max_joint_acceleration <= 0.0) {
-        max_joint_acceleration = node_->get_parameter("max_joint_acceleration").as_double();
+        max_joint_acceleration = get_node_param("max_joint_acceleration", 10.0);
     }
-
-    // Default KD values
-    std::vector<double> default_joint_k = {2.0, 2.0, 2.0, 1.6, 1.0, 1.0, 1.0};
-    std::vector<double> default_joint_d = {0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4};
-    std::vector<double> default_cart_k = {1800.0, 1800.0, 1800.0, 40.0, 40.0, 40.0, 20.0};
-    std::vector<double> default_cart_d = {0.6, 0.6, 0.6, 0.4, 0.4, 0.4, 0.4};
 
     // Use provided KD or get from parameters or defaults
     std::vector<double> final_joint_k = (!joint_k_gains.empty()) ? joint_k_gains :
-        (node_->has_parameter("joint_k_gains") && node_->get_parameter("joint_k_gains").as_double_array().size() == 7) ?
-        node_->get_parameter("joint_k_gains").as_double_array() : default_joint_k;
+        (get_node_param("joint_k_gains", kDefaultJointKGains).size() == 7) ?
+        get_node_param("joint_k_gains", kDefaultJointKGains) : kDefaultJointKGains;
     std::vector<double> final_joint_d = (!joint_d_gains.empty()) ? joint_d_gains :
-        (node_->has_parameter("joint_d_gains") && node_->get_parameter("joint_d_gains").as_double_array().size() == 7) ?
-        node_->get_parameter("joint_d_gains").as_double_array() : default_joint_d;
+        (get_node_param("joint_d_gains", kDefaultJointDGains).size() == 7) ?
+        get_node_param("joint_d_gains", kDefaultJointDGains) : kDefaultJointDGains;
     std::vector<double> final_cart_k = (!cart_k_gains.empty()) ? cart_k_gains :
-        (node_->has_parameter("cart_k_gains") && node_->get_parameter("cart_k_gains").as_double_array().size() == 7) ?
-        node_->get_parameter("cart_k_gains").as_double_array() : default_cart_k;
+        (get_node_param("cart_k_gains", kDefaultCartKGains).size() == 7) ?
+        get_node_param("cart_k_gains", kDefaultCartKGains) : kDefaultCartKGains;
     std::vector<double> final_cart_d = (!cart_d_gains.empty()) ? cart_d_gains :
-        (node_->has_parameter("cart_d_gains") && node_->get_parameter("cart_d_gains").as_double_array().size() == 7) ?
-        node_->get_parameter("cart_d_gains").as_double_array() : default_cart_d;
+        (get_node_param("cart_d_gains", kDefaultCartDGains).size() == 7) ?
+        get_node_param("cart_d_gains", kDefaultCartDGains) : kDefaultCartDGains;
 
-    // Determine which arms to update
-    bool update_left = (arm_side == 0 || arm_side == 2);
-    bool update_right = (arm_side == 1 || arm_side == 2);
+    // 同步缓存：供 setArmCtrlInternal 使用（避免只从 hardware_parameters 读一次导致无法动态更新）
+    max_joint_speed_ = max_joint_speed;
+    max_joint_acceleration_ = max_joint_acceleration;
+    joint_k_gains_ = final_joint_k;
+    joint_d_gains_ = final_joint_d;
+    cart_k_gains_ = final_cart_k;
+    cart_d_gains_ = final_cart_d;
+
+    // Determine which arms to update (统一使用 arm_type / robot_arm_index_)
+    bool update_left = (robot_arm_index_ == ARM_LEFT || robot_arm_index_ == ARM_DUAL);
+    bool update_right = (robot_arm_index_ == ARM_RIGHT || robot_arm_index_ == ARM_DUAL);
 
     // Process based on selected mode
     if (mode == 1) {
@@ -605,19 +656,8 @@ void MarvinHardware::applyRobotConfiguration(int mode, int arm_side, int drag_mo
         if (update_right) {
             OnSetTargetState_B(1);  // Position mode
         }
-        OnSetSend();
-        usleep(100000);
-        
-        // Set joint speed and acceleration limits
-        OnClearSet();
-        if (update_left) {
-            OnSetJointLmt_A(static_cast<int>(max_joint_speed), static_cast<int>(max_joint_acceleration));
-        }
-        if (update_right) {
-            OnSetJointLmt_B(static_cast<int>(max_joint_speed), static_cast<int>(max_joint_acceleration));
-        }
-        OnSetSend();
-        usleep(100000);
+        send_and_sleep();
+        apply_joint_limits(update_left, update_right);
         
         RCLCPP_INFO(get_logger(), "Set to position mode with speed=%.1f, acceleration=%.1f", 
                     max_joint_speed, max_joint_acceleration);
@@ -641,30 +681,9 @@ void MarvinHardware::applyRobotConfiguration(int mode, int arm_side, int drag_mo
             OnSetImpType_B(1);      // Joint impedance
             OnSetJointKD_B(K, D);
         }
-        
-        // Update drag mode if specified
-        if (drag_mode >= 0) {
-            if (update_left) {
-                OnSetDragSpace_A(drag_mode);
-            }
-            if (update_right) {
-                OnSetDragSpace_B(drag_mode);
-            }
-        }
-        
-        OnSetSend();
-        usleep(100000);
-        
-        // Set joint speed and acceleration limits
-        OnClearSet();
-        if (update_left) {
-            OnSetJointLmt_A(static_cast<int>(max_joint_speed), static_cast<int>(max_joint_acceleration));
-        }
-        if (update_right) {
-            OnSetJointLmt_B(static_cast<int>(max_joint_speed), static_cast<int>(max_joint_acceleration));
-        }
-        OnSetSend();
-        usleep(100000);
+        apply_drag_mode_if_needed(update_left, update_right);
+        send_and_sleep();
+        apply_joint_limits(update_left, update_right);
         
         RCLCPP_INFO(get_logger(), "Set to joint impedance mode with KD=[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f], speed=%.1f, acceleration=%.1f",
                     K[0], K[1], K[2], K[3], K[4], K[5], K[6], max_joint_speed, max_joint_acceleration);
@@ -694,30 +713,9 @@ void MarvinHardware::applyRobotConfiguration(int mode, int arm_side, int drag_mo
             }
             OnSetCartKD_B(K_right, D_right, cart_type);
         }
-        
-        // Update drag mode if specified
-        if (drag_mode >= 0) {
-            if (update_left) {
-                OnSetDragSpace_A(drag_mode);
-            }
-            if (update_right) {
-                OnSetDragSpace_B(drag_mode);
-            }
-        }
-        
-        OnSetSend();
-        usleep(100000);
-        
-        // Set joint speed and acceleration limits
-        OnClearSet();
-        if (update_left) {
-            OnSetJointLmt_A(static_cast<int>(max_joint_speed), static_cast<int>(max_joint_acceleration));
-        }
-        if (update_right) {
-            OnSetJointLmt_B(static_cast<int>(max_joint_speed), static_cast<int>(max_joint_acceleration));
-        }
-        OnSetSend();
-        usleep(100000);
+        apply_drag_mode_if_needed(update_left, update_right);
+        send_and_sleep();
+        apply_joint_limits(update_left, update_right);
         
         RCLCPP_INFO(get_logger(), "Set to cartesian impedance mode with KD=[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f], speed=%.1f, acceleration=%.1f",
                     K[0], K[1], K[2], K[3], K[4], K[5], K[6], max_joint_speed, max_joint_acceleration);
@@ -725,170 +723,98 @@ void MarvinHardware::applyRobotConfiguration(int mode, int arm_side, int drag_mo
 }
 
 
-    void MarvinHardware::setLeftArmCtrl()
+    void MarvinHardware::setArmCtrlInternal(int arm_index)
     {
-        /// clear error first
+        const bool is_left = (arm_index == ARM_LEFT);
+        if (!is_left && arm_index != ARM_RIGHT)
+        {
+            RCLCPP_WARN(get_logger(), "setArmCtrlInternal called with invalid arm_index=%d", arm_index);
+            return;
+        }
+
+        auto& kine = is_left ? leftkineParam_ : rightkineParam_;
+        auto& dyn = is_left ? leftdynParam_ : rightdynParam_;
+
         // Ensure parameters are initialized
-        if (leftkineParam_.size() != 6) leftkineParam_.resize(6, 0.0);
-        if (leftdynParam_.size() != 10) leftdynParam_.resize(10, 0.0);
-        
+        if (kine.size() != 6) kine.resize(6, 0.0);
+        if (dyn.size() != 10) dyn.resize(10, 0.0);
+
+        const auto clear_err = is_left ? OnClearErr_A : OnClearErr_B;
+        const auto set_target_state = is_left ? OnSetTargetState_A : OnSetTargetState_B;
+        const auto set_tool = is_left ? OnSetTool_A : OnSetTool_B;
+        const auto set_joint_kd = is_left ? OnSetJointKD_A : OnSetJointKD_B;
+        const auto set_cart_kd = is_left ? OnSetCartKD_A : OnSetCartKD_B;
+        const auto set_imp_type = is_left ? OnSetImpType_A : OnSetImpType_B;
+        const auto set_joint_lmt = is_left ? OnSetJointLmt_A : OnSetJointLmt_B;
+
         OnClearSet();
-        OnClearErr_A();
-        RCLCPP_INFO(get_logger(), "set tool load parameters");
+        clear_err();
+        if (is_left)
+        {
+            RCLCPP_INFO(get_logger(), "set tool load parameters");
+        }
         OnSetSend();
         usleep(100000);
 
         if (robot_ctrl_mode_ == "POSITION")
         {
             OnClearSet();
-            OnSetTargetState_A(1); //3:torque mode; 1:position mode
+            set_target_state(1); // 1:position mode
             OnSetSend();
             usleep(100000);
         }
         else
         {
             OnClearSet();
-            OnSetTargetState_A(3); //3:torque mode; 1:position mode
-            OnSetTool_A(leftkineParam_.data(), leftdynParam_.data());
+            set_target_state(3); // 3:torque mode
+            set_tool(kine.data(), dyn.data());
+
             if (robot_ctrl_mode_ == "JOINT_IMPEDANCE")
             {
-                // 使用从硬件参数中读取的阻抗参数
-                if (joint_imp_gain_.size() >= 7 && joint_imp_damp_.size() >= 7)
-                {
-                    double K[7];
-                    double D[7];
-                    for (size_t i = 0; i < 7; i++)
-                    {
-                        K[i] = joint_imp_gain_[i];
-                        D[i] = joint_imp_damp_[i];
-                    }
-                    OnSetJointKD_A(K, D);
-                    OnSetImpType_A(1);
-                }
-                else
+                const bool valid = (joint_k_gains_.size() >= 7 && joint_d_gains_.size() >= 7);
+                if (!valid)
                 {
                     RCLCPP_WARN(get_logger(), "Joint impedance parameters size mismatch, using defaults");
-                    double K[7] = {2, 2, 2, 1.6, 1, 1, 1};
-                    double D[7] = {0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4};
-                    OnSetJointKD_A(K, D);
-                    OnSetImpType_A(1);
-                }   
+                }
+                const auto& K_src = valid ? joint_k_gains_ : kDefaultJointKGains;
+                const auto& D_src = valid ? joint_d_gains_ : kDefaultJointDGains;
+                double K[7];
+                double D[7];
+                for (size_t i = 0; i < 7; i++)
+                {
+                    K[i] = K_src[i];
+                    D[i] = D_src[i];
+                }
+                set_joint_kd(K, D);
+                set_imp_type(1);
             }
             else if (robot_ctrl_mode_ == "CART_IMPEDANCE")
             {
-                // 使用从硬件参数中读取的阻抗参数
-                if (cart_imp_gain_.size() >= 7 && cart_imp_damp_.size() >= 7)
-                {
-                    double K[7];
-                    double D[7];
-                    for (size_t i = 0; i < 7; i++)
-                    {
-                        K[i] = cart_imp_gain_[i];
-                        D[i] = cart_imp_damp_[i];
-                    }
-                    OnSetCartKD_A(K, D, 2);
-                    OnSetImpType_A(2);
-                }
-                else
+                const bool valid = (cart_k_gains_.size() >= 7 && cart_d_gains_.size() >= 7);
+                if (!valid)
                 {
                     RCLCPP_WARN(get_logger(), "Cartesian impedance parameters size mismatch, using defaults");
-                    double K[7] = {1800, 1800, 1800, 40, 40, 40, 20};
-                    double D[7] = {0.6, 0.6, 0.6, 0.4, 0.4, 0.4, 0.4};
-                    OnSetCartKD_A(K, D, 2);
-                    OnSetImpType_A(2);
                 }
+                const auto& K_src = valid ? cart_k_gains_ : kDefaultCartKGains;
+                const auto& D_src = valid ? cart_d_gains_ : kDefaultCartDGains;
+                double K[7];
+                double D[7];
+                for (size_t i = 0; i < 7; i++)
+                {
+                    K[i] = K_src[i];
+                    D[i] = D_src[i];
+                }
+                set_cart_kd(K, D, 2);
+                set_imp_type(2);
             }
-            OnSetSend();
-            usleep(100000);
-        }
-        
-        /// set maximum speed and acceleration
-        OnClearSet();
-        OnSetJointLmt_A(static_cast<int>(max_velocity_), static_cast<int>(max_acceleration_));
-        OnSetSend();
-        usleep(100000);
-}
 
-    void MarvinHardware::setRightArmCtrl()
-    {
-        /// clear error first
-        // Ensure parameters are initialized
-        if (rightkineParam_.size() != 6) rightkineParam_.resize(6, 0.0);
-        if (rightdynParam_.size() != 10) rightdynParam_.resize(10, 0.0);
-        
-        OnClearSet();
-        OnClearErr_B();
-
-
-        OnSetSend();
-        usleep(100000);
-        if (robot_ctrl_mode_ == "POSITION")
-        {
-            OnClearSet();
-            OnSetTargetState_B(1); //3:torque mode; 1:position mode
-            OnSetSend();
-            usleep(100000);
-        }
-        else
-        {
-            OnClearSet();
-            OnSetTargetState_B(3); //3:torque mode; 1:position mode
-            OnSetTool_B(rightkineParam_.data(), rightdynParam_.data());
-            if (robot_ctrl_mode_ == "JOINT_IMPEDANCE")
-            {
-                // 使用从硬件参数中读取的阻抗参数
-                if (joint_imp_gain_.size() >= 7 && joint_imp_damp_.size() >= 7)
-                {
-                    double K[7];
-                    double D[7];
-                    for (size_t i = 0; i < 7; i++)
-                    {
-                        K[i] = joint_imp_gain_[i];
-                        D[i] = joint_imp_damp_[i];
-                    }
-                    OnSetJointKD_B(K, D);
-                    OnSetImpType_B(1);
-                }
-                else
-                {
-                    RCLCPP_WARN(get_logger(), "Joint impedance parameters size mismatch, using defaults");
-                    double K[7] = {2, 2, 2, 1.6, 1, 1, 1};
-                    double D[7] = {0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4};
-                    OnSetJointKD_B(K, D);
-                    OnSetImpType_B(1);
-                }
-            }
-            else if (robot_ctrl_mode_ == "CART_IMPEDANCE")
-            {
-                // 使用从硬件参数中读取的阻抗参数
-                if (cart_imp_gain_.size() >= 7 && cart_imp_damp_.size() >= 7)
-                {
-                    double K[7];
-                    double D[7];
-                    for (size_t i = 0; i < 7; i++)
-                    {
-                        K[i] = cart_imp_gain_[i];
-                        D[i] = cart_imp_damp_[i];
-                    }
-                    OnSetCartKD_B(K, D, 2);
-                    OnSetImpType_B(2);
-                }
-                else
-                {
-                    RCLCPP_WARN(get_logger(), "Cartesian impedance parameters size mismatch, using defaults");
-                    double K[7] = {2500, 2500, 2500, 60, 60, 60, 20};
-                    double D[7] = {0.6, 0.6, 0.6, 0.2, 0.2, 0.2, 0.4};
-                    OnSetCartKD_B(K, D, 2);
-                    OnSetImpType_B(2);
-                }
-            }
             OnSetSend();
             usleep(100000);
         }
 
-        /// set maximum speed and acceleration
+        // set maximum speed and acceleration
         OnClearSet();
-        OnSetJointLmt_B(static_cast<int>(max_velocity_), static_cast<int>(max_acceleration_));
+        set_joint_lmt(static_cast<int>(max_joint_speed_), static_cast<int>(max_joint_acceleration_));
         OnSetSend();
         usleep(100000);
     }
@@ -898,24 +824,52 @@ void MarvinHardware::applyRobotConfiguration(int mode, int arm_side, int drag_mo
     {
         /// 启动的时候调用
         clear_485();
-        if (gripper_type_ == "RG75" || gripper_type_ == "JDGripper")
+        // gripper_type_ has been normalized to UPPERCASE by normalizeString()
+        enum class GripperKind { JD, Changingtek90C, Changingtek90D };
+
+        static const std::unordered_map<std::string, GripperKind> kGripperTypeMap = {
+            // JD / RG75
+            {"RG75", GripperKind::JD},
+            {"JDGRIPPER", GripperKind::JD},
+
+            // Changingtek 90C variants (AG2F90_C is the common实际入参)
+            {"CHANGINGTEK90C", GripperKind::Changingtek90C},
+            {"AG2F90", GripperKind::Changingtek90C},
+            {"AG2F90C", GripperKind::Changingtek90C},
+            {"AG2F90_C", GripperKind::Changingtek90C},
+
+            // Changingtek 90D variants
+            {"CHANGINGTEK90D", GripperKind::Changingtek90D},
+            {"AG2F90D", GripperKind::Changingtek90D},
+            {"AG2F90_D", GripperKind::Changingtek90D},
+        };
+
+        const auto it = kGripperTypeMap.find(gripper_type_);
+        const GripperKind kind = (it == kGripperTypeMap.end()) ? GripperKind::JD : it->second;
+
+        switch (kind)
         {
-            RCLCPP_INFO(get_logger(), "Creating JD Gripper");
-            return std::make_unique<JDGripper>(clear_485, send_485, get_ch_data);
+            case GripperKind::JD:
+                if (it == kGripperTypeMap.end())
+                {
+                    RCLCPP_WARN(get_logger(),
+                                "Unknown gripper type '%s' (normalized). Using default JDGripper.",
+                                gripper_type_.c_str());
+                }
+                RCLCPP_INFO(get_logger(), "Creating JD Gripper");
+                return std::make_unique<JDGripper>(clear_485, send_485, get_ch_data);
+
+            case GripperKind::Changingtek90C:
+                RCLCPP_INFO(get_logger(), "Creating CHANGINGTEK90C Gripper");
+                return std::make_unique<ChangingtekGripper90C>(clear_485, send_485, get_ch_data);
+
+            case GripperKind::Changingtek90D:
+                RCLCPP_INFO(get_logger(), "Creating CHANGINGTEK90D Gripper");
+                return std::make_unique<ChangingtekGripper90D>(clear_485, send_485, get_ch_data);
         }
-        if (gripper_type_ == "CHANGINGTEK90C" || gripper_type_ == "ZXGripper90C" ||
-            gripper_type_ == "CHANGINGTEK" || gripper_type_ == "CHANGINGTEK90" || 
-            gripper_type_ == "AG2F90" || gripper_type_ == "ZXGripper" || gripper_type_ == "AG2F90C")
-        {
-            RCLCPP_INFO(get_logger(), "Creating CHANGINGTEK90C Gripper");
-            return std::make_unique<ChangingtekGripper90C>(clear_485, send_485, get_ch_data);
-        }
-        if (gripper_type_ == "CHANGINGTEK90D" || gripper_type_ == "ZXGripper90D")
-        {
-            RCLCPP_INFO(get_logger(), "Creating CHANGINGTEK90D Gripper");
-            return std::make_unique<ChangingtekGripper90D>(clear_485, send_485, get_ch_data);
-        }
-        RCLCPP_WARN(get_logger(), "Unknown gripper type '%s', using default JDGripper. Valid options: changingtek, ag2f90, rg75", gripper_type_.c_str());
+
+        // Defensive fallback
+        RCLCPP_INFO(get_logger(), "Creating JD Gripper");
         return std::make_unique<JDGripper>(clear_485, send_485, get_ch_data);
     }
 
@@ -986,46 +940,25 @@ void MarvinHardware::applyRobotConfiguration(int mode, int arm_side, int drag_mo
         const rclcpp_lifecycle::State& /*previous_state*/)
     {
         RCLCPP_INFO(get_logger(), "Activating Marvin Hardware Interface...");
-        simulation_mode_ = false;
-        if (simulation_mode_)
+        // Connect to real hardware
+        if (!connectToHardware())
         {
-            RCLCPP_INFO(get_logger(), "Running in simulation mode");
-            simulation_active_ = true;
-
-            // Initialize simulation states
-            for (size_t i = 0; i < hw_position_states_.size(); i++)
-            {
-                hw_position_states_[i] = 0.0;
-                hw_velocity_states_[i] = 0.0;
-                hw_effort_states_[i] = 0.0;
-                hw_position_commands_[i] = 0.0;
-                hw_velocity_commands_[i] = 0.0;
-            }
+            RCLCPP_ERROR(get_logger(), "Failed to connect to Marvin hardware");
+            return hardware_interface::CallbackReturn::ERROR;
         }
-        else
+
+        // Read initial joint states from hardware
+        if (!readFromHardware(true))
         {
-            RCLCPP_INFO(get_logger(), "Running in real hardware mode");
-            // Connect to real hardware
-            if (!connectToHardware())
-            {
-                RCLCPP_ERROR(get_logger(), "Failed to connect to Marvin hardware");
-                return hardware_interface::CallbackReturn::ERROR;
-            }
+            RCLCPP_ERROR(get_logger(), "Failed to read initial joint states from hardware");
+            return hardware_interface::CallbackReturn::ERROR;
+        }
 
-            // Read initial joint states from hardware
-            if (!readFromHardware(true))
-            {
-                RCLCPP_ERROR(get_logger(), "Failed to read initial joint states from hardware");
-                return hardware_interface::CallbackReturn::ERROR;
-            }
-
-            // Initialize commands with current positions
-            for (size_t i = 0; i < hw_position_commands_.size(); i++)
-            {
-                hw_position_commands_[i] = hw_position_states_[i];
-                hw_velocity_commands_[i] = hw_velocity_states_[i];
-                // RCLCPP_ERROR(get_logger(), "initia position ...  %f", hw_velocity_commands_[i]);
-            }
+        // Initialize commands with current positions
+        for (size_t i = 0; i < hw_position_commands_.size(); i++)
+        {
+            hw_position_commands_[i] = hw_position_states_[i];
+            hw_velocity_commands_[i] = hw_velocity_states_[i];
         }
         OnClearSet();
         OnLogOff();
@@ -1034,7 +967,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int arm_side, int drag_mo
         usleep(100000);
 
         // Initialize gripper parameters (default to all zeros if no gripper)
-        // This must be done before setLeftArmCtrl/setRightArmCtrl
+        // This must be done before setArmCtrlInternal
         leftkineParam_.resize(6, 0.0);
         leftdynParam_.resize(10, 0.0);
         rightkineParam_.resize(6, 0.0);
@@ -1058,16 +991,16 @@ void MarvinHardware::applyRobotConfiguration(int mode, int arm_side, int drag_mo
 
         if (robot_arm_index_ == ARM_LEFT)
         {
-            setLeftArmCtrl();
+            setArmCtrlInternal(ARM_LEFT);
         }
         else if (robot_arm_index_ == ARM_RIGHT)
         {
-            setRightArmCtrl();
+            setArmCtrlInternal(ARM_RIGHT);
         }
         else if (robot_arm_index_ == ARM_DUAL)
         {
-            setLeftArmCtrl();
-            setRightArmCtrl();
+            setArmCtrlInternal(ARM_LEFT);
+            setArmCtrlInternal(ARM_RIGHT);
         }
 
         // Apply robot operation mode from ROS2 parameter ctrl_mode (default is "POSITION")
@@ -1081,7 +1014,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int arm_side, int drag_mo
         } else if (robot_ctrl_mode_ == "CART_IMPEDANCE") {
             mode = 3;
         }
-        applyRobotConfiguration(mode, -1, -1, -1, -1.0, -1.0, 
+        applyRobotConfiguration(mode, -1, -1, -1.0, -1.0, 
                                 std::vector<double>(), std::vector<double>(), 
                                 std::vector<double>(), std::vector<double>());
 
@@ -1109,7 +1042,6 @@ void MarvinHardware::applyRobotConfiguration(int mode, int arm_side, int drag_mo
             // int cur_speed_status = 0;
             // int cur_effort_status = 0;
             // bool success = ModbusGripper::getStatus(cur_effort_status, cur_speed_status, cur_pos_status, OnClearChDataA);
-            // RCLCPP_INFO(get_logger(), "gripper read position %d", cur_pos_status);
             // gripper_position_ = (9000 - cur_pos_status) / 9000.0;
             // gripper_position_ = 0.0;
         }
@@ -1204,8 +1136,6 @@ void MarvinHardware::applyRobotConfiguration(int mode, int arm_side, int drag_mo
         const rclcpp_lifecycle::State& /*previous_state*/)
     {
         RCLCPP_INFO(get_logger(), "Deactivating Marvin Hardware Interface...");
-
-        simulation_active_ = false;
         OnClearSet();
         if (robot_arm_index_ == ARM_LEFT)
         {
@@ -1355,26 +1285,13 @@ void MarvinHardware::applyRobotConfiguration(int mode, int arm_side, int drag_mo
     hardware_interface::return_type MarvinHardware::read(
         const rclcpp::Time& /*time*/, const rclcpp::Duration& /*period*/)
     {
-        // if (simulation_active_) {
-        //   simulateHardware(period);
-        //   return hardware_interface::return_type::OK;
-        // }
-
         if (!hardware_connected_)
         {
-            // RCLCPP_ERROR_THROTTLE(
-            //   get_logger(),
-            //   *std::make_shared<rclcpp::Clock>(), 5000,
-            //   "Not connected to hardware");
             return hardware_interface::return_type::ERROR;
         }
 
         if (!readFromHardware(false))
         {
-            // RCLCPP_ERROR_THROTTLE(
-            //   get_logger(),
-            //   *std::make_shared<rclcpp::Clock>(), 5000,
-            //   "Failed to read from hardware");
             return hardware_interface::return_type::ERROR;
         }
 
@@ -1384,31 +1301,23 @@ void MarvinHardware::applyRobotConfiguration(int mode, int arm_side, int drag_mo
     hardware_interface::return_type MarvinHardware::write(
         const rclcpp::Time& /*time*/, const rclcpp::Duration& /*period*/)
     {
-        // if (simulation_active_) {
-        //   // In simulation, commands are handled in the read method
-        //   return hardware_interface::return_type::OK;
-        // }
-
         if (!hardware_connected_)
         {
             return hardware_interface::return_type::ERROR;
         }
-        /// convert rad to degree
-        // RCLCPP_ERROR(get_logger(), "write command ...  %f", hw_position_commands_[2]);
-        std::vector<double> hw_commands;
+        /// convert rad to degree (use pre-allocated buffer to avoid allocations in control loop)
+        if (hw_commands_deg_buffer_.size() != hw_position_commands_.size())
+        {
+            hw_commands_deg_buffer_.resize(hw_position_commands_.size(), 0.0);
+        }
         for (size_t i = 0; i < hw_position_commands_.size(); i++)
         {
-            hw_commands.push_back(radToDegree(hw_position_commands_[i]));
+            hw_commands_deg_buffer_[i] = radToDegree(hw_position_commands_[i]);
         }
-        // RCLCPP_ERROR(get_logger(), "write command deg ...  %f", hw_position_commands_[2]);
-        // Enforce joint limits before sending commands
 
-        if (!writeToHardware(hw_commands))
+
+        if (!writeToHardware(hw_commands_deg_buffer_))
         {
-            // RCLCPP_ERROR_THROTTLE(
-            //   get_logger(),
-            //   *clock_, 5000,
-            //   "Failed to write to hardware");
             return hardware_interface::return_type::ERROR;
         }
         return hardware_interface::return_type::OK;
@@ -1448,61 +1357,77 @@ void MarvinHardware::applyRobotConfiguration(int mode, int arm_side, int drag_mo
 
     bool MarvinHardware::recv_thread_func()
     {
+        struct ChannelSpec
+        {
+            const char* name;
+            GetChDataFunc get_ch_data;
+            size_t gripper_idx;
+        };
+
         long ch = 2;
         unsigned char data_buf[256] = {0};
 
         while (hardware_connected_)
         {
-            if (robot_arm_index_ == ARM_LEFT && has_gripper_ && !gripper_ptr_.empty())
+            if (!has_gripper_ || gripper_ptr_.empty())
             {
-                long size = OnGetChDataA(data_buf, &ch);
-                if (size > 0)
+                usleep(10 * 1000);
+                continue;
+            }
+
+            // Determine which channels to poll based on arm configuration.
+            // Mapping rule:
+            // - LEFT:  idx0 <- channel A
+            // - RIGHT: idx0 <- channel B
+            // - DUAL:  idx0 <- channel A, idx1 <- channel B
+            ChannelSpec specs[2];
+            size_t spec_count = 0;
+            if (robot_arm_index_ == ARM_LEFT)
+            {
+                specs[0] = {"A", OnGetChDataA, 0};
+                spec_count = 1;
+            }
+            else if (robot_arm_index_ == ARM_RIGHT)
+            {
+                specs[0] = {"B", OnGetChDataB, 0};
+                spec_count = 1;
+            }
+            else if (robot_arm_index_ == ARM_DUAL)
+            {
+                specs[0] = {"A", OnGetChDataA, 0};
+                specs[1] = {"B", OnGetChDataB, 1};
+                spec_count = 2;
+                if (gripper_ptr_.size() < 2)
                 {
-                    int torque = 0, velocity = 0;
-                    double position = 0.0;
-                    if (gripper_ptr_[0]->processReadResponse(data_buf, static_cast<size_t>(size), torque, velocity, position))
-                    {
-                        updateGripperState(0, position, velocity, torque);
-                    }
+                    RCLCPP_WARN_THROTTLE(get_logger(), *get_node()->get_clock(), 2000,
+                        "Dual-arm gripper configured but created_grippers=%zu (<2). Right gripper feedback may be missing.",
+                        gripper_ptr_.size());
                 }
             }
-            else if (robot_arm_index_ == ARM_RIGHT && has_gripper_ && !gripper_ptr_.empty())
+
+            for (size_t si = 0; si < spec_count; ++si)
             {
-                long size = OnGetChDataB(data_buf, &ch);
-                if (size > 0)
+                const auto& spec = specs[si];
+                if (spec.gripper_idx >= gripper_ptr_.size())
                 {
-                    int torque = 0, velocity = 0;
-                    double position = 0.0;
-                    if (gripper_ptr_[0]->processReadResponse(data_buf, static_cast<size_t>(size), torque, velocity, position))
-                    {
-                        updateGripperState(0, position, velocity, torque);
-                    }
+                    continue;
+                }
+
+                const long size = spec.get_ch_data(data_buf, &ch);
+                if (size <= 0)
+                {
+                    continue;
+                }
+
+                int torque = 0, velocity = 0;
+                double position = 0.0;
+                if (gripper_ptr_[spec.gripper_idx]->processReadResponse(
+                        data_buf, static_cast<size_t>(size), torque, velocity, position))
+                {
+                    updateGripperState(spec.gripper_idx, position, velocity, torque);
                 }
             }
-            else if (robot_arm_index_ == ARM_DUAL && has_gripper_)
-            {
-                long size = OnGetChDataA(data_buf, &ch);
-                if (size > 0 && !gripper_ptr_.empty())
-                {
-                    int torque = 0, velocity = 0;
-                    double position = 0.0;
-                    if (gripper_ptr_[0]->processReadResponse(data_buf, static_cast<size_t>(size), torque, velocity, position))
-                    {
-                        updateGripperState(0, position, velocity, torque);
-                    }
-                }
-                size = OnGetChDataB(data_buf, &ch);
-                if (size > 0 && gripper_ptr_.size() > 1)
-                {
-                    int torque = 0, velocity = 0;
-                    double position = 0.0;
-                    if (gripper_ptr_[1]->processReadResponse(data_buf, static_cast<size_t>(size), torque, velocity, position))
-                    {
-                        updateGripperState(1, position, velocity, torque);
-                    }
-                }
-            }
-            
+
             usleep(10 * 1000);
         }
         return true;
@@ -1512,13 +1437,6 @@ void MarvinHardware::applyRobotConfiguration(int mode, int arm_side, int drag_mo
    bool MarvinHardware::connectToHardware()
     {
         RCLCPP_INFO(get_logger(), "Connecting to Marvin at %s:%d", device_ip_.c_str(), device_port_);
-
-        // TODO: Implement actual Marvin connection using Marvin SDK
-        // Example:
-        // unsigned char octet1;
-        // unsigned char octet2;
-        // unsigned char octet3;
-        // unsigned char octet4;
 
         // 解析 IP 地址
         std::vector<int> ip_parts;
@@ -1593,7 +1511,6 @@ void MarvinHardware::applyRobotConfiguration(int mode, int arm_side, int drag_mo
     {
         RCLCPP_INFO(get_logger(), "Disconnecting from Marvin hardware");
 
-        // TODO: Implement actual Marvin disconnection
         OnRelease();
 
         hardware_connected_ = false;
@@ -1603,131 +1520,59 @@ void MarvinHardware::applyRobotConfiguration(int mode, int arm_side, int drag_mo
     bool MarvinHardware::readFromHardware(bool initial_frame)
     {
         OnGetBuf(&frame_data_);
-        // RCLCPP_INFO(get_logger(), "Reading from hardware interface ... %d", frame_data_.m_Out[robot_arm_index_].m_OutFrameSerial);
         if (initial_frame)
         {
             previous_message_frame_ = frame_data_.m_Out[robot_arm_index_].m_OutFrameSerial;
         }
-        if (robot_arm_index_ == ARM_LEFT || robot_arm_index_ == ARM_RIGHT)
-        {
+        const auto copyArmFeedback = [&](int arm_idx, size_t dst_offset, const char* name_prefix) {
             for (size_t i = 0; i < 7; i++)
             {
-                double pos_raw = frame_data_.m_Out[robot_arm_index_].m_FB_Joint_Pos[i];
-                double vel_raw = frame_data_.m_Out[robot_arm_index_].m_FB_Joint_Vel[i];
-                double effort_raw = frame_data_.m_Out[robot_arm_index_].m_FB_Joint_SToq[i];
-                
-                // 检查NaN值，如果发现NaN则使用上一次的有效值或0.0
+                const double pos_raw = frame_data_.m_Out[arm_idx].m_FB_Joint_Pos[i];
+                const double vel_raw = frame_data_.m_Out[arm_idx].m_FB_Joint_Vel[i];
+                const double effort_raw = frame_data_.m_Out[arm_idx].m_FB_Joint_SToq[i];
+
+                const size_t dst_i = dst_offset + i;
+
                 if (std::isnan(pos_raw) || std::isinf(pos_raw))
                 {
                     RCLCPP_WARN_THROTTLE(get_logger(), *get_node()->get_clock(), 1000,
-                        "Joint %zu position is NaN/Inf, using previous value: %.3f", i, hw_position_states_[i]);
-                    // 保持上一次的值不变
+                        "%s %zu position is NaN/Inf, using previous value: %.3f", name_prefix, i, hw_position_states_[dst_i]);
                 }
                 else
                 {
-                    hw_position_states_[i] = degreeToRad(pos_raw);
+                    hw_position_states_[dst_i] = degreeToRad(pos_raw);
                 }
-                
+
                 if (std::isnan(vel_raw) || std::isinf(vel_raw))
                 {
                     RCLCPP_WARN_THROTTLE(get_logger(), *get_node()->get_clock(), 1000,
-                        "Joint %zu velocity is NaN/Inf, using previous value: %.3f", i, hw_velocity_states_[i]);
-                    // 保持上一次的值不变
+                        "%s %zu velocity is NaN/Inf, using previous value: %.3f", name_prefix, i, hw_velocity_states_[dst_i]);
                 }
                 else
                 {
-                    hw_velocity_states_[i] = vel_raw;
+                    hw_velocity_states_[dst_i] = vel_raw;
                 }
-                
+
                 if (std::isnan(effort_raw) || std::isinf(effort_raw))
                 {
                     RCLCPP_WARN_THROTTLE(get_logger(), *get_node()->get_clock(), 1000,
-                        "Joint %zu effort is NaN/Inf, using previous value: %.3f", i, hw_effort_states_[i]);
-                    // 保持上一次的值不变
+                        "%s %zu effort is NaN/Inf, using previous value: %.3f", name_prefix, i, hw_effort_states_[dst_i]);
                 }
                 else
                 {
-                    hw_effort_states_[i] = effort_raw;
+                    hw_effort_states_[dst_i] = effort_raw;
                 }
             }
+        };
+
+        if (robot_arm_index_ == ARM_LEFT || robot_arm_index_ == ARM_RIGHT)
+        {
+            copyArmFeedback(robot_arm_index_, 0, "Joint");
         }
         else if (robot_arm_index_ == ARM_DUAL)
         {
-            for (size_t i = 0; i < 7; i++)
-            {
-                double pos_raw = frame_data_.m_Out[ARM_LEFT].m_FB_Joint_Pos[i];
-                double vel_raw = frame_data_.m_Out[ARM_LEFT].m_FB_Joint_Vel[i];
-                double effort_raw = frame_data_.m_Out[ARM_LEFT].m_FB_Joint_SToq[i];
-                
-                // 检查NaN值
-                if (std::isnan(pos_raw) || std::isinf(pos_raw))
-                {
-                    RCLCPP_WARN_THROTTLE(get_logger(), *get_node()->get_clock(), 1000,
-                        "Left arm joint %zu position is NaN/Inf, using previous value: %.3f", i, hw_position_states_[i]);
-                }
-                else
-                {
-                    hw_position_states_[i] = degreeToRad(pos_raw);
-                }
-                
-                if (std::isnan(vel_raw) || std::isinf(vel_raw))
-                {
-                    RCLCPP_WARN_THROTTLE(get_logger(), *get_node()->get_clock(), 1000,
-                        "Left arm joint %zu velocity is NaN/Inf, using previous value: %.3f", i, hw_velocity_states_[i]);
-                }
-                else
-                {
-                    hw_velocity_states_[i] = vel_raw;
-                }
-                
-                if (std::isnan(effort_raw) || std::isinf(effort_raw))
-                {
-                    RCLCPP_WARN_THROTTLE(get_logger(), *get_node()->get_clock(), 1000,
-                        "Left arm joint %zu effort is NaN/Inf, using previous value: %.3f", i, hw_effort_states_[i]);
-                }
-                else
-                {
-                    hw_effort_states_[i] = effort_raw;
-                }
-            }
-
-            for (size_t i = 0; i < 7; i++)
-            {
-                double pos_raw = frame_data_.m_Out[ARM_RIGHT].m_FB_Joint_Pos[i];
-                double vel_raw = frame_data_.m_Out[ARM_RIGHT].m_FB_Joint_Vel[i];
-                double effort_raw = frame_data_.m_Out[ARM_RIGHT].m_FB_Joint_SToq[i];
-                
-                // 检查NaN值
-                if (std::isnan(pos_raw) || std::isinf(pos_raw))
-                {
-                    RCLCPP_WARN_THROTTLE(get_logger(), *get_node()->get_clock(), 1000,
-                        "Right arm joint %zu position is NaN/Inf, using previous value: %.3f", i, hw_position_states_[i + 7]);
-                }
-                else
-                {
-                    hw_position_states_[i + 7] = degreeToRad(pos_raw);
-                }
-                
-                if (std::isnan(vel_raw) || std::isinf(vel_raw))
-                {
-                    RCLCPP_WARN_THROTTLE(get_logger(), *get_node()->get_clock(), 1000,
-                        "Right arm joint %zu velocity is NaN/Inf, using previous value: %.3f", i, hw_velocity_states_[i + 7]);
-                }
-                else
-                {
-                    hw_velocity_states_[i + 7] = vel_raw;
-                }
-                
-                if (std::isnan(effort_raw) || std::isinf(effort_raw))
-                {
-                    RCLCPP_WARN_THROTTLE(get_logger(), *get_node()->get_clock(), 1000,
-                        "Right arm joint %zu effort is NaN/Inf, using previous value: %.3f", i, hw_effort_states_[i + 7]);
-                }
-                else
-                {
-                    hw_effort_states_[i + 7] = effort_raw;
-                }
-            }
+            copyArmFeedback(ARM_LEFT, 0, "Left arm joint");
+            copyArmFeedback(ARM_RIGHT, 7, "Right arm joint");
         }
         previous_message_frame_ = frame_data_.m_Out[robot_arm_index_].m_OutFrameSerial;
 
@@ -1744,7 +1589,6 @@ void MarvinHardware::applyRobotConfiguration(int mode, int arm_side, int drag_mo
 
     bool MarvinHardware::writeToHardware(std::vector<double>& hw_commands)
     {
-        // TODO: Implement actual joint command sending to Marvin
         bool result = true;
         OnClearSet();
         if (robot_arm_index_ == ARM_LEFT)
@@ -1758,102 +1602,12 @@ void MarvinHardware::applyRobotConfiguration(int mode, int arm_side, int drag_mo
         else if (robot_arm_index_ == ARM_DUAL)
         {
             result = OnSetJointCmdPos_A(hw_commands.data());
-            // RCLCPP_INFO(get_logger(), "write to left arm %d", result);
             result = result && OnSetJointCmdPos_B(hw_commands.data() + 7);
-            // RCLCPP_INFO(get_logger(), "write to right arm %d", result);
         }
         OnSetSend();
         return result;
     }
 
-    void MarvinHardware::simulateHardware(const rclcpp::Duration& period)
-    {
-        // Simple simulation: move toward commanded position with velocity limits
-        for (size_t i = 0; i < hw_position_states_.size(); i++) 
-        {
-            double position_error = hw_position_commands_[i] - hw_position_states_[i];
-            double max_velocity_change = velocity_limits_[i] * period.seconds();
-            
-            // Calculate desired velocity
-            double desired_velocity = std::copysign(
-                std::min(std::abs(position_error) / period.seconds(), velocity_limits_[i]),
-                position_error
-            );
-            
-            // Apply velocity limits
-            double velocity_change = desired_velocity - hw_velocity_states_[i];
-            if (std::abs(velocity_change) > max_velocity_change) 
-            {
-                velocity_change = std::copysign(max_velocity_change, velocity_change);
-            }
-            
-            hw_velocity_states_[i] += velocity_change;
-            hw_position_states_[i] += hw_velocity_states_[i] * period.seconds();
-            
-            // Simulate effort based on acceleration
-            hw_effort_states_[i] = velocity_change / period.seconds() * 0.1;
-        }
-    }
-
-    bool MarvinHardware::initializeJointLimits()
-    {
-        // position_lower_limits_.resize(info_.joints.size());
-        // position_upper_limits_.resize(info_.joints.size());
-        // velocity_limits_.resize(info_.joints.size());
-        // effort_limits_.resize(info_.joints.size());
-
-        for (size_t i = 0; i < info_.joints.size(); i++)
-        {
-            const auto& joint = info_.joints[i];
-
-            // Parse position limits
-            for (const auto& command_interface : joint.command_interfaces)
-            {
-                if (command_interface.name == hardware_interface::HW_IF_POSITION)
-                {
-                    if (!command_interface.min.empty())
-                    {
-                        position_lower_limits_[i] = std::stod(command_interface.min);
-                    }
-                    if (!command_interface.max.empty())
-                    {
-                        position_upper_limits_[i] = std::stod(command_interface.max);
-                    }
-                }
-                else if (command_interface.name == hardware_interface::HW_IF_VELOCITY)
-                {
-                    if (!command_interface.max.empty())
-                    {
-                        velocity_limits_[i] = std::stod(command_interface.max);
-                    }
-                }
-            }
-        
-            // Parse effort limits from joint limits in URDF
-            effort_limits_[i] = std::stod(joint.command_interfaces[0].max);
-            
-            RCLCPP_DEBUG(
-                    get_logger(),
-                    "Joint %s: pos=[%.3f, %.3f], vel_limit=%.3f, effort_limit=%.3f",
-                    joint.name.c_str(), position_lower_limits_[i], position_upper_limits_[i],
-                    velocity_limits_[i], effort_limits_[i]);
-        }
-
-        return true;
-    }
-
-    void MarvinHardware::logJointStates()
-    {
-        std::stringstream ss;
-        ss << "Joint States - ";
-        for (size_t i = 0; i < joint_names_.size() && i < hw_position_states_.size(); i++)
-        {
-            ss << joint_names_[i] << ": pos=" << std::fixed << std::setprecision(3) << hw_position_states_[i]
-                << ", vel=" << hw_velocity_states_[i] << ", cmd=" << hw_position_commands_[i];
-            if (i < joint_names_.size() - 1) ss << " | ";
-        }
-        RCLCPP_DEBUG(get_logger(), "%s", ss.str().c_str());
-    }
 } // namespace marvin_ros2_control
 
 
