@@ -6,6 +6,7 @@
 #include <thread>
 #include <random>
 #include <sstream>
+#include <iomanip>
 #include <algorithm>
 #include <cctype>
 #include <set>
@@ -947,10 +948,74 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             return hardware_interface::CallbackReturn::ERROR;
         }
 
-        // Read initial joint states from hardware
-        if (!readFromHardware(true))
+        // Read initial joint states from hardware with validation
+        // Try multiple times to ensure data is ready and stable
+        const int max_read_attempts = 10;
+        const int read_interval_ms = 100;  // 100ms between attempts
+        bool initial_read_success = false;
+        bool all_zeros_detected = false;
+        
+        for (int attempt = 0; attempt < max_read_attempts; attempt++)
         {
-            RCLCPP_ERROR(get_logger(), "Failed to read initial joint states from hardware");
+            if (!readFromHardware(true))
+            {
+                RCLCPP_WARN(get_logger(), "Failed to read initial joint states (attempt %d/%d)", 
+                           attempt + 1, max_read_attempts);
+                usleep(read_interval_ms * 1000);
+                continue;
+            }
+            
+            // Validate that we didn't get all zeros (which likely indicates uninitialized data)
+            bool all_zeros = true;
+            for (size_t i = 0; i < hw_position_states_.size(); i++)
+            {
+                if (std::abs(hw_position_states_[i]) > 1e-6)  // Check if significantly non-zero
+                {
+                    all_zeros = false;
+                    break;
+                }
+            }
+            
+            if (all_zeros)
+            {
+                all_zeros_detected = true;
+                RCLCPP_WARN(get_logger(), "Initial joint positions are all zeros (attempt %d/%d), "
+                           "this may indicate uninitialized hardware data. Retrying...", 
+                           attempt + 1, max_read_attempts);
+                usleep(read_interval_ms * 1000);
+                continue;
+            }
+            
+            // Additional validation: check if positions are within reasonable range
+            // Typical joint range: -180 to +180 degrees = -3.14 to +3.14 radians
+            bool positions_valid = true;
+            for (size_t i = 0; i < hw_position_states_.size(); i++)
+            {
+                if (std::abs(hw_position_states_[i]) > 4.0)  // ~230 degrees, beyond typical range
+                {
+                    RCLCPP_WARN(get_logger(), "Joint %zu position %.3f rad (%.1f deg) is outside "
+                               "typical range, but accepting it", i, hw_position_states_[i], 
+                               radToDegree(hw_position_states_[i]));
+                    // Don't fail, just warn - robot might be in unusual position
+                }
+            }
+            
+            initial_read_success = true;
+            RCLCPP_INFO(get_logger(), "Successfully read initial joint states (attempt %d/%d)", 
+                       attempt + 1, max_read_attempts);
+            break;
+        }
+        
+        if (!initial_read_success)
+        {
+            RCLCPP_ERROR(get_logger(), "Failed to read initial joint states after %d attempts", 
+                        max_read_attempts);
+            if (all_zeros_detected)
+            {
+                RCLCPP_ERROR(get_logger(), "Hardware appears to be returning all zeros. "
+                           "This may indicate: 1) Hardware not ready, 2) Communication issue, "
+                           "3) Hardware initialization problem. Please check hardware status.");
+            }
             return hardware_interface::CallbackReturn::ERROR;
         }
 
@@ -959,6 +1024,45 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         {
             hw_position_commands_[i] = hw_position_states_[i];
             hw_velocity_commands_[i] = hw_velocity_states_[i];
+        }
+        
+        // Log initial positions for debugging
+        // Handle both single arm (7 joints) and dual arm (14 joints) cases
+        if (hw_position_states_.size() == 7)
+        {
+            // Single arm: 7 joints
+            RCLCPP_INFO(get_logger(), "Initial joint positions (rad): [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f]",
+                       hw_position_states_[0], hw_position_states_[1], hw_position_states_[2],
+                       hw_position_states_[3], hw_position_states_[4], hw_position_states_[5],
+                       hw_position_states_[6]);
+        }
+        else if (hw_position_states_.size() == 14)
+        {
+            // Dual arm: 14 joints (left 7 + right 7)
+            RCLCPP_INFO(get_logger(), "Initial joint positions (rad) - Left arm: [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f]",
+                       hw_position_states_[0], hw_position_states_[1], hw_position_states_[2],
+                       hw_position_states_[3], hw_position_states_[4], hw_position_states_[5],
+                       hw_position_states_[6]);
+            RCLCPP_INFO(get_logger(), "Initial joint positions (rad) - Right arm: [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f]",
+                       hw_position_states_[7], hw_position_states_[8], hw_position_states_[9],
+                       hw_position_states_[10], hw_position_states_[11], hw_position_states_[12],
+                       hw_position_states_[13]);
+        }
+        else
+        {
+            // Generic case: log all joints
+            std::stringstream ss;
+            ss << "Initial joint positions (rad): [";
+            for (size_t i = 0; i < hw_position_states_.size(); i++)
+            {
+                ss << std::fixed << std::setprecision(3) << hw_position_states_[i];
+                if (i < hw_position_states_.size() - 1)
+                {
+                    ss << ", ";
+                }
+            }
+            ss << "]";
+            RCLCPP_INFO(get_logger(), "%s", ss.str().c_str());
         }
         OnClearSet();
         OnLogOff();
