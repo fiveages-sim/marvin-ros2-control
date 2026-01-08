@@ -986,20 +986,6 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                 continue;
             }
             
-            // Additional validation: check if positions are within reasonable range
-            // Typical joint range: -180 to +180 degrees = -3.14 to +3.14 radians
-            bool positions_valid = true;
-            for (size_t i = 0; i < hw_position_states_.size(); i++)
-            {
-                if (std::abs(hw_position_states_[i]) > 4.0)  // ~230 degrees, beyond typical range
-                {
-                    RCLCPP_WARN(get_logger(), "Joint %zu position %.3f rad (%.1f deg) is outside "
-                               "typical range, but accepting it", i, hw_position_states_[i], 
-                               radToDegree(hw_position_states_[i]));
-                    // Don't fail, just warn - robot might be in unusual position
-                }
-            }
-            
             initial_read_success = true;
             RCLCPP_INFO(get_logger(), "Successfully read initial joint states (attempt %d/%d)", 
                        attempt + 1, max_read_attempts);

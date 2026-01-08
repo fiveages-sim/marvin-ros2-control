@@ -21,7 +21,7 @@ pkg_check_modules(EIGEN3 REQUIRED eigen3)
 set(HEADER_KINE_DIR "${CMAKE_SOURCE_DIR}/external/TJ_FX_ROBOT_CONTRL_SDK/kinematicsSDK/")
 set(HEADER_CONTROL_DIR "${CMAKE_SOURCE_DIR}/external/TJ_FX_ROBOT_CONTRL_SDK/contrlSDK/")
 set(LIB_KINE_DIR "${CMAKE_SOURCE_DIR}/external/TJ_FX_ROBOT_CONTRL_SDK/kinematicsSDK/")
-set(LIB_CONTROL_DIR "${CMAKE_SOURCE_DIR}/external/TJ_FX_ROBOT_CONTRL_SDK/demo_linux_win/c++_linux/")
+set(LIB_CONTROL_DIR "${CMAKE_SOURCE_DIR}/external/TJ_FX_ROBOT_CONTRL_SDK/contrlSDK/")
 
 # build controlSDK
 add_custom_command(
@@ -32,11 +32,11 @@ add_custom_command(
 )
 add_custom_target(build_marvin_sdk ALL DEPENDS ${LIB_CONTROL_DIR}/libMarvinSDK.so)
 
-# # Link to the existing .so library (replace with your actual .so file name and path)
-# find_library(EXTERNAL_KINEMATICSO NAMES "libKine.so" PATHS ${LIB_KINE_DIR} NO_DEFAULT_PATH)
-
 # Link to the existing .so library (replace with your actual .so file name and path)
-find_library(EXTERNAL_CONTROLSO NAMES "libMarvinSDK.so" PATHS ${LIB_CONTROL_DIR} NO_DEFAULT_PATH REQUIRED)
+find_library(EXTERNAL_KINEMATICSO NAMES "libKine.so" PATHS ${LIB_KINE_DIR} NO_DEFAULT_PATH)
+
+# Note: libMarvinSDK.so is built during compilation, so we link it directly via target_link_directories
+# instead of using find_library which runs at configure time
 
 
 # Create library
@@ -66,6 +66,12 @@ target_include_directories(${PROJECT_NAME} PUBLIC
         PRIVATE ${EIGEN3_INCLUDE_DIRS}
 )
 
+# Add library directories for linking
+target_link_directories(${PROJECT_NAME} PRIVATE
+    ${LIB_KINE_DIR}
+    ${LIB_CONTROL_DIR}
+)
+
 ament_target_dependencies(${PROJECT_NAME}
         hardware_interface
         rclcpp
@@ -84,7 +90,7 @@ ament_target_dependencies(${PROJECT_NAME}
 # # Link xCoreSDK libraries
 target_link_libraries(${PROJECT_NAME}
         ${EXTERNAL_KINEMATICSO}
-        ${EXTERNAL_CONTROLSO}
+        MarvinSDK
         pthread
         rt
 )
