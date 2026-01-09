@@ -40,9 +40,9 @@ namespace marvin_ros2_control
     static const std::vector<double> kDefaultCartDGains  = {0.6, 0.6, 0.6, 0.4, 0.4, 0.4, 0.4};
 
     static const std::vector<double> kDefaultLeftKineParam  = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
-    static const std::vector<double> kDefaultLeftDynParam   = {2.0, 0.0, 0.0, 96.411347, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    static const std::vector<double> kDefaultLeftDynParam   = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
     static const std::vector<double> kDefaultRightKineParam = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
-    static const std::vector<double> kDefaultRightDynParam  = {1.8, 0.0, 0.0, 96.411347, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    static const std::vector<double> kDefaultRightDynParam  = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
 
     // ctrl_mode 相关：字符串 <-> 内部 mode(int) 的单一转换来源
     // mode: 1=POSITION, 2=JOINT_IMPEDANCE, 3=CART_IMPEDANCE
