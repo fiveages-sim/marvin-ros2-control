@@ -56,13 +56,20 @@ namespace marvin_ros2_control
         static std::vector<uint16_t> parseModbusResponse(const uint8_t* data, size_t data_size, 
                                                          uint8_t expected_slave_id, uint8_t expected_function_code);
 
+        // Get the get_ch_data function pointer
+        GetChDataFunc getGetChDataFunc() const { return on_get_ch_data_; }
+
+    protected:
+        // Member variables for 485 functions
+        GetChDataFunc on_get_ch_data_;
+
     private:
         // Core communication
         bool sendRequest(const std::vector<uint8_t>& request);
 
         // Request building
         std::vector<uint8_t> buildRequest(uint8_t slave_id, uint8_t function_code,
-                                          const std::vector<uint8_t>& data);
+                                         const std::vector<uint8_t>& data);
 
         // CRC calculation
         uint16_t calculateCRC(const uint8_t* data, size_t length);
@@ -70,7 +77,6 @@ namespace marvin_ros2_control
         // Member variables for 485 functions
         Clear485Func clear_485_;
         Send485Func send_485_;
-        GetChDataFunc on_get_ch_data_;
 
         // Static logger instance
         static rclcpp::Logger logger_;
@@ -100,6 +106,26 @@ namespace marvin_ros2_control
         // Note: Pure virtual functions (initialize, move_gripper, getStatus) are inherited
         // from gripper_hardware_common::GripperBase and must be implemented by derived classes.
         // getStatus returns normalized position (0.0=closed, 1.0=open).
+
+        // Process received Modbus response (for compatibility with readAndProcessData)
+        // Default implementation returns false, should be overridden by derived classes
+        virtual bool processReadResponse(const uint8_t* data, size_t data_size, 
+                                        int& torque, int& velocity, double& position)
+        {
+            (void)data;
+            (void)data_size;
+            (void)torque;
+            (void)velocity;
+            (void)position;
+            return false;
+        }
+
+        // Update status from parsed Modbus response
+        // Default implementation does nothing, should be overridden by derived classes
+        virtual void updateStatusFromResponse(const std::vector<uint16_t>& registers)
+        {
+            (void)registers;
+        }
 
         // Optional virtual functions with default implementations
         virtual void deinitialize() override
@@ -182,6 +208,30 @@ namespace marvin_ros2_control
         // Returns true if response was successfully processed, false otherwise
         virtual bool processReadResponse(const uint8_t* data, size_t data_size, 
                                         int& torque, int& velocity, double& position) = 0;
+
+        // Read data from port and process it (wrapper function)
+        // Returns true if data was successfully read and processed
+        bool readAndProcessData(int& torque, int& velocity, double& position)
+        {
+            GetChDataFunc get_ch_data = modbus_io_.getGetChDataFunc();
+            if (!get_ch_data)
+            {
+                std::cout << "get_ch_data is null" << std::endl;
+                return false;
+            }
+            
+            unsigned char data_buf[256] = {0};
+            long ch = 2;
+            const long size = get_ch_data(data_buf, &ch);
+            
+            // Always try to process, even if size is 0 (to check for any data)
+            if (size > 0)
+            {
+                return processReadResponse(data_buf, static_cast<size_t>(size), torque, velocity, position);
+            }
+            // std::cout << "size is 0" << std::endl;
+            return false;
+        }
 
         // Get cached status (updated by recv_thread_func)
         bool getCachedStatus(int& torque, int& velocity, double& position) const

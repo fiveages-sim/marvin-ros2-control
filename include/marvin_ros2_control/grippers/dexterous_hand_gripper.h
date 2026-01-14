@@ -27,6 +27,19 @@ namespace marvin_ros2_control
         // 7-DOF control method (7 joints: Thumb_Pitch, Thumb_Yaw, Index_Pitch, Middle_Pitch, Ring_Pitch, Little_Pitch, Thumb_Roll)
         bool move_gripper(const std::vector<int>& torques, const std::vector<int>& velocities, const std::vector<double>& positions);
 
+        // Process received Modbus response for 7 joints
+        // Returns true if response was successfully processed
+        bool processReadResponse(const uint8_t* data, size_t data_size, 
+                                int& torque, int& velocity, double& position) override;
+
+        // Update status from parsed Modbus response
+        void updateStatusFromResponse(const std::vector<uint16_t>& registers) override;
+
+        // Get joint positions (normalized 0.0-1.0)
+        const std::array<double, 7>& getJointPositions() const { return joint_positions_; }
+        const std::array<double, 7>& getJointVelocities() const { return joint_velocities_; }
+        const std::array<double, 7>& getJointEfforts() const { return joint_efforts_; }
+
         // Additional methods for individual finger control
         bool setFingerPosition(uint8_t finger_id, uint8_t position);
         bool setFingerTorque(uint8_t finger_id, uint8_t torque);
@@ -103,6 +116,12 @@ namespace marvin_ros2_control
         uint16_t getPositionRegister(uint8_t finger_id) const;
         uint16_t getTorqueRegister(uint8_t finger_id) const;
         uint16_t getSpeedRegister(uint8_t finger_id) const;
+
+        // Joint state (7 joints: normalized 0.0-1.0)
+        std::array<double, 7> joint_positions_ = {0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5};
+        std::array<double, 7> joint_velocities_ = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+        std::array<double, 7> joint_efforts_ = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+        bool status_valid_ = false;
     };
 } // namespace marvin_ros2_control
 

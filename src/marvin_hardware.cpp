@@ -1157,7 +1157,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
     void MarvinHardware::gripper_callback()
     {
         // Read frequency controller: read every 4 cycles to reduce Modbus load
-        ReadFrequencyController read_controller(4);
+        ReadFrequencyController read_controller(1);
         
         while (hardware_connected_)
         {
@@ -1174,8 +1174,8 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                         gripper_hardware_common::GripperBase* gripper_base = gripper_ptr_[i].get();
                         gripper_base->getStatus();
                     }
-                    std::this_thread::sleep_for(std::chrono::milliseconds(20));
                 }
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
             // Write commands when gripper command is different
             for(size_t i = 0; i < gripper_ptr_.size() && i < gripper_stopped_.size() && i < last_gripper_command_.size(); i++)
@@ -1447,16 +1447,6 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
 
     bool MarvinHardware::recv_thread_func()
     {
-        struct ChannelSpec
-        {
-            const char* name;
-            GetChDataFunc get_ch_data;
-            size_t gripper_idx;
-        };
-
-        long ch = 2;
-        unsigned char data_buf[256] = {0};
-
         while (hardware_connected_)
         {
             if (!has_gripper_ || gripper_ptr_.empty())
@@ -1465,56 +1455,13 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                 continue;
             }
 
-            // Determine which channels to poll based on arm configuration.
-            // Mapping rule:
-            // - LEFT:  idx0 <- channel A
-            // - RIGHT: idx0 <- channel B
-            // - DUAL:  idx0 <- channel A, idx1 <- channel B
-            ChannelSpec specs[2];
-            size_t spec_count = 0;
-            if (robot_arm_index_ == ARM_LEFT)
+            for (size_t i = 0; i < gripper_ptr_.size(); ++i)
             {
-                specs[0] = {"A", OnGetChDataA, 0};
-                spec_count = 1;
-            }
-            else if (robot_arm_index_ == ARM_RIGHT)
-            {
-                specs[0] = {"B", OnGetChDataB, 0};
-                spec_count = 1;
-            }
-            else if (robot_arm_index_ == ARM_DUAL)
-            {
-                specs[0] = {"A", OnGetChDataA, 0};
-                specs[1] = {"B", OnGetChDataB, 1};
-                spec_count = 2;
-                if (gripper_ptr_.size() < 2)
-                {
-                    RCLCPP_WARN_THROTTLE(get_logger(), *get_node()->get_clock(), 2000,
-                        "Dual-arm gripper configured but created_grippers=%zu (<2). Right gripper feedback may be missing.",
-                        gripper_ptr_.size());
-                }
-            }
-
-            for (size_t si = 0; si < spec_count; ++si)
-            {
-                const auto& spec = specs[si];
-                if (spec.gripper_idx >= gripper_ptr_.size())
-                {
-                    continue;
-                }
-
-                const long size = spec.get_ch_data(data_buf, &ch);
-                if (size <= 0)
-                {
-                    continue;
-                }
-
                 int torque = 0, velocity = 0;
                 double position = 0.0;
-                if (gripper_ptr_[spec.gripper_idx]->processReadResponse(
-                        data_buf, static_cast<size_t>(size), torque, velocity, position))
+                if (gripper_ptr_[i]->readAndProcessData(torque, velocity, position))
                 {
-                    updateGripperState(spec.gripper_idx, position, velocity, torque);
+                    updateGripperState(i, position, velocity, torque);
                 }
             }
 

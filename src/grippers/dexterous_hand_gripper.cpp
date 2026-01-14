@@ -103,6 +103,106 @@ namespace marvin_ros2_control
         return sendReadRequestAsync(SLAVE_ID, THUMB_PITCH_REG, 7, READ_FUNCTION);
     }
 
+    bool DexterousHandGripper::processReadResponse(const uint8_t* data, size_t data_size,
+                                                   int& torque, int& velocity, double& position)
+    {
+        // 响应协议: 从站号 + 功能代码 + 字节数 + 7个寄存器数据 (每个2字节) + CRC
+        // 例如: 01 03 0E 00 80 00 80 00 80 00 80 00 80 00 80 00 80 [CRC]
+        // 01: 从站号
+        // 03: 功能代码 03（读取保持寄存器）
+        // 0E: 数据字节数（7个寄存器 × 2个字节 = 14个字节 = 0x0E）
+        // 00 80: 寄存器0的值（位置值，0-255）
+        // ... 其他6个寄存器
+        
+        if (data_size < 5)
+        {
+            return false;
+        }
+
+        // 打印原始读取数据
+        std::string hex_str;
+        for (size_t i = 0; i < data_size; ++i)
+        {
+            char hex[4];
+            snprintf(hex, sizeof(hex), "%02X ", data[i]);
+            hex_str += hex;
+        }
+        RCLCPP_INFO(logger_, "📥 Dexterous Hand Raw Response (%zu bytes): %s", data_size, hex_str.c_str());
+
+        // 验证响应
+        if (data[0] != SLAVE_ID || data[1] != READ_FUNCTION)
+        {
+            RCLCPP_WARN(logger_, "Response mismatch: slave=0x%02X (expected 0x%02X), func=0x%02X (expected 0x%02X)",
+                       data[0], SLAVE_ID, data[1], READ_FUNCTION);
+            return false;
+        }
+
+        // 解析寄存器数据
+        uint8_t byte_count = data[2];
+        if (byte_count != 14)  // 7个寄存器 × 2字节 = 14字节
+        {
+            RCLCPP_WARN(logger_, "Unexpected byte count: %d (expected 14)", byte_count);
+            return false;
+        }
+
+        if (data_size < static_cast<size_t>(3 + byte_count + 2))  // 3字节头部 + 数据 + 2字节CRC
+        {
+            RCLCPP_WARN(logger_, "Insufficient data size: %zu (expected at least %zu)", 
+                       data_size, static_cast<size_t>(3 + byte_count + 2));
+            return false;
+        }
+
+        // 解析7个寄存器值
+        std::vector<uint16_t> registers;
+        registers.reserve(7);
+        for (size_t i = 0; i < 7; ++i)
+        {
+            size_t idx = 3 + i * 2;
+            uint16_t value = static_cast<uint16_t>(data[idx] << 8) | data[idx + 1];
+            registers.push_back(value);
+        }
+
+        // 更新状态
+        updateStatusFromResponse(registers);
+
+        // 返回第一个关节的值（用于兼容性）
+        position = joint_positions_[0];
+        velocity = static_cast<int>(joint_velocities_[0] * 255.0);
+        torque = static_cast<int>(joint_efforts_[0] * 255.0);
+
+        return true;
+    }
+
+    void DexterousHandGripper::updateStatusFromResponse(const std::vector<uint16_t>& registers)
+    {
+        if (registers.size() < 7)
+        {
+            RCLCPP_WARN(logger_, "Insufficient registers: got %zu, expected 7", registers.size());
+            return;
+        }
+
+        // 打印解析后的寄存器值
+        RCLCPP_INFO(logger_, "📥 Dexterous Hand Parsed Registers:");
+        for (size_t i = 0; i < 7; ++i)
+        {
+            uint8_t raw_pos = static_cast<uint8_t>(registers[i] & 0xFF);
+            // 将原始值 (0-255) 转换为归一化值 (0.0-1.0)
+            joint_positions_[i] = static_cast<double>(raw_pos) / 255.0;
+            joint_velocities_[i] = 0.0;  // 速度暂时设为0，可以从其他寄存器读取
+            joint_efforts_[i] = 0.0;     // 力矩暂时设为0，可以从其他寄存器读取
+            
+            RCLCPP_INFO(logger_, "  Joint[%zu]: raw=0x%02X (0x%04X), normalized=%.3f",
+                       i, raw_pos, registers[i], joint_positions_[i]);
+        }
+
+        RCLCPP_INFO(logger_, "  Parsed positions: [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f]",
+                   joint_positions_[0], joint_positions_[1], joint_positions_[2],
+                   joint_positions_[3], joint_positions_[4], joint_positions_[5],
+                   joint_positions_[6]);
+
+        status_valid_ = true;
+    }
+
     void DexterousHandGripper::deinitialize()
     {
         RCLCPP_INFO(logger_, "Dexterous Hand Gripper deinitialized");
