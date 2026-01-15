@@ -1,4 +1,4 @@
 [submodule "external/TJ_FX_ROBOT_CONTRL_SDK"]
 	path = external/TJ_FX_ROBOT_CONTRL_SDK
-	url = https://github.com/cynthia-you/TJ_FX_ROBOT_CONTRL_SDK.git
+	url = git@github.com:cynthia-you/TJ_FX_ROBOT_CONTRL_SDK.git
 	branch = master
