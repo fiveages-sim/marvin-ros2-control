@@ -1,14 +1,14 @@
 #include "marvin_ros2_control/grippers/gripper_control.h"
+#include "marvin_ros2_control/hands/modbus_hand.h"
 #include "MarvinSDK.h"
 #include <thread>
 #include <chrono>
+#include "rclcpp/logging.hpp"
 
 namespace marvin_ros2_control
 {
-    // Initialize static logger
+    // Initialize static loggers
     rclcpp::Logger ModbusIO::logger_ = rclcpp::get_logger("modbus_io");
-    rclcpp::Logger ModbusHand::logger_ = rclcpp::get_logger("modbus_hand");
-    rclcpp::Logger ModbusGripper::logger_ = rclcpp::get_logger("modbus_gripper");
 
     inline void hex_to_str(const unsigned char* data, int size, char* output, int output_size)
     {
@@ -335,5 +335,25 @@ namespace marvin_ros2_control
         }
 
         return crc;
+    }
+
+    // ==============================================
+    // ModbusGripper Implementation
+    // ==============================================
+
+    ModbusGripper::ModbusGripper(Clear485Func clear_485, Send485Func send_485,
+                                 GetChDataFunc on_get_ch_data)
+        : ModbusIO(clear_485, send_485, on_get_ch_data)
+    {
+    }
+
+    // ==============================================
+    // ModbusHand Implementation
+    // ==============================================
+
+    ModbusHand::ModbusHand(Clear485Func clear_485, Send485Func send_485,
+                          GetChDataFunc on_get_ch_data)
+        : ModbusIO(clear_485, send_485, on_get_ch_data)
+    {
     }
 }

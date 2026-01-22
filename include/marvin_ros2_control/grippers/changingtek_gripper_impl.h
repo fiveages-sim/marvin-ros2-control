@@ -4,7 +4,9 @@
 #include "MarvinSDK.h"
 #include <thread>
 #include <chrono>
+#include "rclcpp/logging.hpp"
 #include "gripper_hardware_common/utils/PositionConverter.h"
+#include "gripper_hardware_common/utils/TorqueConverter.h"
 
 namespace marvin_ros2_control
 {
@@ -37,12 +39,18 @@ namespace marvin_ros2_control
         uint16_t modbus_pos = PositionConverter::Changingtek90::normalizedToModbus(normalized_pos);
         int position = static_cast<int>(modbus_pos);
         
-        RCLCPP_INFO(logger_, "Changingtek Gripper moving - normalized: %.3f (modbus: %d), vel: %d, trq: %d", 
-                   normalized_pos, position, velocity, torque);
+        // Convert torque: input torque (0-100, already scaled by gripper_torque_scale) 
+        // is treated as normalized (0.0-1.0) and converted to Modbus torque value (0-100)
+        // This ensures torque mapping is consistent with position mapping
+        double normalized_torque = static_cast<double>(torque) / 100.0;  // Convert 0-100 to 0.0-1.0
+        int modbus_torque = TorqueConverter::Changingtek90::normalizedToModbus(normalized_torque);
+        
+        RCLCPP_INFO(logger_, "Changingtek Gripper - pos: %.3f->%d, vel: %d, trq: %d->%d (scale: %.2f)", 
+                   normalized_pos, position, velocity, torque, modbus_torque, normalized_torque);
         
         // Prepare values
         uint16_t vel_value = static_cast<uint16_t>(velocity & 0xFFFF);
-        uint16_t trq_value = static_cast<uint16_t>(torque & 0xFFFF);
+        uint16_t trq_value = static_cast<uint16_t>(modbus_torque & 0xFFFF);
         uint16_t pos_low = 0x0000;
         uint16_t pos_high = static_cast<uint16_t>(position & 0xFFFF);
         
@@ -53,7 +61,7 @@ namespace marvin_ros2_control
         result = writeMultipleRegisters(Config::SLAVE_ID, Config::POS_REG_ADDR, position_values,
                                        Config::WRITE_FUNCTION) && result;
             
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
         // Configure acceleration if not set
         if (!acceleration_set_)
         {
@@ -80,7 +88,7 @@ namespace marvin_ros2_control
         // Trigger movement
         result = writeSingleRegister(Config::SLAVE_ID, Config::TRIGGER_REG_ADDR, Config::TRIGGER_VALUE,
                                     Config::WRITE_SINGLE_FUNCTION) && result;
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
         
         return result;
     }

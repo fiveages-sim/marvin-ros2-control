@@ -1,6 +1,6 @@
 #pragma once
 
-#include "marvin_ros2_control/grippers/gripper_control.h"
+#include "marvin_ros2_control/hands/hand_control.h"
 
 namespace marvin_ros2_control
 {
@@ -13,11 +13,11 @@ namespace marvin_ros2_control
      * 
      * Each joint has position, torque, speed, and lock rotor protection parameters.
      */
-    class DexterousHandGripper : public ModbusHand
+    class DexterousHand : public ModbusHand
     {
     public:
-        DexterousHandGripper(Clear485Func clear_485, Send485Func send_485,
-                             GetChDataFunc on_get_ch_data = nullptr);
+        DexterousHand(Clear485Func clear_485, Send485Func send_485,
+                     GetChDataFunc on_get_ch_data = nullptr);
         bool initialize() override;
         bool move_gripper(int torque, int velocity, double position) override;
         bool getStatus() override;
@@ -25,7 +25,7 @@ namespace marvin_ros2_control
         void resetState() override;
 
         // 7-DOF control method (7 joints: Thumb_Pitch, Thumb_Yaw, Index_Pitch, Middle_Pitch, Ring_Pitch, Little_Pitch, Thumb_Roll)
-        bool move_gripper(const std::vector<int>& torques, const std::vector<int>& velocities, const std::vector<double>& positions);
+        bool move_hand(const std::vector<int>& torques, const std::vector<int>& velocities, const std::vector<double>& positions);
 
         // Additional methods for individual finger control
         bool setFingerPosition(uint8_t finger_id, uint8_t position);

@@ -1,38 +1,39 @@
-#include "marvin_ros2_control/grippers/dexterous_hand_gripper.h"
+#include "marvin_ros2_control/hands/dexterous_hand.h"
 #include "MarvinSDK.h"
 #include <algorithm>
+#include "rclcpp/logging.hpp"
 
 namespace marvin_ros2_control
 {
-    DexterousHandGripper::DexterousHandGripper(Clear485Func clear_485, Send485Func send_485,
-                                               GetChDataFunc on_get_ch_data)
+    DexterousHand::DexterousHand(Clear485Func clear_485, Send485Func send_485,
+                                 GetChDataFunc on_get_ch_data)
         : ModbusHand(clear_485, send_485, on_get_ch_data)
     {
     }
 
-    bool DexterousHandGripper::initialize()
+    bool DexterousHand::initialize()
     {
-        RCLCPP_INFO(logger_, "Initializing Dexterous Hand Gripper (slave: 0x%02X)", SLAVE_ID);
+        RCLCPP_INFO(logger_, "Initializing Dexterous Hand (slave: 0x%02X)", SLAVE_ID);
         // Initialize all fingers to default positions
         // Could set default torque, speed, and lock rotor parameters here
         return true;
     }
 
-    bool DexterousHandGripper::move_gripper(int torque, int velocity, double normalized_pos)
+    bool DexterousHand::move_gripper(int torque, int velocity, double normalized_pos)
     {
         // For compatibility with base interface, apply same values to all 7 joints
         std::vector torques(7, torque);
         std::vector velocities(7, velocity);
         std::vector positions(7, normalized_pos);
-        return move_gripper(torques, velocities, positions);
+        return move_hand(torques, velocities, positions);
     }
 
-    bool DexterousHandGripper::move_gripper(const std::vector<int>& torques, const std::vector<int>& velocities, const std::vector<double>& positions)
+    bool DexterousHand::move_hand(const std::vector<int>& torques, const std::vector<int>& velocities, const std::vector<double>& positions)
     {
         // Validate input sizes - need exactly 7 values for 7 DOF
         if (torques.size() != 7 || velocities.size() != 7 || positions.size() != 7)
         {
-            RCLCPP_ERROR(logger_, "Dexterous Hand Gripper: Invalid input size. Expected 7 values, got torques=%zu, velocities=%zu, positions=%zu",
+            RCLCPP_ERROR(logger_, "Dexterous Hand: Invalid input size. Expected 7 values, got torques=%zu, velocities=%zu, positions=%zu",
                         torques.size(), velocities.size(), positions.size());
             return false;
         }
@@ -76,26 +77,25 @@ namespace marvin_ros2_control
         // Write positions, torques, and speeds for all 7 joints
         for (size_t i = 0; i < 7; ++i)
         {
-            // Convert normalized position (0.0-1.0) to finger position (0-255)
-            uint8_t pos = std::clamp(static_cast<uint8_t>(positions[i] * 255.0), static_cast<uint8_t>(0), static_cast<uint8_t>(255));
-            uint8_t trq = std::clamp(static_cast<uint8_t>(torques[i]), static_cast<uint8_t>(0), static_cast<uint8_t>(255));
-            uint8_t vel = std::clamp(static_cast<uint8_t>(velocities[i]), static_cast<uint8_t>(0), static_cast<uint8_t>(255));
-
+            // Convert normalized position (0.0-1.0) to hand position (0-255)
+            uint8_t pos_value = static_cast<uint8_t>(std::max(0.0, std::min(1.0, positions[i])) * 255.0);
+            
             // Write position
-            result = writeSingleRegister(SLAVE_ID, position_regs[i], pos, WRITE_SINGLE_FUNCTION) && result;
-            // Write torque
-            result = writeSingleRegister(SLAVE_ID, torque_regs[i], trq, WRITE_SINGLE_FUNCTION) && result;
-            // Write speed
-            result = writeSingleRegister(SLAVE_ID, speed_regs[i], vel, WRITE_SINGLE_FUNCTION) && result;
+            result = writeSingleRegister(SLAVE_ID, position_regs[i], pos_value, WRITE_SINGLE_FUNCTION) && result;
+            
+            // Write torque (0-255 range)
+            uint8_t torque_value = static_cast<uint8_t>(std::max(0, std::min(255, torques[i])));
+            result = writeSingleRegister(SLAVE_ID, torque_regs[i], torque_value, WRITE_SINGLE_FUNCTION) && result;
+            
+            // Write speed (0-255 range)
+            uint8_t speed_value = static_cast<uint8_t>(std::max(0, std::min(255, velocities[i])));
+            result = writeSingleRegister(SLAVE_ID, speed_regs[i], speed_value, WRITE_SINGLE_FUNCTION) && result;
         }
-
-        RCLCPP_INFO(logger_, "Dexterous Hand Gripper: Set 7-DOF positions=[%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f]",
-                   positions[0], positions[1], positions[2], positions[3], positions[4], positions[5], positions[6]);
 
         return result;
     }
 
-    bool DexterousHandGripper::getStatus()
+    bool DexterousHand::getStatus()
     {
         // Only send read request, don't wait for response
         // The actual status will be updated by recv_thread_func when response arrives
@@ -103,50 +103,47 @@ namespace marvin_ros2_control
         return sendReadRequestAsync(SLAVE_ID, THUMB_PITCH_REG, 7, READ_FUNCTION);
     }
 
-    void DexterousHandGripper::deinitialize()
+    void DexterousHand::deinitialize()
     {
-        RCLCPP_INFO(logger_, "Dexterous Hand Gripper deinitialized");
+        RCLCPP_INFO(logger_, "Dexterous Hand deinitialized");
     }
 
-    void DexterousHandGripper::resetState()
+    void DexterousHand::resetState()
     {
-        // Reset state if needed
+        // Reset hand state if needed
     }
 
-    bool DexterousHandGripper::setFingerPosition(uint8_t finger_id, uint8_t position)
+    bool DexterousHand::setFingerPosition(uint8_t finger_id, uint8_t position)
     {
         uint16_t reg = getPositionRegister(finger_id);
-        if (reg == 0xFFFF)  // Invalid finger ID
+        if (reg == 0xFFFF)
         {
             return false;
         }
-        position = std::clamp(position, static_cast<uint8_t>(0), static_cast<uint8_t>(255));
         return writeSingleRegister(SLAVE_ID, reg, position, WRITE_SINGLE_FUNCTION);
     }
 
-    bool DexterousHandGripper::setFingerTorque(uint8_t finger_id, uint8_t torque)
+    bool DexterousHand::setFingerTorque(uint8_t finger_id, uint8_t torque)
     {
         uint16_t reg = getTorqueRegister(finger_id);
-        if (reg == 0xFFFF)  // Invalid finger ID
+        if (reg == 0xFFFF)
         {
             return false;
         }
-        torque = std::clamp(torque, static_cast<uint8_t>(0), static_cast<uint8_t>(255));
         return writeSingleRegister(SLAVE_ID, reg, torque, WRITE_SINGLE_FUNCTION);
     }
 
-    bool DexterousHandGripper::setFingerSpeed(uint8_t finger_id, uint8_t speed)
+    bool DexterousHand::setFingerSpeed(uint8_t finger_id, uint8_t speed)
     {
         uint16_t reg = getSpeedRegister(finger_id);
-        if (reg == 0xFFFF)  // Invalid finger ID
+        if (reg == 0xFFFF)
         {
             return false;
         }
-        speed = std::clamp(speed, static_cast<uint8_t>(0), static_cast<uint8_t>(255));
         return writeSingleRegister(SLAVE_ID, reg, speed, WRITE_SINGLE_FUNCTION);
     }
 
-    bool DexterousHandGripper::getFingerPosition(uint8_t finger_id, uint8_t& position)
+    bool DexterousHand::getFingerPosition(uint8_t finger_id, uint8_t& position)
     {
         uint16_t reg = getPositionRegister(finger_id);
         if (reg == 0xFFFF)
@@ -162,7 +159,7 @@ namespace marvin_ros2_control
         return false;
     }
 
-    bool DexterousHandGripper::getFingerTorque(uint8_t finger_id, uint8_t& torque)
+    bool DexterousHand::getFingerTorque(uint8_t finger_id, uint8_t& torque)
     {
         uint16_t reg = getTorqueRegister(finger_id);
         if (reg == 0xFFFF)
@@ -178,7 +175,7 @@ namespace marvin_ros2_control
         return false;
     }
 
-    bool DexterousHandGripper::getFingerSpeed(uint8_t finger_id, uint8_t& speed)
+    bool DexterousHand::getFingerSpeed(uint8_t finger_id, uint8_t& speed)
     {
         uint16_t reg = getSpeedRegister(finger_id);
         if (reg == 0xFFFF)
@@ -194,7 +191,7 @@ namespace marvin_ros2_control
         return false;
     }
 
-    uint16_t DexterousHandGripper::getPositionRegister(uint8_t finger_id) const
+    uint16_t DexterousHand::getPositionRegister(uint8_t finger_id) const
     {
         // Finger IDs: 0=Thumb_Pitch, 1=Thumb_Yaw, 2=Index_Pitch, 3=Middle_Pitch, 4=Ring_Pitch, 5=Little_Pitch, 6=Thumb_Roll
         switch (finger_id)
@@ -210,7 +207,7 @@ namespace marvin_ros2_control
         }
     }
 
-    uint16_t DexterousHandGripper::getTorqueRegister(uint8_t finger_id) const
+    uint16_t DexterousHand::getTorqueRegister(uint8_t finger_id) const
     {
         switch (finger_id)
         {
@@ -225,7 +222,7 @@ namespace marvin_ros2_control
         }
     }
 
-    uint16_t DexterousHandGripper::getSpeedRegister(uint8_t finger_id) const
+    uint16_t DexterousHand::getSpeedRegister(uint8_t finger_id) const
     {
         switch (finger_id)
         {

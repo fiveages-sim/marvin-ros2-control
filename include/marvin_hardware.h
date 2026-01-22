@@ -16,7 +16,7 @@
 #include "rclcpp/rclcpp.hpp"
 #include "MarvinSDK.h"
 #include <cmath>
-#include "marvin_ros2_control/grippers/gripper_control.h"
+#include "marvin_ros2_control/grippers/modbus_gripper.h"
 
 namespace marvin_ros2_control
 {
@@ -107,8 +107,10 @@ private:
         void setArmCtrlInternal(int arm_index);
                 
         // Helper method to create gripper based on type
-        std::unique_ptr<ModbusGripper> createGripper(Clear485Func clear_485, Send485Func send_485,
-                                                     GetChDataFunc get_ch_data);
+        std::unique_ptr<ModbusGripper> createGripper(
+            Clear485Func clear_485, 
+            Send485Func send_485,
+            GetChDataFunc get_ch_data);
         void set_tool_parameters();
 
         static double degreeToRad(const double degree)
@@ -142,9 +144,9 @@ private:
         void declare_node_parameters();
 
         
-        //
-        // 夹爪参数
-        std::string gripper_type_;  // 夹爪类型，为空或 "none" 时表示不使用夹爪
+        // Gripper parameters
+        std::string gripper_type_;
+        double gripper_torque_scale_ = 1.0;  // Torque scaling factor (0.0-1.0, default: 1.0)
         bool has_gripper_ = false;
         std::vector<std::string> gripper_joint_name_;
         size_t gripper_joint_index_ = 0;
@@ -159,7 +161,7 @@ private:
         void contains_gripper();
         std::vector<double> step_size_;
         std::thread gripper_ctrl_thread_;
-        std::vector<std::unique_ptr<marvin_ros2_control::ModbusGripper>> gripper_ptr_;
+        std::vector<std::unique_ptr<ModbusGripper>> gripper_ptr_;
         void gripper_callback();
         bool recv_thread_func();
         void updateGripperState(size_t gripper_idx, double position, int velocity, int torque);

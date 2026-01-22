@@ -217,6 +217,18 @@ namespace marvin_ros2_control
         ensure_double_array_sized("left_dyn_param", kDefaultLeftDynParam, 10);
         ensure_double_array_sized("right_kine_param", kDefaultRightKineParam, 6);
         ensure_double_array_sized("right_dyn_param", kDefaultRightDynParam, 10);
+        
+        // Gripper torque scaling factor (0.0-1.0, default: 1.0)
+        // Actual torque sent = max_torque(100) * gripper_torque_scale
+        ensure_param("gripper_torque_scale", 1.0, hw_find("gripper_torque_scale"),
+                     [](const std::string& s, double def) { 
+                         try { 
+                             double val = std::stod(s);
+                             return (val < 0.0) ? 0.0 : ((val > 1.0) ? 1.0 : val);
+                         } catch (...) { 
+                             return def; 
+                         } 
+                     });
     }
     
     hardware_interface::CallbackReturn MarvinHardware::on_init(
@@ -269,6 +281,14 @@ namespace marvin_ros2_control
         // 获取夹爪类型参数
         std::string gripper_type_raw = get_node_param("gripper_type", std::string(""));
         gripper_type_ = normalizeString(gripper_type_raw);
+        
+        // 获取夹爪力矩系数参数
+        gripper_torque_scale_ = get_node_param("gripper_torque_scale", 1.0);
+        // 限制范围在 0.0-1.0
+        if (gripper_torque_scale_ < 0.0) gripper_torque_scale_ = 0.0;
+        if (gripper_torque_scale_ > 1.0) gripper_torque_scale_ = 1.0;
+        RCLCPP_INFO(get_logger(), "Gripper torque scale: %.2f (actual torque = %d)", 
+                    gripper_torque_scale_, static_cast<int>(100.0 * gripper_torque_scale_));
 
         // 获取硬件连接参数
         device_ip_ = get_node_param("device_ip", std::string("192.168.1.190"));
@@ -407,12 +427,6 @@ MarvinHardware::paramCallback(const std::vector<rclcpp::Parameter> & params)
     rcl_interfaces::msg::SetParametersResult result;
     result.successful = true;
 
-    if (!hardware_connected_) {
-        result.successful = false;
-        result.reason = "Hardware not connected";
-        return result;
-    }
-
     // Track if we need to apply configuration
     bool need_config_update = false;
     bool ctrl_mode_changed = false;
@@ -427,6 +441,34 @@ MarvinHardware::paramCallback(const std::vector<rclcpp::Parameter> & params)
     std::vector<double> cart_d_gains;
 
     for (const auto & param : params) {
+        // Handle gripper_torque_scale separately - it doesn't require hardware connection
+        if (param.get_name() == "gripper_torque_scale") {
+            double scale = param.as_double();
+            // Limit range to 0.0-1.0
+            if (scale < 0.0) scale = 0.0;
+            if (scale > 1.0) scale = 1.0;
+            gripper_torque_scale_ = scale;
+            RCLCPP_INFO(get_logger(), "Gripper torque scale updated to: %.2f (actual torque = %d)", 
+                        gripper_torque_scale_, static_cast<int>(100.0 * gripper_torque_scale_));
+            
+            // Reset gripper state so that acceleration/torque will be re-sent with new scale value
+            // This is especially important for ChangingtekGripper which caches acceleration_set_
+            for (size_t i = 0; i < gripper_ptr_.size(); i++) {
+                if (gripper_ptr_[i]) {
+                    gripper_ptr_[i]->resetState();
+                }
+            }
+            RCLCPP_INFO(get_logger(), "Reset state for %zu gripper(s) to apply new torque scale", gripper_ptr_.size());
+            
+            continue;  // Skip hardware connection check for this parameter
+        }
+
+        // Other parameters require hardware connection
+        if (!hardware_connected_) {
+            result.successful = false;
+            result.reason = "Hardware not connected";
+            return result;
+        }
         if (param.get_name() == "ctrl_mode") {
             std::string ctrl_mode_str = param.as_string();
             const int mode = ctrlModeStringToMode(ctrl_mode_str, get_logger());
@@ -820,8 +862,10 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         usleep(100000);
     }
 
-    std::unique_ptr<ModbusGripper> MarvinHardware::createGripper(Clear485Func clear_485, Send485Func send_485,
-                                                                 GetChDataFunc get_ch_data)
+    std::unique_ptr<marvin_ros2_control::ModbusGripper> MarvinHardware::createGripper(
+        marvin_ros2_control::Clear485Func clear_485, 
+        marvin_ros2_control::Send485Func send_485,
+        marvin_ros2_control::GetChDataFunc get_ch_data)
     {
         /// 启动的时候调用
         clear_485();
@@ -858,20 +902,20 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                                 gripper_type_.c_str());
                 }
                 RCLCPP_INFO(get_logger(), "Creating JD Gripper");
-                return std::make_unique<JDGripper>(clear_485, send_485, get_ch_data);
+                return std::make_unique<marvin_ros2_control::JDGripper>(clear_485, send_485, get_ch_data);
 
             case GripperKind::Changingtek90C:
                 RCLCPP_INFO(get_logger(), "Creating CHANGINGTEK90C Gripper");
-                return std::make_unique<ChangingtekGripper90C>(clear_485, send_485, get_ch_data);
+                return std::make_unique<marvin_ros2_control::ChangingtekGripper90C>(clear_485, send_485, get_ch_data);
 
             case GripperKind::Changingtek90D:
                 RCLCPP_INFO(get_logger(), "Creating CHANGINGTEK90D Gripper");
-                return std::make_unique<ChangingtekGripper90D>(clear_485, send_485, get_ch_data);
+                return std::make_unique<marvin_ros2_control::ChangingtekGripper90D>(clear_485, send_485, get_ch_data);
         }
 
         // Defensive fallback
         RCLCPP_INFO(get_logger(), "Creating JD Gripper");
-        return std::make_unique<JDGripper>(clear_485, send_485, get_ch_data);
+        return std::make_unique<marvin_ros2_control::JDGripper>(clear_485, send_485, get_ch_data);
     }
 
     hardware_interface::CallbackReturn MarvinHardware::on_configure(
@@ -1171,8 +1215,8 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                     if(!gripper_stopped_[i])
                     {
                         // Send read request - actual status will be updated by recv_thread_func
-                        gripper_hardware_common::GripperBase* gripper_base = gripper_ptr_[i].get();
-                        gripper_base->getStatus();
+                        marvin_ros2_control::ModbusGripper* gripper = gripper_ptr_[i].get();
+                        gripper->getStatus();
                     }
                     std::this_thread::sleep_for(std::chrono::milliseconds(20));
                 }
@@ -1184,15 +1228,13 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                 {
                     RCLCPP_INFO(get_logger(), "Gripper %zu: writing position %.3f", i, gripper_position_command_[i]);
                     
-                    // Use base class interface - move_gripper now accepts normalized position
-                    gripper_hardware_common::GripperBase* gripper_base = gripper_ptr_[i].get();
+                    ModbusGripper* gripper = gripper_ptr_[i].get();
                     
                     int cur_speed_set = 100;
-                    int cur_effort_set = 100;
+                    // Apply torque scaling: actual_torque = max_torque(100) * gripper_torque_scale_
+                    int cur_effort_set = static_cast<int>(100.0 * gripper_torque_scale_);
                     
-                    // Use base class interface to send command with normalized position
-                    // Each gripper implementation will handle the conversion internally
-                    bool success = gripper_base->move_gripper(cur_effort_set, cur_speed_set, gripper_position_command_[i]);
+                    bool success = gripper->move_gripper(cur_effort_set, cur_speed_set, gripper_position_command_[i]);
                     if (success)
                     {
                         last_gripper_command_[i] = gripper_position_command_[i];
@@ -1208,7 +1250,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                     }
                 }
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
     }
 
@@ -1511,8 +1553,8 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
 
                 int torque = 0, velocity = 0;
                 double position = 0.0;
-                if (gripper_ptr_[spec.gripper_idx]->processReadResponse(
-                        data_buf, static_cast<size_t>(size), torque, velocity, position))
+                ModbusGripper* gripper = gripper_ptr_[spec.gripper_idx].get();
+                if (gripper->processReadResponse(data_buf, static_cast<size_t>(size), torque, velocity, position))
                 {
                     updateGripperState(spec.gripper_idx, position, velocity, torque);
                 }
