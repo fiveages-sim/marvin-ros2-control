@@ -16,7 +16,9 @@
 #include "rclcpp/rclcpp.hpp"
 #include "MarvinSDK.h"
 #include <cmath>
-#include "marvin_ros2_control/grippers/modbus_gripper.h"
+#include "marvin_ros2_control/tool/grippers/modbus_gripper.h"
+#include "marvin_ros2_control/tool/hands/modbus_hand.h"
+#include "gripper_hardware_common/GripperBase.h"
 
 namespace marvin_ros2_control
 {
@@ -106,8 +108,8 @@ private:
         bool writeToHardware(std::vector<double>& hw_commands);
         void setArmCtrlInternal(int arm_index);
                 
-        // Helper method to create gripper based on type
-        std::unique_ptr<ModbusGripper> createGripper(
+        // Helper method to create tool (gripper or hand) based on type
+        std::unique_ptr<gripper_hardware_common::GripperBase> createTool(
             Clear485Func clear_485, 
             Send485Func send_485,
             GetChDataFunc get_ch_data);
@@ -161,12 +163,24 @@ private:
         void contains_gripper();
         std::vector<double> step_size_;
         std::thread gripper_ctrl_thread_;
-        std::vector<std::unique_ptr<ModbusGripper>> gripper_ptr_;
-        void gripper_callback();
+        std::vector<std::unique_ptr<gripper_hardware_common::GripperBase>> tool_ptr_;  // Unified container for hand/gripper
+        bool is_hand_ = false;  // Flag to indicate if end effector is a hand (true) or gripper (false) - used for logging only
+        void tool_callback();
         bool recv_thread_func();
         void updateGripperState(size_t gripper_idx, double position, int velocity, int torque);
         bool connect_gripper();
         void disconnect_gripper();
+        
+        // Unified tool access helpers
+        size_t toolCount() const { return tool_ptr_.size(); }
+        gripper_hardware_common::GripperBase* toolAt(size_t idx) 
+        { 
+            return (idx < tool_ptr_.size()) ? tool_ptr_[idx].get() : nullptr; 
+        }
+        const gripper_hardware_common::GripperBase* toolAt(size_t idx) const 
+        { 
+            return (idx < tool_ptr_.size()) ? tool_ptr_[idx].get() : nullptr; 
+        }
 
     };
 } // namespace marvin_ros2_control

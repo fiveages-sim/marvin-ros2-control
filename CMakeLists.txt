@@ -42,9 +42,8 @@ find_library(EXTERNAL_KINEMATICSO NAMES "libKine.so" PATHS ${LIB_KINE_DIR} NO_DE
 # Create library
 add_library(${PROJECT_NAME} SHARED
         src/marvin_hardware.cpp
-        src/grippers/gripper_control.cpp
-        src/grippers/jd_gripper.cpp
-        src/hands/dexterous_hand.cpp
+        src/tool/modbus_io.cpp
+        src/tool/grippers/jodell/jd_gripper.cpp
 )
 
 add_dependencies(${PROJECT_NAME} build_marvin_sdk)

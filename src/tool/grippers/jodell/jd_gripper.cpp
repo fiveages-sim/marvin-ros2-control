@@ -1,4 +1,4 @@
-#include "marvin_ros2_control/grippers/jd_gripper.h"
+#include "marvin_ros2_control/tool/grippers/jodell/jd_gripper.h"
 #include "MarvinSDK.h"
 #include <thread>
 #include <chrono>
@@ -7,6 +7,9 @@
 #include "gripper_hardware_common/utils/TorqueConverter.h"
 #include "gripper_hardware_common/utils/ModbusConfig.h"
 #include "gripper_hardware_common/utils/JodellCommandBuilder.h"
+
+using namespace gripper_hardware_common;
+using namespace ModbusConfig;
 
 namespace marvin_ros2_control
 {
@@ -18,10 +21,10 @@ namespace marvin_ros2_control
 
     bool JDGripper::initialize()
     {
-        RCLCPP_INFO(logger_, "Initializing JD Gripper (slave: 0x%02X)", SLAVE_ID);
-        std::vector<uint16_t> init_value_vector = {INIT_VALUE};
-        return writeMultipleRegisters(SLAVE_ID, INIT_REGISTER, init_value_vector,
-                                      WRITE_MULTIPLE_FUNCTION);
+        RCLCPP_INFO(logger_, "Initializing JD Gripper (slave: 0x%02X)", Jodell::SLAVE_ADDRESS);
+        std::vector<uint16_t> init_value_vector = {Jodell::INIT_VALUE};
+        return writeMultipleRegisters(Jodell::SLAVE_ADDRESS, Jodell::INIT_REGISTER, init_value_vector,
+                                      Jodell::WRITE_FUNCTION);
     }
 
     /// input torque is uint8_t
@@ -96,13 +99,13 @@ namespace marvin_ros2_control
         }
         
         // Verify response slave address matches request
-        if (data[0] != SLAVE_ID || data[1] != READ_FUNCTION)
+        if (data[0] != Jodell::SLAVE_ADDRESS || data[1] != Jodell::READ_FUNCTION)
         {
             return false;
         }
         
         // Parse Modbus response
-        std::vector<uint16_t> registers = ModbusIO::parseModbusResponse(data, data_size, SLAVE_ID, READ_FUNCTION);
+        std::vector<uint16_t> registers = ModbusIO::parseModbusResponse(data, data_size, Jodell::SLAVE_ADDRESS, Jodell::READ_FUNCTION);
         if (registers.size() < Jodell::STATUS_REG_COUNT)
         {
             return false;

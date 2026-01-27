@@ -1,6 +1,6 @@
 #pragma once
 
-#include "marvin_ros2_control/grippers/modbus_io.h"
+#include "marvin_ros2_control/tool/modbus_io.h"
 #include "gripper_hardware_common/GripperBase.h"
 #include <vector>
 #include <cstdint>
@@ -17,7 +17,10 @@ namespace marvin_ros2_control
     {
     public:
         ModbusGripper(Clear485Func clear_485, Send485Func send_485,
-                     GetChDataFunc on_get_ch_data = nullptr);
+                     GetChDataFunc on_get_ch_data = nullptr)
+            : ModbusIO(clear_485, send_485, on_get_ch_data)
+        {
+        }
         
         virtual ~ModbusGripper() = default;
 

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "marvin_ros2_control/grippers/changingtek_gripper.h"
+#include "marvin_ros2_control/tool/grippers/changingtek/changingtek_gripper.h"
 #include "MarvinSDK.h"
 #include <thread>
 #include <chrono>
@@ -40,7 +40,7 @@ namespace marvin_ros2_control
         int position = static_cast<int>(modbus_pos);
         
         // Convert torque: input torque (0-100, already scaled by gripper_torque_scale) 
-        // is treated as normalized (0.0-1.0) and converted to Modbus torque value (0-100)
+        // is treated as normalized (0.0-1.0) and converted to Modbus torque value (0-255, 0xFF)
         // This ensures torque mapping is consistent with position mapping
         double normalized_torque = static_cast<double>(torque) / 100.0;  // Convert 0-100 to 0.0-1.0
         int modbus_torque = TorqueConverter::Changingtek90::normalizedToModbus(normalized_torque);

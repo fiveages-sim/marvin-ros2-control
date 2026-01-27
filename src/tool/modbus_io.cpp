@@ -1,6 +1,6 @@
-#include "marvin_ros2_control/grippers/gripper_control.h"
-#include "marvin_ros2_control/hands/modbus_hand.h"
+#include "marvin_ros2_control/tool/modbus_io.h"
 #include "MarvinSDK.h"
+#include "rclcpp/logging.hpp"
 #include <thread>
 #include <chrono>
 #include "rclcpp/logging.hpp"
@@ -337,23 +337,4 @@ namespace marvin_ros2_control
         return crc;
     }
 
-    // ==============================================
-    // ModbusGripper Implementation
-    // ==============================================
-
-    ModbusGripper::ModbusGripper(Clear485Func clear_485, Send485Func send_485,
-                                 GetChDataFunc on_get_ch_data)
-        : ModbusIO(clear_485, send_485, on_get_ch_data)
-    {
-    }
-
-    // ==============================================
-    // ModbusHand Implementation
-    // ==============================================
-
-    ModbusHand::ModbusHand(Clear485Func clear_485, Send485Func send_485,
-                          GetChDataFunc on_get_ch_data)
-        : ModbusIO(clear_485, send_485, on_get_ch_data)
-    {
-    }
 }
