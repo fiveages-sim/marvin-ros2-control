@@ -109,10 +109,12 @@ private:
         void setArmCtrlInternal(int arm_index);
                 
         // Helper method to create tool (gripper or hand) based on type
+        // tool_index: 0 for left hand (in dual arm) or single left arm, 1 for right hand (in dual arm) or single right arm
         std::unique_ptr<gripper_hardware_common::GripperBase> createTool(
             Clear485Func clear_485, 
             Send485Func send_485,
-            GetChDataFunc get_ch_data);
+            GetChDataFunc get_ch_data,
+            size_t tool_index = 0);
         void set_tool_parameters();
 
         static double degreeToRad(const double degree)

@@ -27,7 +27,27 @@ namespace marvin_ros2_control
         // GripperBase interface implementation
         bool initialize() override = 0;
         bool move_gripper(int torque, int velocity, double position) override = 0;
+        // Multi-joint hand command (normalized positions per joint).
+        // Concrete hands (O7/O6/L6) should implement this.
+        virtual bool move_hand(
+            const std::vector<int>& torques,
+            const std::vector<int>& velocities,
+            const std::vector<double>& positions
+        ) = 0;
         bool getStatus() override = 0;
+        
+        // Get hand DOF (degrees of freedom) - implemented by concrete hand types
+        virtual size_t getJointCount() const = 0;
+        // Map global joint name to local hand joint index (0-based, -1 if not found)
+        // This allows each hand type to define its own joint ordering
+        virtual int mapJointNameToIndex(const std::string& joint_name) const = 0;
+
+        // Process Modbus read response for hand status
+        // Parses Modbus response and extracts all joint positions
+        // Returns true if successful, false otherwise
+        // positions: output vector containing normalized positions [0.0-1.0] for all joints
+        virtual bool processReadResponse(const uint8_t* data, size_t data_size,
+                                        std::vector<double>& positions) = 0;
 
     protected:
         // Convenience methods that use ModbusIO (inherited from ModbusIO)

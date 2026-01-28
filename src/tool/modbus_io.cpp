@@ -178,12 +178,15 @@ namespace marvin_ros2_control
         
         if (data_size < 5) // minimal RTU frame size
         {
+            RCLCPP_DEBUG(logger_, "parseModbusResponse: Data too short: %zu bytes (min 5)", data_size);
             return result;
         }
 
         // Validate slave id and function code
         if (data[0] != expected_slave_id || data[1] != expected_function_code)
         {
+            RCLCPP_DEBUG(logger_, "parseModbusResponse: Validation failed - expected slave=0x%02X func=0x%02X, got slave=0x%02X func=0x%02X",
+                        expected_slave_id, expected_function_code, data[0], data[1]);
             return result;
         }
 
