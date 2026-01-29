@@ -2034,6 +2034,44 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
     bool MarvinHardware::readFromHardware(bool initial_frame)
     {
         OnGetBuf(&frame_data_);
+        
+        // Check error codes from Tianji robot
+        // For single arm: check the arm's error code
+        // For dual arm: check both arms' error codes
+        if (robot_arm_index_ == ARM_LEFT || robot_arm_index_ == ARM_RIGHT)
+        {
+            int err_code = frame_data_.m_State[robot_arm_index_].m_ERRCode;
+            if (err_code != 0)
+            {
+                const char* arm_name = (robot_arm_index_ == ARM_LEFT) ? "Left" : "Right";
+                RCLCPP_ERROR(get_logger(), 
+                            "Tianji robot error detected on %s arm: error_code=%d. Deactivating controller.", 
+                            arm_name, err_code);
+                // Return false to trigger error state in read()
+                return false;
+            }
+        }
+        else if (robot_arm_index_ == ARM_DUAL)
+        {
+            int left_err_code = frame_data_.m_State[ARM_LEFT].m_ERRCode;
+            int right_err_code = frame_data_.m_State[ARM_RIGHT].m_ERRCode;
+            
+            if (left_err_code != 0)
+            {
+                RCLCPP_ERROR(get_logger(), 
+                            "Tianji robot error detected on Left arm: error_code=%d. Deactivating controller.", 
+                            left_err_code);
+                return false;
+            }
+            if (right_err_code != 0)
+            {
+                RCLCPP_ERROR(get_logger(), 
+                            "Tianji robot error detected on Right arm: error_code=%d. Deactivating controller.", 
+                            right_err_code);
+                return false;
+            }
+        }
+        
         if (initial_frame)
         {
             previous_message_frame_ = frame_data_.m_Out[robot_arm_index_].m_OutFrameSerial;
