@@ -11,14 +11,16 @@
 #include <cctype>
 #include <set>
 #include <unordered_map>
+#include <cstdint>
 #include "pluginlib/class_list_macros.hpp"
 #include "hardware_interface/types/hardware_interface_type_values.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include <string>
 #include "gripper_hardware_common/ChangingtekGripper.h"
 #include "gripper_hardware_common/JodellGripper.h"
-#include "marvin_ros2_control/grippers/changingtek_gripper.h"
-#include "marvin_ros2_control/grippers/jd_gripper.h"
+#include "marvin_ros2_control/tool/grippers/changingtek/changingtek_gripper.h"
+#include "marvin_ros2_control/tool/grippers/jodell/jd_gripper.h"
+#include "marvin_ros2_control/tool/hands/linkerhand/dexterous_hand.h"
 
 using namespace gripper_hardware_common;
 
@@ -217,6 +219,18 @@ namespace marvin_ros2_control
         ensure_double_array_sized("left_dyn_param", kDefaultLeftDynParam, 10);
         ensure_double_array_sized("right_kine_param", kDefaultRightKineParam, 6);
         ensure_double_array_sized("right_dyn_param", kDefaultRightDynParam, 10);
+        
+        // Gripper torque scaling factor (0.0-1.0, default: 1.0)
+        // Actual torque sent = max_torque(100) * gripper_torque_scale
+        ensure_param("gripper_torque_scale", 1.0, hw_find("gripper_torque_scale"),
+                     [](const std::string& s, double def) { 
+                         try { 
+                             double val = std::stod(s);
+                             return (val < 0.0) ? 0.0 : ((val > 1.0) ? 1.0 : val);
+                         } catch (...) { 
+                             return def; 
+                         } 
+                     });
     }
     
     hardware_interface::CallbackReturn MarvinHardware::on_init(
@@ -269,6 +283,14 @@ namespace marvin_ros2_control
         // 获取夹爪类型参数
         std::string gripper_type_raw = get_node_param("gripper_type", std::string(""));
         gripper_type_ = normalizeString(gripper_type_raw);
+        
+        // 获取夹爪力矩系数参数
+        gripper_torque_scale_ = get_node_param("gripper_torque_scale", 1.0);
+        // 限制范围在 0.0-1.0
+        if (gripper_torque_scale_ < 0.0) gripper_torque_scale_ = 0.0;
+        if (gripper_torque_scale_ > 1.0) gripper_torque_scale_ = 1.0;
+        RCLCPP_INFO(get_logger(), "Gripper torque scale: %.2f (actual torque = %d)", 
+                    gripper_torque_scale_, static_cast<int>(100.0 * gripper_torque_scale_));
 
         // 获取硬件连接参数
         device_ip_ = get_node_param("device_ip", std::string("192.168.1.190"));
@@ -301,42 +323,49 @@ namespace marvin_ros2_control
         RCLCPP_INFO(get_logger(), "has_gripper_: %d", has_gripper_);
         RCLCPP_INFO(get_logger(), "gripper_type_: %s", gripper_type_.c_str());
         
-        // 构建夹爪对象与其 command/state 缓存（严格保证：单臂=1个，双臂=2个；避免重复创建导致通道干扰）
-        gripper_ptr_.clear();
+        // 构建末端执行器对象（gripper 或 hand）与其 command/state 缓存
+        tool_ptr_.clear();
         if (has_gripper_ && !gripper_type_.empty() && gripper_type_ != "NONE")
         {
-            const size_t expected_grippers = (robot_arm_index_ == ARM_DUAL) ? 2 : 1;
+            const size_t expected_end_effectors = (robot_arm_index_ == ARM_DUAL) ? 2 : 1;
+            
+            // 对于gripper：每个末端执行器只有1个关节，数组大小 = expected_end_effectors
+            // 对于hand：每个末端执行器有多个关节（O7=7, O6/L6=6），数组大小 = gripper_joint_name_.size()
+            // gripper_joint_name_.size() 对于gripper是1，对于hand是关节数量
+            const size_t array_size = is_hand_ ? gripper_joint_name_.size() : expected_end_effectors;
 
-            gripper_position_command_.assign(expected_grippers, -1.0);
-            gripper_position_.assign(expected_grippers, 0.0);
-            gripper_velocity_.assign(expected_grippers, 0.0);
-            gripper_effort_.assign(expected_grippers, 0.0);
-            last_gripper_command_.assign(expected_grippers, -1.0);
-            last_gripper_position_.assign(expected_grippers, -1.0);
-            gripper_stopped_.assign(expected_grippers, true);
-            step_size_.assign(expected_grippers, 0.0);
+            gripper_position_command_.assign(array_size, -1.0);
+            gripper_position_.assign(array_size, 0.0);
+            gripper_velocity_.assign(array_size, 0.0);
+            gripper_effort_.assign(array_size, 0.0);
+            last_gripper_command_.assign(array_size, -1.0);
+            last_gripper_position_.assign(array_size, -1.0);
+            gripper_stopped_.assign(array_size, true);
+            step_size_.assign(array_size, 0.0);
 
-            gripper_ptr_.reserve(expected_grippers);
+            // Create tool objects (hand or gripper) using unified createTool method
+            tool_ptr_.reserve(expected_end_effectors);
             if (robot_arm_index_ == ARM_LEFT)
             {
-                // Left arm gripper uses A channel
-                gripper_ptr_.emplace_back(createGripper(OnClearChDataA, OnSetChDataA, OnGetChDataA));
+                // Left arm tool uses A channel
+                tool_ptr_.emplace_back(createTool(OnClearChDataA, OnSetChDataA, OnGetChDataA, 0));
             }
             else if (robot_arm_index_ == ARM_RIGHT)
             {
-                // Right arm gripper uses B channel
-                gripper_ptr_.emplace_back(createGripper(OnClearChDataB, OnSetChDataB, OnGetChDataB));
+                // Right arm tool uses B channel
+                tool_ptr_.emplace_back(createTool(OnClearChDataB, OnSetChDataB, OnGetChDataB, 1));
             }
             else if (robot_arm_index_ == ARM_DUAL)
             {
                 // Dual arm: [0]=A(left), [1]=B(right)
-                gripper_ptr_.emplace_back(createGripper(OnClearChDataA, OnSetChDataA, OnGetChDataA));
-                gripper_ptr_.emplace_back(createGripper(OnClearChDataB, OnSetChDataB, OnGetChDataB));
+                tool_ptr_.emplace_back(createTool(OnClearChDataA, OnSetChDataA, OnGetChDataA, 0));
+                tool_ptr_.emplace_back(createTool(OnClearChDataB, OnSetChDataB, OnGetChDataB, 1));
             }
 
             RCLCPP_INFO(get_logger(),
-                        "Gripper init: arm_type=%s, gripper_type=%s, detected_gripper_joints=%zu, created_grippers=%zu",
-                        robot_arm_config_.c_str(), gripper_type_.c_str(), gripper_joint_name_.size(), gripper_ptr_.size());
+                        "%s init: arm_type=%s, tool_type=%s, detected_joints=%zu, created_tools=%zu",
+                        is_hand_ ? "Hand" : "Gripper",
+                        robot_arm_config_.c_str(), gripper_type_.c_str(), gripper_joint_name_.size(), tool_ptr_.size());
         }
         
         // Initialize hardware connection status
@@ -407,12 +436,6 @@ MarvinHardware::paramCallback(const std::vector<rclcpp::Parameter> & params)
     rcl_interfaces::msg::SetParametersResult result;
     result.successful = true;
 
-    if (!hardware_connected_) {
-        result.successful = false;
-        result.reason = "Hardware not connected";
-        return result;
-    }
-
     // Track if we need to apply configuration
     bool need_config_update = false;
     bool ctrl_mode_changed = false;
@@ -427,6 +450,36 @@ MarvinHardware::paramCallback(const std::vector<rclcpp::Parameter> & params)
     std::vector<double> cart_d_gains;
 
     for (const auto & param : params) {
+        // Handle gripper_torque_scale separately - it doesn't require hardware connection
+        if (param.get_name() == "gripper_torque_scale") {
+            double scale = param.as_double();
+            // Limit range to 0.0-1.0
+            if (scale < 0.0) scale = 0.0;
+            if (scale > 1.0) scale = 1.0;
+            gripper_torque_scale_ = scale;
+            RCLCPP_INFO(get_logger(), "Gripper torque scale updated to: %.2f (actual torque = %d)", 
+                        gripper_torque_scale_, static_cast<int>(100.0 * gripper_torque_scale_));
+            
+            // Reset end effector state so that acceleration/torque will be re-sent with new scale value
+            // This is especially important for ChangingtekGripper which caches acceleration_set_
+            for (size_t i = 0; i < toolCount(); i++)
+            {
+                if (auto* tool = toolAt(i))
+                {
+                    tool->resetState();
+                }
+            }
+            RCLCPP_INFO(get_logger(), "Reset state for %zu tool(s) to apply new torque scale", toolCount());
+            
+            continue;  // Skip hardware connection check for this parameter
+        }
+
+        // Other parameters require hardware connection
+        if (!hardware_connected_) {
+            result.successful = false;
+            result.reason = "Hardware not connected";
+            return result;
+        }
         if (param.get_name() == "ctrl_mode") {
             std::string ctrl_mode_str = param.as_string();
             const int mode = ctrlModeStringToMode(ctrl_mode_str, get_logger());
@@ -820,58 +873,131 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         usleep(100000);
     }
 
-    std::unique_ptr<ModbusGripper> MarvinHardware::createGripper(Clear485Func clear_485, Send485Func send_485,
-                                                                 GetChDataFunc get_ch_data)
+    std::unique_ptr<gripper_hardware_common::GripperBase> MarvinHardware::createTool(
+        marvin_ros2_control::Clear485Func clear_485, 
+        marvin_ros2_control::Send485Func send_485,
+        marvin_ros2_control::GetChDataFunc get_ch_data,
+        size_t tool_index)
     {
         /// 启动的时候调用
         clear_485();
         // gripper_type_ has been normalized to UPPERCASE by normalizeString()
-        enum class GripperKind { JD, Changingtek90C, Changingtek90D };
-
-        static const std::unordered_map<std::string, GripperKind> kGripperTypeMap = {
-            // JD / RG75
-            {"RG75", GripperKind::JD},
-            {"JDGRIPPER", GripperKind::JD},
-
-            // Changingtek 90C variants (AG2F90_C is the common实际入参)
-            {"CHANGINGTEK90C", GripperKind::Changingtek90C},
-            {"AG2F90", GripperKind::Changingtek90C},
-            {"AG2F90C", GripperKind::Changingtek90C},
-            {"AG2F90_C", GripperKind::Changingtek90C},
-
-            // Changingtek 90D variants
-            {"CHANGINGTEK90D", GripperKind::Changingtek90D},
-            {"AG2F90D", GripperKind::Changingtek90D},
-            {"AG2F90_D", GripperKind::Changingtek90D},
+        
+        // Determine if this is left or right hand based on robot_arm_index_ and tool_index
+        // For ARM_LEFT: tool_index=0 -> left hand
+        // For ARM_RIGHT: tool_index=1 -> right hand  
+        // For ARM_DUAL: tool_index=0 -> left hand, tool_index=1 -> right hand
+        bool is_left_hand = (robot_arm_index_ == ARM_LEFT) || 
+                           (robot_arm_index_ == ARM_DUAL && tool_index == 0);
+        
+        // Determine if end effector is a hand or gripper based on type
+        // Hand types: LINKERHAND_O7, LINKERHAND_O6, LINKERHAND_L6 (all are LinkerHand/DexterousHand)
+        // Also support short forms: O7, O6, L6
+        static const std::set<std::string> hand_types = {
+            "LINKERHAND_O7", "LINKERHAND_O6", "LINKERHAND_L6",
+            "O7", "O6", "L6"
         };
-
-        const auto it = kGripperTypeMap.find(gripper_type_);
-        const GripperKind kind = (it == kGripperTypeMap.end()) ? GripperKind::JD : it->second;
-
-        switch (kind)
+        
+        // Check if type contains hand indicators
+        bool is_hand_type = false;
+        std::string hand_model = "O7";  // Default
+        
+        if (hand_types.find(gripper_type_) != hand_types.end())
         {
-            case GripperKind::JD:
-                if (it == kGripperTypeMap.end())
-                {
-                    RCLCPP_WARN(get_logger(),
-                                "Unknown gripper type '%s' (normalized). Using default JDGripper.",
-                                gripper_type_.c_str());
-                }
-                RCLCPP_INFO(get_logger(), "Creating JD Gripper");
-                return std::make_unique<JDGripper>(clear_485, send_485, get_ch_data);
-
-            case GripperKind::Changingtek90C:
-                RCLCPP_INFO(get_logger(), "Creating CHANGINGTEK90C Gripper");
-                return std::make_unique<ChangingtekGripper90C>(clear_485, send_485, get_ch_data);
-
-            case GripperKind::Changingtek90D:
-                RCLCPP_INFO(get_logger(), "Creating CHANGINGTEK90D Gripper");
-                return std::make_unique<ChangingtekGripper90D>(clear_485, send_485, get_ch_data);
+            is_hand_type = true;
         }
+        else if (gripper_type_.find("LINKERHAND") != std::string::npos || 
+                 gripper_type_.find("HAND") != std::string::npos)
+        {
+            // Check for hand type patterns in the string
+            is_hand_type = true;
+        }
+        
+        if (is_hand_type)
+        {
+            // Extract hand model from type string and create corresponding hand object
+            if (gripper_type_.find("O7") != std::string::npos || gripper_type_ == "O7")
+            {
+                hand_model = "O7";
+                RCLCPP_INFO(get_logger(), "Creating LinkerHand O7 (7-DOF, %s hand, slave: 0x%02X)", 
+                           is_left_hand ? "left" : "right",
+                           is_left_hand ? 0x28 : 0x27);
+                return std::make_unique<marvin_ros2_control::DexterousHandO7>(clear_485, send_485, get_ch_data, is_left_hand);
+            }
+            else if (gripper_type_.find("L6") != std::string::npos || gripper_type_ == "L6")
+            {
+                hand_model = "L6";
+                RCLCPP_INFO(get_logger(), "Creating LinkerHand L6 (6-DOF, %s hand, slave: 0x%02X)", 
+                           is_left_hand ? "left" : "right",
+                           is_left_hand ? 0x28 : 0x27);
+                return std::make_unique<marvin_ros2_control::DexterousHandL6>(clear_485, send_485, get_ch_data, is_left_hand);
+            }
+            else if (gripper_type_.find("O6") != std::string::npos || gripper_type_ == "O6")
+            {
+                hand_model = "O6";
+                RCLCPP_INFO(get_logger(), "Creating LinkerHand O6 (6-DOF, %s hand, slave: 0x%02X)", 
+                           is_left_hand ? "left" : "right",
+                           is_left_hand ? 0x28 : 0x27);
+                return std::make_unique<marvin_ros2_control::DexterousHandO6>(clear_485, send_485, get_ch_data, is_left_hand);
+            }
+            else
+            {
+                // Default to O7 if model cannot be determined
+                hand_model = "O7";
+                RCLCPP_WARN(get_logger(), "Unknown hand model in type '%s', defaulting to O7", gripper_type_.c_str());
+                return std::make_unique<marvin_ros2_control::DexterousHandO7>(clear_485, send_485, get_ch_data, is_left_hand);
+            }
+        }
+        else
+        {
+            // Create gripper
+            enum class GripperKind { JD, Changingtek90C, Changingtek90D };
 
-        // Defensive fallback
-        RCLCPP_INFO(get_logger(), "Creating JD Gripper");
-        return std::make_unique<JDGripper>(clear_485, send_485, get_ch_data);
+            static const std::unordered_map<std::string, GripperKind> kGripperTypeMap = {
+                // JD / RG75
+                {"RG75", GripperKind::JD},
+                {"JDGRIPPER", GripperKind::JD},
+
+                // Changingtek 90C variants (AG2F90_C is the common实际入参)
+                {"CHANGINGTEK90C", GripperKind::Changingtek90C},
+                {"AG2F90", GripperKind::Changingtek90C},
+                {"AG2F90C", GripperKind::Changingtek90C},
+                {"AG2F90_C", GripperKind::Changingtek90C},
+
+                // Changingtek 90D variants
+                {"CHANGINGTEK90D", GripperKind::Changingtek90D},
+                {"AG2F90D", GripperKind::Changingtek90D},
+                {"AG2F90_D", GripperKind::Changingtek90D},
+            };
+
+            const auto it = kGripperTypeMap.find(gripper_type_);
+            const GripperKind kind = (it == kGripperTypeMap.end()) ? GripperKind::JD : it->second;
+
+            switch (kind)
+            {
+                case GripperKind::JD:
+                    if (it == kGripperTypeMap.end())
+                    {
+                        RCLCPP_WARN(get_logger(),
+                                    "Unknown gripper type '%s' (normalized). Using default JDGripper.",
+                                    gripper_type_.c_str());
+                    }
+                    RCLCPP_INFO(get_logger(), "Creating JD Gripper");
+                    return std::make_unique<marvin_ros2_control::JDGripper>(clear_485, send_485, get_ch_data);
+
+                case GripperKind::Changingtek90C:
+                    RCLCPP_INFO(get_logger(), "Creating CHANGINGTEK90C Gripper");
+                    return std::make_unique<marvin_ros2_control::ChangingtekGripper90C>(clear_485, send_485, get_ch_data);
+
+                case GripperKind::Changingtek90D:
+                    RCLCPP_INFO(get_logger(), "Creating CHANGINGTEK90D Gripper");
+                    return std::make_unique<marvin_ros2_control::ChangingtekGripper90D>(clear_485, send_485, get_ch_data);
+            }
+
+            // Defensive fallback
+            RCLCPP_INFO(get_logger(), "Creating JD Gripper");
+            return std::make_unique<marvin_ros2_control::JDGripper>(clear_485, send_485, get_ch_data);
+        }
     }
 
     hardware_interface::CallbackReturn MarvinHardware::on_configure(
@@ -896,11 +1022,67 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         return hardware_interface::CallbackReturn::SUCCESS;
     }
 
+
     void MarvinHardware::contains_gripper()
     {
         int joint_index = 0;
         bool should_detect_gripper = !gripper_type_.empty() && gripper_type_ != "NONE";
+        
+        RCLCPP_INFO(get_logger(), "contains_gripper: gripper_type_='%s', should_detect_gripper=%d", 
+                    gripper_type_.c_str(), should_detect_gripper);
 
+        // Determine if end effector is a hand or gripper based on type
+        // Hand types: LINKERHAND_O7, LINKERHAND_O6, LINKERHAND_L6 (all are LinkerHand/DexterousHand)
+        // Also support short forms: O7, O6, L6
+        static const std::set<std::string> hand_types = {
+            "LINKERHAND_O7", "LINKERHAND_O6", "LINKERHAND_L6",
+            "O7", "O6", "L6"
+        };
+        // Gripper types: JD, Changingtek variants
+        static const std::set<std::string> gripper_types = {
+            "RG75", "JDGRIPPER",
+            "CHANGINGTEK90C", "AG2F90", "AG2F90C", "AG2F90_C",
+            "CHANGINGTEK90D", "AG2F90D", "AG2F90_D"
+        };
+        
+        // Check if type is hand or gripper
+        bool is_hand_type = false;
+        if (hand_types.find(gripper_type_) != hand_types.end())
+        {
+            is_hand_type = true;
+        }
+        else if (gripper_type_.find("LINKERHAND") != std::string::npos || 
+                 (gripper_type_.find("HAND") != std::string::npos && 
+                  gripper_type_.find("GRIPPER") == std::string::npos))
+        {
+            // Check for hand type patterns in the string (but not "gripper")
+            is_hand_type = true;
+        }
+        
+        if (is_hand_type)
+        {
+            is_hand_ = true;
+            RCLCPP_INFO(get_logger(), "Detected hand type: %s", gripper_type_.c_str());
+        }
+        else if (gripper_types.find(gripper_type_) != gripper_types.end())
+        {
+            is_hand_ = false;
+            RCLCPP_INFO(get_logger(), "Detected gripper type: %s", gripper_type_.c_str());
+        }
+        else if (!gripper_type_.empty() && gripper_type_ != "NONE")
+        {
+            // Unknown type, default to gripper and warn
+            is_hand_ = false;
+            RCLCPP_WARN(get_logger(), "Unknown tool type '%s', defaulting to gripper", gripper_type_.c_str());
+        }
+        else
+        {
+            // No tool type specified
+            is_hand_ = false;  // Default value when no tool is configured
+            RCLCPP_INFO(get_logger(), "No tool type specified");
+        }
+
+        RCLCPP_INFO(get_logger(), "Total joints in info_.joints: %zu", info_.joints.size());
         for (const auto& joint : info_.joints)
         {
             bool is_gripper_joint = false;
@@ -921,8 +1103,8 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                     has_gripper_ = true;
                     gripper_joint_name_.push_back(joint.name);
                     gripper_joint_index_ = joint_index;
-                    RCLCPP_INFO(get_logger(), "Detected gripper joint: %s (index %zu)",
-                            joint.name.c_str(), gripper_joint_index_);
+                    RCLCPP_INFO(get_logger(), "Detected %s joint: %s (index %zu)",
+                            is_hand_ ? "hand" : "gripper", joint.name.c_str(), gripper_joint_index_);
                 } 
             }
             
@@ -933,8 +1115,18 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             }
             joint_index++;
         }
-        RCLCPP_INFO(get_logger(), "Detected gripper joints: %zu, arm joints: %zu", 
-                    gripper_joint_name_.size(), joint_names_.size());
+        RCLCPP_INFO(get_logger(), "Detected %s joints: %zu, arm joints: %zu", 
+                    is_hand_ ? "hand" : "gripper", gripper_joint_name_.size(), joint_names_.size());
+        
+        // Print all detected hand/gripper joint names
+        if (gripper_joint_name_.size() > 0)
+        {
+            RCLCPP_INFO(get_logger(), "Detected %s joint names:", is_hand_ ? "hand" : "gripper");
+            for (size_t i = 0; i < gripper_joint_name_.size(); i++)
+            {
+                RCLCPP_INFO(get_logger(), "  [%zu] %s", i, gripper_joint_name_[i].c_str());
+            }
+        }
     }
 
     hardware_interface::CallbackReturn MarvinHardware::on_activate(
@@ -1063,20 +1255,24 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         rightkineParam_.resize(6, 0.0);
         rightdynParam_.resize(10, 0.0);
         
-        // Connect and initialize gripper (this will update kineParam and dynPara if gripper detected)
-        // 只有在配置了夹爪类型时才尝试连接夹爪
-        if (has_gripper_ && !gripper_type_.empty() && gripper_type_ != "NONE" && !gripper_ptr_.empty())
+        // Connect and initialize end effector (gripper or hand) (this will update kineParam and dynPara if detected)
+        // 只有在配置了末端执行器类型时才尝试连接
+        if (has_gripper_ && !gripper_type_.empty() && gripper_type_ != "NONE")
         {
-            bool gripper_connected = connect_gripper();
-            if (!gripper_connected)
+            if (toolCount() == 0)
             {
-                RCLCPP_WARN(get_logger(), "Gripper initialization failed, using default (zero) parameters");
+                // 配置了末端执行器类型但没有检测到关节或创建对象失败
+                RCLCPP_WARN(get_logger(), "End effector type configured but no end effector detected or created");
             }
-        }
-        else if (!gripper_type_.empty() && gripper_type_ != "NONE")
-        {
-            // 配置了夹爪类型但没有检测到夹爪关节或创建夹爪对象失败
-            RCLCPP_WARN(get_logger(), "Gripper type configured but no gripper detected or created");
+            else
+            {
+                const bool ok = connect_gripper();  // initializes the selected tool list (hand/gripper)
+                if (!ok)
+                {
+                    RCLCPP_WARN(get_logger(), "%s initialization failed, using default (zero) parameters",
+                                is_hand_ ? "Hand" : "Gripper");
+                }
+            }
         }
 
         if (robot_arm_index_ == ARM_LEFT)
@@ -1117,13 +1313,13 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         RCLCPP_INFO(get_logger(), "cmd of vel and acc:%d %d\n",
                     frame_data_.m_In[0].m_Joint_Vel_Ratio, frame_data_.m_In[0].m_Joint_Acc_Ratio);
 
-        // Start gripper control threads if gripper is configured and connected
-        // 只有在配置了夹爪类型且成功创建了夹爪对象时才启动控制线程
-        if (has_gripper_ && !gripper_type_.empty() && gripper_type_ != "NONE" && !gripper_ptr_.empty())
+        // Start end effector control threads if end effector is configured and connected
+        // 只有在配置了末端执行器类型且成功创建了对象时才启动控制线程
+        if (has_gripper_ && !gripper_type_.empty() && gripper_type_ != "NONE" && toolCount() > 0)
         {
-            RCLCPP_INFO(get_logger(), "Gripper Connected");
-            // start gripper control thread
-            gripper_ctrl_thread_ = std::thread(&MarvinHardware::gripper_callback, this);
+            RCLCPP_INFO(get_logger(), "%s Connected", is_hand_ ? "Hand" : "Gripper");
+            // start end effector control thread
+            gripper_ctrl_thread_ = std::thread(&MarvinHardware::tool_callback, this);
             gripper_ctrl_thread_.detach();
             std::thread recv_thread(&MarvinHardware::recv_thread_func, this);
             recv_thread.detach();
@@ -1137,16 +1333,16 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         }
         else
         {
-            // 没有配置夹爪是正常情况，不应该返回错误
+            // 没有配置末端执行器是正常情况，不应该返回错误
             if (!gripper_type_.empty() && gripper_type_ != "NONE")
             {
-                // 配置了夹爪类型但连接失败
-                RCLCPP_ERROR(get_logger(), "Gripper type configured but connection failed");
+                // 配置了末端执行器类型但连接失败
+                RCLCPP_ERROR(get_logger(), "%s type configured but connection failed", is_hand_ ? "Hand" : "Gripper");
                 return hardware_interface::CallbackReturn::ERROR;
             }
             else
             {
-                // 没有配置夹爪，这是正常情况
+                // 没有配置末端执行器，这是正常情况
                 RCLCPP_INFO(get_logger(), "No gripper configured, continuing without gripper");
             }
         }
@@ -1154,45 +1350,215 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         return hardware_interface::CallbackReturn::SUCCESS;
     }
 
-    void MarvinHardware::gripper_callback()
+    void MarvinHardware::tool_callback()
     {
         // Read frequency controller: read every 4 cycles to reduce Modbus load
         ReadFrequencyController read_controller(4);
         
+        RCLCPP_INFO(get_logger(), "tool_callback thread started: is_hand_=%s, tool_count=%zu, joint_count=%zu", 
+                    is_hand_ ? "true" : "false", toolCount(), gripper_joint_name_.size());
+        
         while (hardware_connected_)
         {
-            // Read gripper status from hardware periodically
+            // Read end effector (gripper or hand) status from hardware periodically
             if (read_controller.shouldRead())
             {
-                // Request status updates for all grippers (sends read requests)
-                // The actual status will be updated by recv_thread_func when responses arrive
-                for(size_t i = 0; i < gripper_ptr_.size() && i < gripper_stopped_.size(); i++)
+                // Request status updates (sends read requests). Actual status updated by recv_thread_func when responses arrive.
+                for (size_t i = 0; i < toolCount() && i < gripper_stopped_.size(); i++)
                 {
-                    if(!gripper_stopped_[i])
+                    if (!gripper_stopped_[i])
                     {
-                        // Send read request - actual status will be updated by recv_thread_func
-                        gripper_hardware_common::GripperBase* gripper_base = gripper_ptr_[i].get();
-                        gripper_base->getStatus();
+                        if (auto* tool = toolAt(i))
+                        {
+                            tool->getStatus();
+                        }
                     }
                     std::this_thread::sleep_for(std::chrono::milliseconds(20));
                 }
             }
-            // Write commands when gripper command is different
-            for(size_t i = 0; i < gripper_ptr_.size() && i < gripper_stopped_.size() && i < last_gripper_command_.size(); i++)
+            // Write commands when end effector command is different
+            if (is_hand_)
             {
-                if (CommandChangeDetector::hasChanged(last_gripper_command_[i], gripper_position_command_[i]))
+                // For hands: send multi-joint commands per hand (A=left, B=right in dual-arm)
+                bool has_changes = false;
+                // Debug: log command values periodically (every 50 iterations)
+                static int debug_counter = 0;
+                if (++debug_counter % 50 == 0 && gripper_joint_name_.size() > 0)
                 {
+                    RCLCPP_INFO(get_logger(), "Debug hand: joints=%zu, cmd[0]=%.6f, last[0]=%.6f, diff=%.6f", 
+                              gripper_joint_name_.size(), 
+                              gripper_position_command_.size() > 0 ? gripper_position_command_[0] : -999.0,
+                              last_gripper_command_.size() > 0 ? last_gripper_command_[0] : -999.0,
+                              (gripper_position_command_.size() > 0 && last_gripper_command_.size() > 0) 
+                                  ? std::abs(gripper_position_command_[0] - last_gripper_command_[0]) : 0.0);
+                }
+                
+                for (size_t i = 0; i < gripper_joint_name_.size() && i < gripper_position_command_.size(); i++)
+                {
+                    // Force send if last command is uninitialized (-1.0) or if command has changed significantly
+                    // Use a smaller threshold (0.001) for hand commands to catch small changes
+                    bool force_send = (last_gripper_command_[i] < -0.5);  // Uninitialized
+                    bool has_changed = CommandChangeDetector::hasChanged(last_gripper_command_[i], gripper_position_command_[i], 0.001);
+                    
+                    if (force_send || has_changed)
+                    {
+                        has_changes = true;
+                        RCLCPP_INFO(get_logger(), "Hand command %s: joint %zu (%s) = %.6f -> %.6f (diff=%.6f)", 
+                                  force_send ? "initializing" : "changed",
+                                  i, gripper_joint_name_[i].c_str(), 
+                                  last_gripper_command_[i], gripper_position_command_[i],
+                                  std::abs(gripper_position_command_[i] - last_gripper_command_[i]));
+                        break;
+                    }
+                }
+                
+                if (has_changes && toolCount() > 0)
+                {
+                    RCLCPP_INFO(get_logger(), "Processing hand commands: %zu tools, %zu joints",
+                                toolCount(), gripper_joint_name_.size());
+                    const size_t tool_n = toolCount();
+                    const size_t n = std::min(gripper_joint_name_.size(), gripper_position_command_.size());
+
+                    // Prepare per-tool command buffers using virtual functions (dynamic binding)
+                    std::vector<std::vector<double>> pos_by_tool;
+                    std::vector<std::vector<bool>> has_by_tool;
+                    
+                    for (size_t tool_i = 0; tool_i < tool_n; ++tool_i)
+                    {
+                        auto* tool = toolAt(tool_i);
+                        auto* hand = dynamic_cast<marvin_ros2_control::ModbusHand*>(tool);
+                        if (!hand)
+                        {
+                            pos_by_tool.emplace_back();
+                            has_by_tool.emplace_back();
+                            continue;
+                        }
+
+                        const size_t dof = hand->getJointCount();
+                        pos_by_tool.emplace_back(dof, 0.0);
+                        has_by_tool.emplace_back(dof, false);
+
+                        // Map global joint names to local hand joint indices via virtual function
+                        for (size_t gi = 0; gi < n; ++gi)
+                        {
+                            // Decide which hand/tool this joint belongs to
+                            std::string name_lower = gripper_joint_name_[gi];
+                            std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
+                            
+                            size_t mapped_tool = 0;
+                            if (tool_n >= 2)
+                            {
+                                mapped_tool = (name_lower.find("right_hand_") != std::string::npos) ? 1 : 0;
+                            }
+                            if (mapped_tool != tool_i) continue;
+
+                            // Use virtual function to map joint name to index (hand type decides the mapping)
+                            const int li = hand->mapJointNameToIndex(gripper_joint_name_[gi]);
+                            if (li < 0 || static_cast<size_t>(li) >= dof) continue;
+
+                            pos_by_tool[tool_i][li] = gripper_position_command_[gi];
+                            has_by_tool[tool_i][li] = true;
+                        }
+                    }
+
+                    // Send for each tool through the ModbusHand virtual interface (dynamic binding)
+                    for (size_t tool_i = 0; tool_i < tool_n; ++tool_i)
+                    {
+                        auto* tool = toolAt(tool_i);
+                        auto* hand = dynamic_cast<marvin_ros2_control::ModbusHand*>(tool);
+                        if (!hand || tool_i >= pos_by_tool.size()) continue;
+
+                        const size_t dof = hand->getJointCount();
+                        if (tool_i >= has_by_tool.size() || dof != pos_by_tool[tool_i].size()) continue;
+
+                        bool any = false;
+                        for (size_t j = 0; j < dof; ++j) any = any || has_by_tool[tool_i][j];
+                        if (!any) continue;
+
+                        std::vector<int> torques(dof, static_cast<int>(100.0 * gripper_torque_scale_));
+                        std::vector<int> velocities(dof, 100);
+
+                        // Build detailed log: joint names and their commands
+                        std::string hand_name = (tool_i == 0) ? "Left" : "Right";
+                        RCLCPP_INFO(get_logger(), "=== %s Hand Command (Tool %zu) ===", hand_name.c_str(), tool_i);
+                        
+                        // Map joint indices back to joint names for logging
+                        for (size_t gi = 0; gi < n; ++gi)
+                        {
+                            std::string name_lower = gripper_joint_name_[gi];
+                            std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
+                            
+                            size_t mapped_tool = 0;
+                            if (tool_n >= 2)
+                            {
+                                mapped_tool = (name_lower.find("right_hand_") != std::string::npos) ? 1 : 0;
+                            }
+                            if (mapped_tool != tool_i) continue;
+                            
+                            const int li = hand->mapJointNameToIndex(gripper_joint_name_[gi]);
+                            if (li < 0 || static_cast<size_t>(li) >= dof) continue;
+                            
+                            double normalized_pos = pos_by_tool[tool_i][li];
+                            uint16_t raw_pos = static_cast<uint16_t>(255 - std::round(normalized_pos * 255.0));
+                            
+                            RCLCPP_INFO(get_logger(), "  Joint[%d]: %s -> normalized=%.6f, raw=%u (0x%02X), torque=%d, velocity=%d",
+                                      li, gripper_joint_name_[gi].c_str(), 
+                                      normalized_pos, raw_pos, raw_pos,
+                                      torques[li], velocities[li]);
+                        }
+
+                        const bool ok = hand->move_hand(torques, velocities, pos_by_tool[tool_i]);
+                        if (!ok)
+                        {
+                            RCLCPP_WARN(get_logger(), "Failed to send command to hand tool %zu", tool_i);
+                            continue;
+                        }
+                        RCLCPP_INFO(get_logger(), "Successfully sent command to hand tool %zu", tool_i);
+
+                        // Update last command markers for joints belonging to this tool
+                        for (size_t gi = 0; gi < n; ++gi)
+                        {
+                            std::string name_lower = gripper_joint_name_[gi];
+                            std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
+                            
+                            size_t mapped_tool = 0;
+                            if (tool_n >= 2)
+                            {
+                                mapped_tool = (name_lower.find("right_hand_") != std::string::npos) ? 1 : 0;
+                            }
+                            if (mapped_tool != tool_i) continue;
+
+                            const int li = hand->mapJointNameToIndex(gripper_joint_name_[gi]);
+                            if (li < 0) continue;
+
+                            last_gripper_command_[gi] = gripper_position_command_[gi];
+                            gripper_stopped_[gi] = false;
+                        }
+                    }
+                }
+            }
+            else
+            {
+                // For grippers: one command per end effector
+                for (size_t i = 0; i < toolCount() && i < gripper_stopped_.size() && i < last_gripper_command_.size(); i++)
+                {
+                    if (!CommandChangeDetector::hasChanged(last_gripper_command_[i], gripper_position_command_[i]))
+                    {
+                        continue;
+                    }
+
                     RCLCPP_INFO(get_logger(), "Gripper %zu: writing position %.3f", i, gripper_position_command_[i]);
-                    
-                    // Use base class interface - move_gripper now accepts normalized position
-                    gripper_hardware_common::GripperBase* gripper_base = gripper_ptr_[i].get();
-                    
-                    int cur_speed_set = 100;
-                    int cur_effort_set = 100;
-                    
-                    // Use base class interface to send command with normalized position
-                    // Each gripper implementation will handle the conversion internally
-                    bool success = gripper_base->move_gripper(cur_effort_set, cur_speed_set, gripper_position_command_[i]);
+
+                    auto* tool = toolAt(i);
+                    if (!tool)
+                    {
+                        continue;
+                    }
+
+                    const int cur_speed_set = 100;
+                    const int cur_effort_set = static_cast<int>(100.0 * gripper_torque_scale_);
+
+                    const bool success = tool->move_gripper(cur_effort_set, cur_speed_set, gripper_position_command_[i]);
                     if (success)
                     {
                         last_gripper_command_[i] = gripper_position_command_[i];
@@ -1208,16 +1574,20 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                     }
                 }
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
     }
 
     bool MarvinHardware::connect_gripper()
     {
         bool result = true;
-        for (size_t i = 0; i < gripper_ptr_.size(); i++)
+        for (size_t i = 0; i < toolCount(); i++)
         {
-            result = result && gripper_ptr_[i]->initialize();
+            if (auto* tool = toolAt(i))
+            {
+                result = result && tool->initialize();
+            }
         }
         return result;
     }
@@ -1459,7 +1829,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
 
         while (hardware_connected_)
         {
-            if (!has_gripper_ || gripper_ptr_.empty())
+            if (!has_gripper_ || toolCount() == 0)
             {
                 usleep(10 * 1000);
                 continue;
@@ -1487,18 +1857,18 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                 specs[0] = {"A", OnGetChDataA, 0};
                 specs[1] = {"B", OnGetChDataB, 1};
                 spec_count = 2;
-                if (gripper_ptr_.size() < 2)
+                if (toolCount() < 2)
                 {
                     RCLCPP_WARN_THROTTLE(get_logger(), *get_node()->get_clock(), 2000,
                         "Dual-arm gripper configured but created_grippers=%zu (<2). Right gripper feedback may be missing.",
-                        gripper_ptr_.size());
+                        toolCount());
                 }
             }
 
             for (size_t si = 0; si < spec_count; ++si)
             {
                 const auto& spec = specs[si];
-                if (spec.gripper_idx >= gripper_ptr_.size())
+                if (spec.gripper_idx >= toolCount())
                 {
                     continue;
                 }
@@ -1509,12 +1879,66 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                     continue;
                 }
 
-                int torque = 0, velocity = 0;
-                double position = 0.0;
-                if (gripper_ptr_[spec.gripper_idx]->processReadResponse(
-                        data_buf, static_cast<size_t>(size), torque, velocity, position))
+                auto* tool = toolAt(spec.gripper_idx);
+                if (!tool)
                 {
-                    updateGripperState(spec.gripper_idx, position, velocity, torque);
+                    continue;
+                }
+
+                // Handle grippers (single position per tool)
+                auto* gripper = dynamic_cast<ModbusGripper*>(tool);
+                if (gripper)
+                {
+                    int torque = 0, velocity = 0;
+                    double position = 0.0;
+                    if (gripper->processReadResponse(data_buf, static_cast<size_t>(size), torque, velocity, position))
+                    {
+                        updateGripperState(spec.gripper_idx, position, velocity, torque);
+                    }
+                }
+                // Handle hands (multiple joints per tool)
+                else if (is_hand_)
+                {
+                    auto* hand = dynamic_cast<ModbusHand*>(tool);
+                    if (hand)
+                    {
+                        std::vector<double> positions;
+                        if (hand->processReadResponse(data_buf, static_cast<size_t>(size), positions))
+                        {
+                            // Map hand joint positions to global gripper_joint_name_ indices
+                            const size_t tool_n = toolCount();
+                            const size_t n = std::min(gripper_joint_name_.size(), gripper_position_.size());
+                            const size_t hand_dof = hand->getJointCount();
+                            
+                            if (positions.size() == hand_dof)
+                            {
+                                for (size_t gi = 0; gi < n; ++gi)
+                                {
+                                    // Decide which hand/tool this joint belongs to
+                                    std::string name_lower = gripper_joint_name_[gi];
+                                    std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
+                                    
+                                    size_t mapped_tool = 0;
+                                    if (tool_n >= 2)
+                                    {
+                                        mapped_tool = (name_lower.find("right_hand_") != std::string::npos) ? 1 : 0;
+                                    }
+                                    if (mapped_tool != spec.gripper_idx)
+                                    {
+                                        continue;
+                                    }
+                                    
+                                    // Map global joint name to local hand joint index
+                                    int local_index = hand->mapJointNameToIndex(gripper_joint_name_[gi]);
+                                    if (local_index >= 0 && static_cast<size_t>(local_index) < hand_dof)
+                                    {
+                                        // Update this joint's position (velocity/torque not available, set to 0)
+                                        updateGripperState(gi, positions[local_index], 0, 0);
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
@@ -1610,6 +2034,44 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
     bool MarvinHardware::readFromHardware(bool initial_frame)
     {
         OnGetBuf(&frame_data_);
+        
+        // Check error codes from Tianji robot
+        // For single arm: check the arm's error code
+        // For dual arm: check both arms' error codes
+        if (robot_arm_index_ == ARM_LEFT || robot_arm_index_ == ARM_RIGHT)
+        {
+            int err_code = frame_data_.m_State[robot_arm_index_].m_ERRCode;
+            if (err_code != 0)
+            {
+                const char* arm_name = (robot_arm_index_ == ARM_LEFT) ? "Left" : "Right";
+                RCLCPP_ERROR(get_logger(), 
+                            "Tianji robot error detected on %s arm: error_code=%d. Deactivating controller.", 
+                            arm_name, err_code);
+                // Return false to trigger error state in read()
+                return false;
+            }
+        }
+        else if (robot_arm_index_ == ARM_DUAL)
+        {
+            int left_err_code = frame_data_.m_State[ARM_LEFT].m_ERRCode;
+            int right_err_code = frame_data_.m_State[ARM_RIGHT].m_ERRCode;
+            
+            if (left_err_code != 0)
+            {
+                RCLCPP_ERROR(get_logger(), 
+                            "Tianji robot error detected on Left arm: error_code=%d. Deactivating controller.", 
+                            left_err_code);
+                return false;
+            }
+            if (right_err_code != 0)
+            {
+                RCLCPP_ERROR(get_logger(), 
+                            "Tianji robot error detected on Right arm: error_code=%d. Deactivating controller.", 
+                            right_err_code);
+                return false;
+            }
+        }
+        
         if (initial_frame)
         {
             previous_message_frame_ = frame_data_.m_Out[robot_arm_index_].m_OutFrameSerial;

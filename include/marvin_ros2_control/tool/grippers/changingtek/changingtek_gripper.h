@@ -1,6 +1,6 @@
 #pragma once
 
-#include "marvin_ros2_control/grippers/gripper_control.h"
+#include "marvin_ros2_control/tool/grippers/modbus_gripper.h"
 #include "gripper_hardware_common/ChangingtekGripper.h"
 #include "gripper_hardware_common/utils/ModbusConfig.h"
 
@@ -40,4 +40,4 @@ namespace marvin_ros2_control
 } // namespace marvin_ros2_control
 
 // Include template implementation
-#include "marvin_ros2_control/grippers/changingtek_gripper_impl.h"
+#include "marvin_ros2_control/tool/grippers/changingtek/changingtek_gripper_impl.h"
