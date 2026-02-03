@@ -73,7 +73,7 @@ namespace marvin_ros2_control
         if (count > MAX_MODBUS_REGISTERS)
         {
             count = MAX_MODBUS_REGISTERS;
-            RCLCPP_WARN(logger_, "Limiting count to %zu", MAX_MODBUS_REGISTERS);
+            RCLCPP_DEBUG(logger_, "Limiting count to %zu", MAX_MODBUS_REGISTERS);
         }
 
         std::vector<uint8_t> data = {
@@ -87,7 +87,7 @@ namespace marvin_ros2_control
 
         if (!sendRequest(request))
         {
-            RCLCPP_ERROR(logger_, "Failed to send read request");
+            RCLCPP_DEBUG(logger_, "Failed to send read request");
             return {};
         }
 
@@ -103,7 +103,7 @@ namespace marvin_ros2_control
         {
             if (!on_get_ch_data_)
             {
-                RCLCPP_ERROR(logger_, "on_get_ch_data_ callback is null");
+                RCLCPP_DEBUG(logger_, "on_get_ch_data_ callback is null");
                 return {};
             }
 
@@ -113,7 +113,7 @@ namespace marvin_ros2_control
             if (tag >= 1)
             {
                 hex_to_str(data_buf, static_cast<int>(tag), hex_str1, sizeof(hex_str1));
-                RCLCPP_INFO(logger_, "接收信号: %ld, 接收的HEX数据: %s", tag, hex_str1);
+                RCLCPP_DEBUG(logger_, "接收信号: %ld, 接收的HEX数据: %s", tag, hex_str1);
 
                 // Basic Modbus RTU parsing: [slave][func][byte_count][data...][crc_low][crc_high]
                 std::vector<uint8_t> response(data_buf, data_buf + static_cast<size_t>(tag));
@@ -148,7 +148,7 @@ namespace marvin_ros2_control
             }
         }
 
-        RCLCPP_ERROR(logger_, "Modbus read timeout: no valid response after %d attempts", max_attempts);
+        RCLCPP_DEBUG(logger_, "Modbus read timeout: no valid response after %d attempts", max_attempts);
         return {};
     }
 
@@ -157,7 +157,7 @@ namespace marvin_ros2_control
         if (count > MAX_MODBUS_REGISTERS)
         {
             count = MAX_MODBUS_REGISTERS;
-            RCLCPP_WARN(logger_, "Limiting count to %zu", MAX_MODBUS_REGISTERS);
+            RCLCPP_DEBUG(logger_, "Limiting count to %zu", MAX_MODBUS_REGISTERS);
         }
 
         std::vector<uint8_t> data = {
@@ -223,7 +223,7 @@ namespace marvin_ros2_control
         auto request = buildRequest(slave_id, function_code, data);
         if (!sendRequest(request))
         {
-            RCLCPP_ERROR(logger_, "Failed to write register 0x%04X", register_addr);
+            RCLCPP_DEBUG(logger_, "Failed to write register 0x%04X", register_addr);
             return false;
         }
 
@@ -237,7 +237,7 @@ namespace marvin_ros2_control
     {
         if (values.empty() || values.size() > MAX_MODBUS_REGISTERS)
         {
-            RCLCPP_ERROR(logger_, "Invalid register count: %zu", values.size());
+            RCLCPP_DEBUG(logger_, "Invalid register count: %zu", values.size());
             return false;
         }
 
@@ -258,7 +258,7 @@ namespace marvin_ros2_control
         auto request = buildRequest(slave_id, function_code, data);
         if (!sendRequest(request))
         {
-            RCLCPP_ERROR(logger_, "Failed to write multiple registers");
+            RCLCPP_DEBUG(logger_, "Failed to write multiple registers");
             return false;
         }
 
@@ -269,7 +269,7 @@ namespace marvin_ros2_control
     {
         char debug_str[512];
         hex_to_str(request.data(), request.size(), debug_str, sizeof(debug_str));
-        RCLCPP_INFO(logger_, "Sending: %s", debug_str);
+        RCLCPP_DEBUG(logger_, "Sending: %s", debug_str);
 
         return send_485_((uint8_t*)request.data(), static_cast<long>(request.size()), COM1_CHANNEL);
     }

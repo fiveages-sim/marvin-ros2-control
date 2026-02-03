@@ -141,7 +141,7 @@ namespace marvin_ros2_control
                 raw_str += std::to_string(raw_positions[i]);
             }
             raw_str += "]";
-            RCLCPP_INFO(logger_, "LinkerHand %s: Sending Modbus FC16 command to slave 0x%02X, start_addr=0x%04X, %zu registers: %s", 
+            RCLCPP_DEBUG(logger_, "LinkerHand %s: Sending Modbus FC16 command to slave 0x%02X, start_addr=0x%04X, %zu registers: %s", 
                        Traits::PRODUCT_NAME, slave_id_, 
                        ModbusConfig::LinkerHand::THUMB_PITCH_REG, JOINT_COUNT, raw_str.c_str());
 

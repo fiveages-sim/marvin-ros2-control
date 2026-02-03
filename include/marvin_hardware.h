@@ -5,6 +5,10 @@
 #include <string>
 #include <vector>
 #include <thread>
+#include <queue>
+#include <array>
+#include <atomic>
+#include <mutex>
 
 #include "hardware_interface/handle.hpp"
 #include "hardware_interface/system_interface.hpp"
@@ -19,9 +23,19 @@
 #include "marvin_ros2_control/tool/grippers/modbus_gripper.h"
 #include "marvin_ros2_control/tool/hands/modbus_hand.h"
 #include "gripper_hardware_common/GripperBase.h"
+#include "marvin_ros2_control/tool/modbus_io.h"
 
 namespace marvin_ros2_control
 {
+    constexpr size_t kMaxTools = 2;
+
+    struct ModbusTask
+    {
+        enum Type { Read, Write };
+        Type type = Read;
+        size_t tool_idx = 0;
+        std::vector<double> command;
+    };
     // Arm configuration constants
     constexpr int ARM_LEFT = 0;
     constexpr int ARM_RIGHT = 1;
@@ -164,11 +178,16 @@ private:
         bool gripper_initilized_ = false;
         void contains_gripper();
         std::vector<double> step_size_;
-        std::thread gripper_ctrl_thread_;
         std::vector<std::unique_ptr<gripper_hardware_common::GripperBase>> tool_ptr_;  // Unified container for hand/gripper
         bool is_hand_ = false;  // Flag to indicate if end effector is a hand (true) or gripper (false) - used for logging only
-        void tool_callback();
-        bool recv_thread_func();
+        std::array<std::queue<ModbusTask>, kMaxTools> modbus_task_queues_;
+        std::array<std::atomic<bool>, kMaxTools> modbus_write_pending_{};
+        std::vector<std::thread> gripper_ctrl_threads_;
+        void tool_callback_for_tool(size_t tool_idx);
+        long receiveToolResponse(unsigned char* data_buf, size_t buf_size, GetChDataFunc get_ch_data,
+                                 int timeout_ms, int max_attempts);
+        void processToolResponse(const unsigned char* data_buf, size_t size, size_t gripper_idx);
+        bool isToolStateCloseToCommand(size_t tool_idx, double threshold);
         void updateGripperState(size_t gripper_idx, double position, int velocity, int torque);
         bool connect_gripper();
         void disconnect_gripper();
