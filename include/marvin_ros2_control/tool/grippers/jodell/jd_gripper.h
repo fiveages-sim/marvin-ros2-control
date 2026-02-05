@@ -19,9 +19,10 @@ namespace marvin_ros2_control
         void updateStatusFromResponse(const std::vector<uint16_t>& registers) override;
         bool processReadResponse(const uint8_t* data, size_t data_size, 
                                 int& torque, int& velocity, double& position) override;
+        bool isTargetReached() const;
 
     private:
-        // Modbus configuration will be used directly from ModbusConfig::Jodell in implementation
+        uint8_t cached_status_byte_ = 0;
     };
 } // namespace marvin_ros2_control
 

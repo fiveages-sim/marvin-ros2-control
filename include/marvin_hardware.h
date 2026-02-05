@@ -180,12 +180,13 @@ private:
         std::vector<double> step_size_;
         std::vector<std::unique_ptr<gripper_hardware_common::GripperBase>> tool_ptr_;  // Unified container for hand/gripper
         bool is_hand_ = false;  // Flag to indicate if end effector is a hand (true) or gripper (false) - used for logging only
-        std::array<std::queue<ModbusTask>, kMaxTools> modbus_task_queues_;
+        std::array<std::queue<ModbusTask>, kMaxTools> modbus_write_queues_;
+        std::array<std::queue<ModbusTask>, kMaxTools> modbus_read_queues_;
         std::array<std::atomic<bool>, kMaxTools> modbus_write_pending_{};
         std::vector<std::thread> gripper_ctrl_threads_;
         void tool_callback_for_tool(size_t tool_idx);
         long receiveToolResponse(unsigned char* data_buf, size_t buf_size, GetChDataFunc get_ch_data,
-                                 int timeout_ms, int max_attempts);
+                                 int timeout_ms, int max_attempts, uint8_t expected_fc = 0);
         void processToolResponse(const unsigned char* data_buf, size_t size, size_t gripper_idx);
         bool isToolStateCloseToCommand(size_t tool_idx, double threshold);
         void updateGripperState(size_t gripper_idx, double position, int velocity, int torque);

@@ -269,7 +269,7 @@ namespace marvin_ros2_control
     {
         char debug_str[512];
         hex_to_str(request.data(), request.size(), debug_str, sizeof(debug_str));
-        RCLCPP_DEBUG(logger_, "Sending: %s", debug_str);
+        RCLCPP_INFO(logger_, "Sending: %s", debug_str);
 
         return send_485_((uint8_t*)request.data(), static_cast<long>(request.size()), COM1_CHANNEL);
     }

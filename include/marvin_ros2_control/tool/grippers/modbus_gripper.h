@@ -44,6 +44,11 @@ namespace marvin_ros2_control
             (void)position;
             return false;
         }
+        
+        virtual bool isTargetReached() const
+        {
+            return false;  // Default: not reached (for grippers that don't implement this)
+        }
 
     protected:
         // Cached status values (updated by updateStatusFromResponse)

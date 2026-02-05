@@ -1377,11 +1377,14 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         if (tool_idx >= kMaxTools || tool_idx >= toolCount())
             return;
         unsigned char data_buf[256] = {0};
-        std::queue<ModbusTask>& my_queue = modbus_task_queues_[tool_idx];
+        std::queue<ModbusTask>& write_queue = modbus_write_queues_[tool_idx];
+        std::queue<ModbusTask>& read_queue = modbus_read_queues_[tool_idx];
         GetChDataFunc get_ch = (robot_arm_index_ == ARM_LEFT || (robot_arm_index_ == ARM_DUAL && tool_idx == 0))
             ? OnGetChDataA : OnGetChDataB;
 
-        RCLCPP_DEBUG(get_logger(), "tool_callback_for_tool(%zu) started (independent scheduler)", tool_idx);
+        RCLCPP_DEBUG(get_logger(), "tool_callback_for_tool(%zu) started (write/read queues, Write first)", tool_idx);
+        // Seed one initial Read to refresh tool state once after startup.
+        bool seeded_initial_read = false;
 
         while (hardware_connected_)
         {
@@ -1466,7 +1469,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                         t.type = ModbusTask::Write;
                         t.tool_idx = tool_idx;
                         t.command = pos;
-                        my_queue.push(std::move(t));
+                        write_queue.push(std::move(t));
                         modbus_write_pending_[tool_idx].store(true);
                     }
                 }
@@ -1480,33 +1483,49 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                     t.type = ModbusTask::Write;
                     t.tool_idx = tool_idx;
                     t.command = { gripper_position_command_[tool_idx] };
-                    my_queue.push(std::move(t));
+                    write_queue.push(std::move(t));
                     modbus_write_pending_[tool_idx].store(true);
                 }
             }
 
-            // Enqueue Read for this tool only while write pending and state not close (lock-free: atomic pending)
-            if (modbus_write_pending_[tool_idx].load(std::memory_order_acquire))
+            // Pick one task: motion (Write) has priority over status read (Read); wait for response before next command
+            ModbusTask task;
+            bool has_task = false;
+            if (!write_queue.empty())
             {
-                if (isToolStateCloseToCommand(tool_idx, 0.01))
-                    modbus_write_pending_[tool_idx].store(false, std::memory_order_release);
-                else
-                {
-                    ModbusTask t;
-                    t.type = ModbusTask::Read;
-                    t.tool_idx = tool_idx;
-                    my_queue.push(std::move(t));
-                }
+                task = std::move(write_queue.front());
+                write_queue.pop();
+                has_task = true;
             }
-
-            // Process exactly one task from this tool's queue
-            if (my_queue.empty())
+            else if (!read_queue.empty())
             {
+                task = std::move(read_queue.front());
+                read_queue.pop();
+                has_task = true;
+            }
+            else
+            {
+                // Both empty: only read when needed.
+                // - At startup, do one initial Read to populate state.
+                // - During motion (write pending / not stopped), keep reading.
+                // - If NOT in write state and already stopped, no need to poll.
+                const bool write_pending = modbus_write_pending_[tool_idx].load(std::memory_order_acquire);
+                const bool stopped = is_hand_
+                    ? isToolStateCloseToCommand(tool_idx, 0.01)
+                    : (tool_idx < gripper_stopped_.size() ? gripper_stopped_[tool_idx] : true);
+
+                if (!seeded_initial_read || write_pending || !stopped)
+                {
+                    ModbusTask read_task;
+                    read_task.type = ModbusTask::Read;
+                    read_task.tool_idx = tool_idx;
+                    read_queue.push(std::move(read_task));
+                    seeded_initial_read = true;
+                }
+
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 continue;
             }
-            ModbusTask task = std::move(my_queue.front());
-            my_queue.pop();
 
             auto* tool = toolAt(task.tool_idx);
             if (!tool) continue;
@@ -1515,11 +1534,26 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             {
                 tool->getStatus();
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
-                long received = 0;
-                for (int wait_round = 0; wait_round < 100 && received <= 0; ++wait_round)
-                    received = receiveToolResponse(data_buf, sizeof(data_buf), get_ch, 10, 5);
+                // Wait specifically for read response (FC 0x04), ignore write responses (FC 0x10)
+                long received = receiveToolResponse(data_buf, sizeof(data_buf), get_ch, 10, 100, 0x04);
                 if (received > 0)
+                {
                     processToolResponse(data_buf, static_cast<size_t>(received), task.tool_idx);
+                    
+                    // Continue reading if target not reached (enqueue next Read)
+                    auto* gripper = dynamic_cast<ModbusGripper*>(tool);
+                    if (gripper && !gripper->isTargetReached() && modbus_write_pending_[task.tool_idx].load(std::memory_order_acquire))
+                    {
+                        ModbusTask read_task;
+                        read_task.type = ModbusTask::Read;
+                        read_task.tool_idx = task.tool_idx;
+                        read_queue.push(std::move(read_task));
+                    }
+                    else if (gripper && gripper->isTargetReached())
+                    {
+                        modbus_write_pending_[task.tool_idx].store(false, std::memory_order_release);
+                    }
+                }
                 else
                     RCLCPP_DEBUG_THROTTLE(get_logger(), *node_->get_clock(), 5000, "Modbus read no response, tool_idx=%zu", task.tool_idx);
             }
@@ -1536,12 +1570,9 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                         std::vector<double> pos(task.command.begin(), task.command.begin() + dof);
                         hand->move_hand(torques, velocities, pos);
                         std::this_thread::sleep_for(std::chrono::milliseconds(5));
-                        long received = 0;
-                        for (int wait_round = 0; wait_round < 100 && received <= 0; ++wait_round)
-                            received = receiveToolResponse(data_buf, sizeof(data_buf), get_ch, 10, 5);
-                        if (received <= 0)
-                            RCLCPP_DEBUG_THROTTLE(get_logger(), *node_->get_clock(), 5000, "Modbus write (hand) no response, tool_idx=%zu", task.tool_idx);
-                        else
+                        // Wait specifically for write response (FC 0x10), ignore read responses (FC 0x04)
+                        long received = receiveToolResponse(data_buf, sizeof(data_buf), get_ch, 10, 100, 0x10);
+                        if (received > 0)
                         {
                             for (size_t gi = 0; gi < gripper_joint_name_.size() && gi < last_gripper_command_.size(); ++gi)
                             {
@@ -1556,6 +1587,11 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                                     gripper_stopped_[gi] = false;
                                 }
                             }
+                            // Enqueue read task after write command acknowledged
+                            ModbusTask read_task;
+                            read_task.type = ModbusTask::Read;
+                            read_task.tool_idx = task.tool_idx;
+                            read_queue.push(std::move(read_task));
                         }
                     }
                 }
@@ -1565,13 +1601,16 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                         tool->move_gripper(static_cast<int>(100.0 * gripper_torque_scale_), 100, task.command[0]))
                     {
                         std::this_thread::sleep_for(std::chrono::milliseconds(5));
-                        long received = 0;
-                        for (int wait_round = 0; wait_round < 100 && received <= 0; ++wait_round)
-                            received = receiveToolResponse(data_buf, sizeof(data_buf), get_ch, 10, 5);
+                        // Wait specifically for write response (FC 0x10), ignore read responses (FC 0x04)
+                        long received = receiveToolResponse(data_buf, sizeof(data_buf), get_ch, 10, 100, 0x10);
                         if (received > 0)
                         {
                             last_gripper_command_[task.tool_idx] = task.command[0];
                             gripper_stopped_[task.tool_idx] = false;
+                            ModbusTask read_task;
+                            read_task.type = ModbusTask::Read;
+                            read_task.tool_idx = task.tool_idx;
+                            read_queue.push(std::move(read_task));
                         }
                         else
                             RCLCPP_DEBUG_THROTTLE(get_logger(), *node_->get_clock(), 5000, "Modbus write (gripper) no response, tool_idx=%zu", task.tool_idx);
@@ -1839,13 +1878,18 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             }
             return true;
         }
+        auto* tool = toolAt(tool_idx);
+        auto* gripper = dynamic_cast<ModbusGripper*>(tool);
+        if (gripper && gripper->isTargetReached())
+            return true;
+        
         if (tool_idx >= gripper_position_.size() || tool_idx >= gripper_position_command_.size())
             return true;
         return std::abs(gripper_position_[tool_idx] - gripper_position_command_[tool_idx]) <= threshold;
     }
 
     long MarvinHardware::receiveToolResponse(unsigned char* data_buf, size_t buf_size,
-                                             GetChDataFunc get_ch_data, int timeout_ms, int max_attempts)
+                                             GetChDataFunc get_ch_data, int timeout_ms, int max_attempts, uint8_t expected_fc)
     {
         long ch = COM1_CHANNEL;
         std::vector<unsigned char> accum;
@@ -1875,6 +1919,14 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                 while (accum.size() >= 2)
                 {
                     const uint8_t fc = accum[1];
+                    
+                    // If expected_fc is specified, only accept matching function code
+                    if (expected_fc != 0 && fc != expected_fc)
+                    {
+                        // Not the expected function code, drop and continue
+                        drop_prefix(1);
+                        continue;
+                    }
 
                     if (fc == 0x10)
                     {
@@ -1930,6 +1982,9 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             if (gripper->processReadResponse(data_buf, size, torque, velocity, position))
             {
                 updateGripperState(gripper_idx, position, velocity, torque);
+                
+                if (gripper->isTargetReached() && gripper_idx < gripper_stopped_.size())
+                    gripper_stopped_[gripper_idx] = true;
             }
             return;
         }
