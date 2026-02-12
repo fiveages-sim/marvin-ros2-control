@@ -183,6 +183,7 @@ private:
         std::array<std::queue<ModbusTask>, kMaxTools> modbus_write_queues_;
         std::array<std::queue<ModbusTask>, kMaxTools> modbus_read_queues_;
         std::array<std::atomic<bool>, kMaxTools> modbus_write_pending_{};
+        std::array<std::atomic<bool>, kMaxTools> modbus_read_pending_{};
         std::vector<std::thread> gripper_ctrl_threads_;
         void tool_callback_for_tool(size_t tool_idx);
         long receiveToolResponse(unsigned char* data_buf, size_t buf_size, GetChDataFunc get_ch_data,
