@@ -40,7 +40,9 @@ namespace marvin_ros2_control
     constexpr int ARM_LEFT = 0;
     constexpr int ARM_RIGHT = 1;
     constexpr int ARM_DUAL = 2;
-  
+
+    enum class ToolType { None, Hand, Gripper, Others };
+
     class MarvinHardware : public hardware_interface::SystemInterface
     {
     public:
@@ -176,13 +178,20 @@ private:
         std::vector<double> last_gripper_command_;
         std::vector<bool> gripper_stopped_;
         bool gripper_initilized_ = false;
-        void contains_gripper();
+        void contains_tool();
         std::vector<double> step_size_;
         std::vector<std::unique_ptr<gripper_hardware_common::GripperBase>> tool_ptr_;  // Unified container for hand/gripper
-        bool is_hand_ = false;  // Flag to indicate if end effector is a hand (true) or gripper (false) - used for logging only
+        ToolType tool_type_ = ToolType::None;  // Hand, Gripper, Others, or None - determines move_hand vs move_gripper
+        const char* toolTypeLogName() const;
         std::array<std::queue<ModbusTask>, kMaxTools> modbus_write_queues_;
         std::array<std::queue<ModbusTask>, kMaxTools> modbus_read_queues_;
         std::array<std::atomic<bool>, kMaxTools> modbus_write_pending_{};
+        std::array<std::atomic<bool>, kMaxTools> modbus_read_pending_{};
+        // Hand: current frame same as previous for N consecutive reads -> steady state, stop read polling until next write
+        static constexpr size_t kHandStableFrameCount = 5;
+        std::array<std::vector<double>, kMaxTools> hand_previous_position_;
+        std::array<size_t, kMaxTools> hand_stable_count_{};
+        std::array<bool, kMaxTools> hand_stabilized_{};
         std::vector<std::thread> gripper_ctrl_threads_;
         void tool_callback_for_tool(size_t tool_idx);
         long receiveToolResponse(unsigned char* data_buf, size_t buf_size, GetChDataFunc get_ch_data,
@@ -190,7 +199,7 @@ private:
         void processToolResponse(const unsigned char* data_buf, size_t size, size_t gripper_idx);
         bool isToolStateCloseToCommand(size_t tool_idx, double threshold);
         void updateGripperState(size_t gripper_idx, double position, int velocity, int torque);
-        bool connect_gripper();
+        bool connect_tool();
         void disconnect_gripper();
         
         // Unified tool access helpers
