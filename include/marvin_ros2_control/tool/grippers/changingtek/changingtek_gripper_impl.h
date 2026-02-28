@@ -4,6 +4,7 @@
 #include "MarvinSDK.h"
 #include <thread>
 #include <chrono>
+#include <cstdio>
 #include "rclcpp/logging.hpp"
 #include "gripper_hardware_common/utils/PositionConverter.h"
 #include "gripper_hardware_common/utils/TorqueConverter.h"
@@ -61,7 +62,7 @@ namespace marvin_ros2_control
         result = writeMultipleRegisters(Config::SLAVE_ID, Config::POS_REG_ADDR, position_values,
                                        Config::WRITE_FUNCTION) && result;
             
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
         // Configure acceleration if not set
         if (!acceleration_set_)
         {
@@ -136,17 +137,43 @@ namespace marvin_ros2_control
         std::vector<uint16_t> registers = ModbusIO::parseModbusResponse(data, data_size, Config::SLAVE_ID, Config::READ_FUNCTION);
         if (registers.size() < 2)
         {
-            std::cout << "size below 2 -----" << std::endl;
+            // Response too short or parse failed: need at least 2 registers (4 bytes) for position
+            std::string hex;
+            for (size_t i = 0; i < data_size && i < 32; ++i)
+            {
+                char buf[4];
+                snprintf(buf, sizeof(buf), " %02X", data[i]);
+                hex += buf;
+            }
+            RCLCPP_DEBUG(logger_, "Changingtek processReadResponse: got %zu registers (need 2), data_size=%zu, first bytes:%s",
+                         registers.size(), data_size, hex.c_str());
             return false;
         }
-       
-        // Extract position: registers[0] = 0x0414 (high), registers[1] = 0x0415 (low)
-        uint32_t modbus_pos = (static_cast<uint32_t>(registers[0]) << 16) | registers[1];
+
+        // 32-bit position: manufacturer SDK uses (high << 16) | low; support both [high,low] and [low,high] word order
+        uint32_t raw = (static_cast<uint32_t>(registers[0]) << 16) | registers[1];
+        if (raw & 0x80000000u)
+            raw -= 0x100000000u;  // 32-bit signed per manufacturer
+        int32_t modbus_pos_signed = static_cast<int32_t>(raw);
+        uint32_t modbus_pos = static_cast<uint32_t>(modbus_pos_signed < 0 ? 0 : modbus_pos_signed);
+        // If value exceeds 0-9000 range, try opposite word order (some devices send [low, high])
+        if (modbus_pos > Config::MAX_POSITION_MM && registers.size() >= 2)
+        {
+            raw = (static_cast<uint32_t>(registers[1]) << 16) | registers[0];
+            if (raw & 0x80000000u)
+                raw -= 0x100000000u;
+            modbus_pos_signed = static_cast<int32_t>(raw);
+            modbus_pos = static_cast<uint32_t>(modbus_pos_signed < 0 ? 0 : (modbus_pos_signed > static_cast<int32_t>(Config::MAX_POSITION_MM) ? Config::MAX_POSITION_MM : modbus_pos_signed));
+        }
+        if (modbus_pos > Config::MAX_POSITION_MM)
+            modbus_pos = Config::MAX_POSITION_MM;
+
         using namespace gripper_hardware_common;
         position = PositionConverter::Changingtek90::modbusToNormalized(modbus_pos);
         velocity = 0;
         torque = 0;
-        
+        RCLCPP_DEBUG(logger_, "Changingtek processReadResponse: regs [0x%04X 0x%04X] -> modbus_pos=%u -> normalized=%.4f",
+                     registers[0], registers[1], modbus_pos, position);
         return true;
     }
 

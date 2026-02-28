@@ -183,10 +183,15 @@ private:
         std::vector<std::unique_ptr<gripper_hardware_common::GripperBase>> tool_ptr_;  // Unified container for hand/gripper
         ToolType tool_type_ = ToolType::None;  // Hand, Gripper, Others, or None - determines move_hand vs move_gripper
         const char* toolTypeLogName() const;
-        std::array<std::queue<ModbusTask>, kMaxTools> modbus_write_queues_;
-        std::array<std::queue<ModbusTask>, kMaxTools> modbus_read_queues_;
-        std::array<std::atomic<bool>, kMaxTools> modbus_write_pending_{};
-        std::array<std::atomic<bool>, kMaxTools> modbus_read_pending_{};
+        // Single in-flight task per tool: 0=None, 1=Read (waiting response), 2=Write (waiting response)
+        std::array<std::atomic<int>, kMaxTools> in_flight_type_{};
+        std::array<std::vector<double>, kMaxTools> in_flight_write_command_;
+        /** Gripper move_gripper sends 2 writes (position FC 0x10, trigger FC 0x06); count write acks before clearing in_flight. */
+        std::array<std::atomic<int>, kMaxTools> pending_write_acks_{};
+        // Wait 20 ms before each request (max 50 Hz)
+        static constexpr int kToolRequestWaitMs = 20;
+        // One initial read per tool; after that only read when tool is not stopped
+        std::array<bool, kMaxTools> tool_initial_read_done_{};
         // Hand: current frame same as previous for N consecutive reads -> steady state, stop read polling until next write
         static constexpr size_t kHandStableFrameCount = 5;
         std::array<std::vector<double>, kMaxTools> hand_previous_position_;
@@ -194,14 +199,21 @@ private:
         std::array<bool, kMaxTools> hand_stabilized_{};
         std::vector<std::thread> gripper_ctrl_threads_;
         void tool_callback_for_tool(size_t tool_idx);
+        /** tool_idx_for_log: if >= 0, include in raw log. expected_fc: 0=any, 0x03=read only (0x03|0x04), 0x10=any write (0x10|0x06); other value = last-write FC only (robot-specific); wrong-type frames are dropped. */
         long receiveToolResponse(unsigned char* data_buf, size_t buf_size, GetChDataFunc get_ch_data,
-                                 int timeout_ms, int max_attempts, uint8_t expected_fc = 0);
+                                 int timeout_ms, int max_attempts, int tool_idx_for_log = -1, uint8_t expected_fc = 0);
         void processToolResponse(const unsigned char* data_buf, size_t size, size_t gripper_idx);
         bool isToolStateCloseToCommand(size_t tool_idx, double threshold);
+        /** True if tool is stopped (hand: at command and stabilized; gripper: at target and stopped). */
+        bool isToolStopped(size_t tool_idx);
         void updateGripperState(size_t gripper_idx, double position, int velocity, int torque);
         bool connect_tool();
         void disconnect_gripper();
-        
+        /** One-time initial read per tool during on_activate; updates state and sets tool_initial_read_done_. Returns false if any tool fails to respond. */
+        bool doInitialToolReads();
+        /** Map tool_idx (0=left, 1=right) to gripper joint index by name; returns tool_idx if single tool or no match. */
+        size_t gripperJointIndexForTool(size_t tool_idx) const;
+
         // Unified tool access helpers
         size_t toolCount() const { return tool_ptr_.size(); }
         gripper_hardware_common::GripperBase* toolAt(size_t idx) 

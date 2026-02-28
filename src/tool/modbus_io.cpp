@@ -182,11 +182,22 @@ namespace marvin_ros2_control
             return result;
         }
 
-        // Validate slave id and function code
-        if (data[0] != expected_slave_id || data[1] != expected_function_code)
+        // Validate slave id
+        if (data[0] != expected_slave_id)
         {
-            RCLCPP_DEBUG(logger_, "parseModbusResponse: Validation failed - expected slave=0x%02X func=0x%02X, got slave=0x%02X func=0x%02X",
-                        expected_slave_id, expected_function_code, data[0], data[1]);
+            RCLCPP_DEBUG(logger_, "parseModbusResponse: slave id mismatch - expected 0x%02X, got 0x%02X",
+                        expected_slave_id, data[0]);
+            return result;
+        }
+        // Accept expected function code or common alternates (e.g. 0x04 for read when 0x03 expected)
+        uint8_t fc = data[1];
+        bool fc_ok = (fc == expected_function_code) ||
+            (expected_function_code == 0x03 && fc == 0x04) ||  // read: Holding vs Input registers
+            (expected_function_code == 0x04 && fc == 0x03);
+        if (!fc_ok)
+        {
+            RCLCPP_DEBUG(logger_, "parseModbusResponse: function code mismatch - expected 0x%02X, got 0x%02X",
+                        expected_function_code, fc);
             return result;
         }
 
