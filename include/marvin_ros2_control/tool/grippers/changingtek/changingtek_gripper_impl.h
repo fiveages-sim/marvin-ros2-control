@@ -172,7 +172,7 @@ namespace marvin_ros2_control
         position = PositionConverter::Changingtek90::modbusToNormalized(modbus_pos);
         velocity = 0;
         torque = 0;
-        RCLCPP_DEBUG(logger_, "Changingtek processReadResponse: regs [0x%04X 0x%04X] -> modbus_pos=%u -> normalized=%.4f",
+        RCLCPP_INFO(logger_, "Changingtek processReadResponse: regs [0x%04X 0x%04X] -> modbus_pos=%u -> normalized=%.4f",
                      registers[0], registers[1], modbus_pos, position);
         return true;
     }

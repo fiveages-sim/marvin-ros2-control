@@ -171,6 +171,11 @@ private:
         std::vector<std::string> gripper_joint_name_;
         size_t gripper_joint_index_ = 0;
         std::vector<double> last_gripper_position_;
+        // For grippers without a "target reached" feedback, infer stop by comparing consecutive frames.
+        static constexpr size_t kGripperStableFrameCount = 3;
+        static constexpr double kGripperStableEpsilon = 0.001;
+        std::vector<double> gripper_previous_position_;
+        std::vector<size_t> gripper_stable_count_;
         std::vector<double> gripper_position_;
         std::vector<double> gripper_velocity_;
         std::vector<double> gripper_effort_;
@@ -199,13 +204,18 @@ private:
         std::array<bool, kMaxTools> hand_stabilized_{};
         std::vector<std::thread> gripper_ctrl_threads_;
         void tool_callback_for_tool(size_t tool_idx);
-        /** tool_idx_for_log: if >= 0, include in raw log. expected_fc: 0=any, 0x03=read only (0x03|0x04), 0x10=any write (0x10|0x06); other value = last-write FC only (robot-specific); wrong-type frames are dropped. */
-        long receiveToolResponse(unsigned char* data_buf, size_t buf_size, GetChDataFunc get_ch_data,
-                                 int timeout_ms, int max_attempts, int tool_idx_for_log = -1, uint8_t expected_fc = 0);
+        /** Read once from channel, copy to data_buf, return byte count or 0. */
+        long receiveToolResponse(unsigned char* data_buf, size_t buf_size, GetChDataFunc get_ch_data);
         void processToolResponse(const unsigned char* data_buf, size_t size, size_t gripper_idx);
         bool isToolStateCloseToCommand(size_t tool_idx, double threshold);
         /** True if tool is stopped (hand: at command and stabilized; gripper: at target and stopped). */
         bool isToolStopped(size_t tool_idx);
+        /** Sync read: one getStatus(), wait elapsed_time_for_poll ms, then read and parse. */
+        bool readToolStatusSync(size_t tool_idx, int elapsed_time_for_poll);
+        /** Sync write: send write_cmd, wait wait_ms, read ack and update state. */
+        bool writeToolStatusSync(size_t tool_idx, const std::vector<double>& write_cmd, int wait_ms = 5);
+        /** True if a new write command should be sent for this tool (position changed); fills write_cmd_out. */
+        bool shouldSendToolCommand(size_t tool_idx, std::vector<double>& write_cmd_out);
         void updateGripperState(size_t gripper_idx, double position, int velocity, int torque);
         bool connect_tool();
         void disconnect_gripper();
