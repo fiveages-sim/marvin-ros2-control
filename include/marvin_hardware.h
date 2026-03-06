@@ -182,7 +182,6 @@ private:
         std::vector<double> gripper_position_command_;
         std::vector<double> last_gripper_command_;
         std::vector<bool> gripper_stopped_;
-        bool gripper_initilized_ = false;
         void contains_tool();
         std::vector<double> step_size_;
         std::vector<std::unique_ptr<gripper_hardware_common::GripperBase>> tool_ptr_;  // Unified container for hand/gripper
@@ -197,6 +196,8 @@ private:
         static constexpr int kToolRequestWaitMs = 20;
         // One initial read per tool; after that only read when tool is not stopped
         std::array<bool, kMaxTools> tool_initial_read_done_{};
+        /** True if this tool failed initial read; skip all read/write polling for this side. */
+        std::array<bool, kMaxTools> tool_init_failed_{};
         // Hand: current frame same as previous for N consecutive reads -> steady state, stop read polling until next write
         static constexpr size_t kHandStableFrameCount = 5;
         std::array<std::vector<double>, kMaxTools> hand_previous_position_;
@@ -216,6 +217,12 @@ private:
         bool writeToolStatusSync(size_t tool_idx, const std::vector<double>& write_cmd, int wait_ms = 5);
         /** True if a new write command should be sent for this tool (position changed); fills write_cmd_out. */
         bool shouldSendToolCommand(size_t tool_idx, std::vector<double>& write_cmd_out);
+        /** If a write is in flight for this tool, try one non-blocking receive; on success update last and clear in_flight. */
+        void tryConsumeWriteAck(size_t tool_idx);
+        /** True if data_buf looks like Modbus write response (FC 0x10). */
+        static bool isModbusWriteAck(const unsigned char* data_buf, size_t size);
+        /** Apply in-flight write as acknowledged: update last_gripper_command_ and clear in_flight for tool_idx. */
+        void applyGripperWriteAckFromInFlight(size_t tool_idx);
         void updateGripperState(size_t gripper_idx, double position, int velocity, int torque);
         bool connect_tool();
         void disconnect_gripper();

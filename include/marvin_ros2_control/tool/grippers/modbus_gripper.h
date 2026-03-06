@@ -47,7 +47,7 @@ namespace marvin_ros2_control
         
         virtual bool isTargetReached() const
         {
-            return false;  // Default: not reached (for grippers that don't implement this)
+            return true;  // Default: reached (for grippers that don't implement this)
         }
 
     protected:
