@@ -93,6 +93,17 @@ namespace marvin_ros2_control
         using namespace gripper_hardware_common;
         using namespace gripper_hardware_common::ModbusConfig;
         
+        // Print received Modbus message
+        char hex_str[512] = {0};
+        int pos = 0;
+        for (size_t i = 0; i < data_size && i < 256 && pos < sizeof(hex_str) - 3; i++)
+        {
+            pos += snprintf(hex_str + pos, sizeof(hex_str) - pos, "%02X ", data[i]);
+        }
+        if (pos > 0 && hex_str[pos - 1] == ' ')
+            hex_str[pos - 1] = '\0';
+        RCLCPP_INFO(logger_, "JD Gripper RX: %s (size=%zu)", hex_str, data_size);
+        
         if (data_size < 3)
         {
             return false;
@@ -111,13 +122,36 @@ namespace marvin_ros2_control
             return false;
         }
         
+        // Extract status byte from 5th byte (index 4) of Modbus response
+        // Format: [Slave ID][Func Code][Byte Count][Reg07D0_High][Reg07D0_Low=Status]...
+        //         [0x09]   [0x04]     [0x06]       [0x00]        [0xB1/0xF1] <- status byte
+        if (data_size >= 5)
+        {
+            cached_status_byte_ = data[4];  // 5th byte is the status byte
+        }
+        else
+        {
+            cached_status_byte_ = static_cast<uint8_t>(registers[0] & 0xFF);  // Fallback to register parsing
+        }
+        
         // Extract and update torque, velocity, position
         int status_reg_high = static_cast<int>(registers[1] >> 8);
         position = PositionConverter::Jodell::jodellToNormalized(status_reg_high);
         velocity = static_cast<int>(registers[2] & 0xFF);
         torque = static_cast<int>(registers[2] >> 8);
         
+        status_valid_ = true;
+        
         return true;
+    }
+
+    bool JDGripper::isTargetReached() const
+    {
+        if (!status_valid_)
+            return false;
+        
+        const uint8_t gOBJ = (cached_status_byte_ >> 6) & 0x03;
+        return (gOBJ == 0x01 || gOBJ == 0x02 || gOBJ == 0x03);
     }
 } // namespace marvin_ros2_control
 

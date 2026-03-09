@@ -96,6 +96,76 @@ target_link_libraries(${PROJECT_NAME}
 
 pluginlib_export_plugin_description_file(hardware_interface marvin_ros2_control.xml)
 
+# Minimal example: connect to robot and initialize dual Changingtek 90D gripper (always build if source exists)
+set(MARVIN_EXAMPLE_SRC "${CMAKE_CURRENT_SOURCE_DIR}/examples/marvin_gripper_init_example.cpp")
+if(EXISTS "${MARVIN_EXAMPLE_SRC}")
+    add_executable(marvin_gripper_init_example "${MARVIN_EXAMPLE_SRC}")
+    add_dependencies(marvin_gripper_init_example build_marvin_sdk)
+    target_include_directories(marvin_gripper_init_example PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${HEADER_KINE_DIR}
+        ${HEADER_CONTROL_DIR}
+        ${EIGEN3_INCLUDE_DIRS}
+    )
+    target_link_directories(marvin_gripper_init_example PRIVATE
+        ${LIB_KINE_DIR}
+        ${LIB_CONTROL_DIR}
+    )
+    set_target_properties(marvin_gripper_init_example PROPERTIES
+        BUILD_RPATH "${LIB_KINE_DIR};${LIB_CONTROL_DIR}"
+        INSTALL_RPATH "$ORIGIN;$ORIGIN/../lib"
+        INSTALL_RPATH_USE_LINK_PATH TRUE
+    )
+    ament_target_dependencies(marvin_gripper_init_example rclcpp gripper_hardware_common)
+    target_link_libraries(marvin_gripper_init_example
+        ${PROJECT_NAME}
+        ${EXTERNAL_KINEMATICSO}
+        MarvinSDK
+        pthread
+        rt
+    )
+    install(TARGETS marvin_gripper_init_example
+        RUNTIME DESTINATION lib/${PROJECT_NAME}
+    )
+    message(STATUS "marvin_ros2_control: building and installing marvin_gripper_init_example")
+endif()
+
+# Hand init example: connect to robot and initialize dual LinkerHand (dexterous hand)
+set(MARVIN_HAND_EXAMPLE_SRC "${CMAKE_CURRENT_SOURCE_DIR}/examples/marvin_hand_init_example.cpp")
+if(EXISTS "${MARVIN_HAND_EXAMPLE_SRC}")
+    add_executable(marvin_hand_init_example "${MARVIN_HAND_EXAMPLE_SRC}")
+    add_dependencies(marvin_hand_init_example build_marvin_sdk)
+    target_include_directories(marvin_hand_init_example PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${HEADER_KINE_DIR}
+        ${HEADER_CONTROL_DIR}
+        ${EIGEN3_INCLUDE_DIRS}
+    )
+    target_link_directories(marvin_hand_init_example PRIVATE
+        ${LIB_KINE_DIR}
+        ${LIB_CONTROL_DIR}
+    )
+    set_target_properties(marvin_hand_init_example PROPERTIES
+        BUILD_RPATH "${LIB_KINE_DIR};${LIB_CONTROL_DIR}"
+        INSTALL_RPATH "$ORIGIN;$ORIGIN/../lib"
+        INSTALL_RPATH_USE_LINK_PATH TRUE
+    )
+    ament_target_dependencies(marvin_hand_init_example rclcpp gripper_hardware_common)
+    target_link_libraries(marvin_hand_init_example
+        ${PROJECT_NAME}
+        ${EXTERNAL_KINEMATICSO}
+        MarvinSDK
+        pthread
+        rt
+    )
+    install(TARGETS marvin_hand_init_example
+        RUNTIME DESTINATION lib/${PROJECT_NAME}
+    )
+    message(STATUS "marvin_ros2_control: building and installing marvin_hand_init_example")
+endif()
+
 install(
         DIRECTORY include/ 
         DESTINATION include/${PROJECT_NAME}

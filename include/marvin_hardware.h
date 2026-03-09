@@ -5,6 +5,10 @@
 #include <string>
 #include <vector>
 #include <thread>
+#include <queue>
+#include <array>
+#include <atomic>
+#include <mutex>
 
 #include "hardware_interface/handle.hpp"
 #include "hardware_interface/system_interface.hpp"
@@ -19,14 +23,26 @@
 #include "marvin_ros2_control/tool/grippers/modbus_gripper.h"
 #include "marvin_ros2_control/tool/hands/modbus_hand.h"
 #include "gripper_hardware_common/GripperBase.h"
+#include "marvin_ros2_control/tool/modbus_io.h"
 
 namespace marvin_ros2_control
 {
+    constexpr size_t kMaxTools = 2;
+
+    struct ModbusTask
+    {
+        enum Type { Read, Write };
+        Type type = Read;
+        size_t tool_idx = 0;
+        std::vector<double> command;
+    };
     // Arm configuration constants
     constexpr int ARM_LEFT = 0;
     constexpr int ARM_RIGHT = 1;
     constexpr int ARM_DUAL = 2;
-  
+
+    enum class ToolType { None, Hand, Gripper, Others };
+
     class MarvinHardware : public hardware_interface::SystemInterface
     {
     public:
@@ -155,24 +171,66 @@ private:
         std::vector<std::string> gripper_joint_name_;
         size_t gripper_joint_index_ = 0;
         std::vector<double> last_gripper_position_;
+        // For grippers without a "target reached" feedback, infer stop by comparing consecutive frames.
+        static constexpr size_t kGripperStableFrameCount = 3;
+        static constexpr double kGripperStableEpsilon = 0.001;
+        std::vector<double> gripper_previous_position_;
+        std::vector<size_t> gripper_stable_count_;
         std::vector<double> gripper_position_;
         std::vector<double> gripper_velocity_;
         std::vector<double> gripper_effort_;
         std::vector<double> gripper_position_command_;
         std::vector<double> last_gripper_command_;
         std::vector<bool> gripper_stopped_;
-        bool gripper_initilized_ = false;
-        void contains_gripper();
+        void contains_tool();
         std::vector<double> step_size_;
-        std::thread gripper_ctrl_thread_;
         std::vector<std::unique_ptr<gripper_hardware_common::GripperBase>> tool_ptr_;  // Unified container for hand/gripper
-        bool is_hand_ = false;  // Flag to indicate if end effector is a hand (true) or gripper (false) - used for logging only
-        void tool_callback();
-        bool recv_thread_func();
+        ToolType tool_type_ = ToolType::None;  // Hand, Gripper, Others, or None - determines move_hand vs move_gripper
+        const char* toolTypeLogName() const;
+        // Single in-flight task per tool: 0=None, 1=Read (waiting response), 2=Write (waiting response)
+        std::array<std::atomic<int>, kMaxTools> in_flight_type_{};
+        std::array<std::vector<double>, kMaxTools> in_flight_write_command_;
+        /** Gripper move_gripper sends 2 writes (position FC 0x10, trigger FC 0x06); count write acks before clearing in_flight. */
+        std::array<std::atomic<int>, kMaxTools> pending_write_acks_{};
+        // Wait 20 ms before each request (max 50 Hz)
+        static constexpr int kToolRequestWaitMs = 20;
+        // One initial read per tool; after that only read when tool is not stopped
+        std::array<bool, kMaxTools> tool_initial_read_done_{};
+        /** True if this tool failed initial read; skip all read/write polling for this side. */
+        std::array<bool, kMaxTools> tool_init_failed_{};
+        // Hand: current frame same as previous for N consecutive reads -> steady state, stop read polling until next write
+        static constexpr size_t kHandStableFrameCount = 5;
+        std::array<std::vector<double>, kMaxTools> hand_previous_position_;
+        std::array<size_t, kMaxTools> hand_stable_count_{};
+        std::array<bool, kMaxTools> hand_stabilized_{};
+        std::vector<std::thread> gripper_ctrl_threads_;
+        void tool_callback_for_tool(size_t tool_idx);
+        /** Read once from channel, copy to data_buf, return byte count or 0. */
+        long receiveToolResponse(unsigned char* data_buf, size_t buf_size, GetChDataFunc get_ch_data);
+        void processToolResponse(const unsigned char* data_buf, size_t size, size_t gripper_idx);
+        bool isToolStateCloseToCommand(size_t tool_idx, double threshold);
+        /** True if tool is stopped (hand: at command and stabilized; gripper: at target and stopped). */
+        bool isToolStopped(size_t tool_idx);
+        /** Sync read: one getStatus(), wait elapsed_time_for_poll ms, then read and parse. */
+        bool readToolStatusSync(size_t tool_idx, int elapsed_time_for_poll);
+        /** Sync write: send write_cmd, wait wait_ms, read ack and update state. */
+        bool writeToolStatusSync(size_t tool_idx, const std::vector<double>& write_cmd, int wait_ms = 5);
+        /** True if a new write command should be sent for this tool (position changed); fills write_cmd_out. */
+        bool shouldSendToolCommand(size_t tool_idx, std::vector<double>& write_cmd_out);
+        /** If a write is in flight for this tool, try one non-blocking receive; on success update last and clear in_flight. */
+        void tryConsumeWriteAck(size_t tool_idx);
+        /** True if data_buf looks like Modbus write response (FC 0x10). */
+        static bool isModbusWriteAck(const unsigned char* data_buf, size_t size);
+        /** Apply in-flight write as acknowledged: update last_gripper_command_ and clear in_flight for tool_idx. */
+        void applyGripperWriteAckFromInFlight(size_t tool_idx);
         void updateGripperState(size_t gripper_idx, double position, int velocity, int torque);
-        bool connect_gripper();
+        bool connect_tool();
         void disconnect_gripper();
-        
+        /** One-time initial read per tool during on_activate; updates state and sets tool_initial_read_done_. Returns false if any tool fails to respond. */
+        bool doInitialToolReads();
+        /** Map tool_idx (0=left, 1=right) to gripper joint index by name; returns tool_idx if single tool or no match. */
+        size_t gripperJointIndexForTool(size_t tool_idx) const;
+
         // Unified tool access helpers
         size_t toolCount() const { return tool_ptr_.size(); }
         gripper_hardware_common::GripperBase* toolAt(size_t idx) 
