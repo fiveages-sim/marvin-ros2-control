@@ -5,10 +5,11 @@
 #include <string>
 #include <vector>
 #include <thread>
-#include <queue>
 #include <array>
 #include <atomic>
 #include <mutex>
+#include <chrono>
+#include <cstdint>
 
 #include "hardware_interface/handle.hpp"
 #include "hardware_interface/system_interface.hpp"
@@ -18,6 +19,7 @@
 #include "rclcpp_lifecycle/node_interfaces/lifecycle_node_interface.hpp"
 #include "rclcpp_lifecycle/state.hpp"
 #include "rclcpp/rclcpp.hpp"
+#include "std_msgs/msg/int64.hpp"
 #include "MarvinSDK.h"
 #include <cmath>
 #include "marvin_ros2_control/tool/grippers/modbus_gripper.h"
@@ -29,13 +31,6 @@ namespace marvin_ros2_control
 {
     constexpr size_t kMaxTools = 2;
 
-    struct ModbusTask
-    {
-        enum Type { Read, Write };
-        Type type = Read;
-        size_t tool_idx = 0;
-        std::vector<double> command;
-    };
     // Arm configuration constants
     constexpr int ARM_LEFT = 0;
     constexpr int ARM_RIGHT = 1;
@@ -77,6 +72,7 @@ private:
 
         // Hardware parameters
         std::shared_ptr<rclcpp::Node> node_;
+        rclcpp::Publisher<std_msgs::msg::Int64>::SharedPtr hardware_error_pub_;
         std::string device_ip_;
         int device_port_ = 8080;
         std::string robot_arm_config_;  // "LEFT", "RIGHT", "DUAL"
@@ -170,7 +166,6 @@ private:
         bool has_gripper_ = false;
         std::vector<std::string> gripper_joint_name_;
         size_t gripper_joint_index_ = 0;
-        std::vector<double> last_gripper_position_;
         // For grippers without a "target reached" feedback, infer stop by comparing consecutive frames.
         static constexpr size_t kGripperStableFrameCount = 3;
         static constexpr double kGripperStableEpsilon = 0.001;
@@ -183,28 +178,39 @@ private:
         std::vector<double> last_gripper_command_;
         std::vector<bool> gripper_stopped_;
         void contains_tool();
-        std::vector<double> step_size_;
         std::vector<std::unique_ptr<gripper_hardware_common::GripperBase>> tool_ptr_;  // Unified container for hand/gripper
         ToolType tool_type_ = ToolType::None;  // Hand, Gripper, Others, or None - determines move_hand vs move_gripper
         const char* toolTypeLogName() const;
         // Single in-flight task per tool: 0=None, 1=Read (waiting response), 2=Write (waiting response)
         std::array<std::atomic<int>, kMaxTools> in_flight_type_{};
         std::array<std::vector<double>, kMaxTools> in_flight_write_command_;
-        /** Gripper move_gripper sends 2 writes (position FC 0x10, trigger FC 0x06); count write acks before clearing in_flight. */
-        std::array<std::atomic<int>, kMaxTools> pending_write_acks_{};
-        // Wait 20 ms before each request (max 50 Hz)
-        static constexpr int kToolRequestWaitMs = 20;
         // One initial read per tool; after that only read when tool is not stopped
         std::array<bool, kMaxTools> tool_initial_read_done_{};
         /** True if this tool failed initial read; skip all read/write polling for this side. */
         std::array<bool, kMaxTools> tool_init_failed_{};
+        /** True if we have received and parsed at least one valid status (read) response for this tool. */
+        std::array<std::atomic<bool>, kMaxTools> tool_has_valid_state_{};
         // Hand: current frame same as previous for N consecutive reads -> steady state, stop read polling until next write
         static constexpr size_t kHandStableFrameCount = 5;
         std::array<std::vector<double>, kMaxTools> hand_previous_position_;
         std::array<size_t, kMaxTools> hand_stable_count_{};
         std::array<bool, kMaxTools> hand_stabilized_{};
         std::vector<std::thread> gripper_ctrl_threads_;
+        /** Async mode: one recv thread per tool, only polls get485 and dispatches to processToolResponse / write ack. */
+        std::vector<std::thread> tool_recv_threads_;
+        /** If true, use async tool comm: recv thread(s) + send-only tool_callback_for_tool_async (see marvin_*_init_example). */
+        bool use_async_tool_comm_ = true;
+        /** Async heartbeat: send periodic read (getStatus) and require read response frames to declare link healthy. */
+        std::array<std::atomic<std::int64_t>, kMaxTools> tool_hb_start_ms_{};
+        std::array<std::atomic<std::int64_t>, kMaxTools> tool_hb_tx_ms_{};
+        std::array<std::atomic<std::int64_t>, kMaxTools> tool_hb_last_rx_ms_{};
+        std::array<std::atomic<bool>, kMaxTools> tool_hb_offline_reported_{};
+
         void tool_callback_for_tool(size_t tool_idx);
+        /** Async: recv thread for one tool; only calls get_ch_data and processes responses (no sending). */
+        void tool_recv_thread_func(size_t tool_idx);
+        /** Async: same loop as tool_callback_for_tool but only sends (getStatus/move); no blocking receive. */
+        void tool_callback_for_tool_async(size_t tool_idx);
         /** Read once from channel, copy to data_buf, return byte count or 0. */
         long receiveToolResponse(unsigned char* data_buf, size_t buf_size, GetChDataFunc get_ch_data);
         void processToolResponse(const unsigned char* data_buf, size_t size, size_t gripper_idx);

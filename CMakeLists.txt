@@ -166,6 +166,25 @@ if(EXISTS "${MARVIN_HAND_EXAMPLE_SRC}")
     message(STATUS "marvin_ros2_control: building and installing marvin_hand_init_example")
 endif()
 
+# Standalone async raw 485 test: SDK only, no ROS, no marvin_ros2_control library
+set(ASYNC_RAW_SDK_ONLY_SRC "${CMAKE_CURRENT_SOURCE_DIR}/examples/async_raw_485_test_sdk_only.cpp")
+if(EXISTS "${ASYNC_RAW_SDK_ONLY_SRC}")
+    add_executable(async_raw_485_test_sdk_only "${ASYNC_RAW_SDK_ONLY_SRC}")
+    add_dependencies(async_raw_485_test_sdk_only build_marvin_sdk)
+    target_include_directories(async_raw_485_test_sdk_only PRIVATE ${HEADER_CONTROL_DIR})
+    target_link_directories(async_raw_485_test_sdk_only PRIVATE ${LIB_CONTROL_DIR})
+    set_target_properties(async_raw_485_test_sdk_only PROPERTIES
+        BUILD_RPATH "${LIB_KINE_DIR};${LIB_CONTROL_DIR}"
+        INSTALL_RPATH "$ORIGIN;$ORIGIN/../lib"
+        INSTALL_RPATH_USE_LINK_PATH TRUE
+    )
+    target_link_libraries(async_raw_485_test_sdk_only MarvinSDK pthread)
+    install(TARGETS async_raw_485_test_sdk_only
+        RUNTIME DESTINATION lib/${PROJECT_NAME}
+    )
+    message(STATUS "marvin_ros2_control: building and installing async_raw_485_test_sdk_only (SDK only)")
+endif()
+
 install(
         DIRECTORY include/ 
         DESTINATION include/${PROJECT_NAME}
