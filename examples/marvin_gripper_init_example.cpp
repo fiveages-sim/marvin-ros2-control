@@ -28,6 +28,8 @@
 #include <iomanip>
 #include <thread>
 #include <chrono>
+#include <atomic>
+#include <cstdint>
 
 using namespace marvin_ros2_control;
 
@@ -139,6 +141,154 @@ static bool readAndPrintToolStatus(
     return true;
 }
 
+struct Async485GripperStats
+{
+    std::atomic<uint64_t> read_req_sent{0};
+    std::atomic<uint64_t> rx_frames{0};
+    std::atomic<uint64_t> rx_read_fc{0};
+    std::atomic<uint64_t> rx_write_fc{0};
+    std::atomic<uint64_t> rx_other_fc{0};
+    std::atomic<uint64_t> read_parse_ok{0};
+    std::atomic<uint64_t> read_parse_fail{0};
+};
+
+static void runAsync485ReadWriteTestGripper(
+    ModbusGripper* gripper,
+    GetChDataFunc get_ch_data,
+    Clear485Func clear_ch_data,
+    int duration_ms,
+    int write_period_ms)
+{
+    if (!gripper || !get_ch_data || !clear_ch_data)
+    {
+        std::cerr << "Async 485 gripper test: invalid function pointers/gripper." << std::endl;
+        return;
+    }
+
+    Async485GripperStats stats;
+    std::atomic<bool> stop{false};
+    std::atomic<bool> writer_done{false};
+
+    // Start from a clean RX buffer
+    clear_ch_data();
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    // clear_ch_data();
+
+    const uint8_t slave_id = gripper_hardware_common::ModbusConfig::Changingtek90D::SLAVE_ID;
+    const uint8_t expected_read_fc = gripper_hardware_common::ModbusConfig::Changingtek90D::READ_FUNCTION;
+
+    // get-thread: only call get485 (OnGetChData*) and parse/collect stats. No sending.
+    std::thread reader([&]() {
+        unsigned char data_buf[256] = {0};
+        long ch = COM1_CHANNEL;
+
+        while (!stop.load(std::memory_order_relaxed))
+        {
+            ch = COM1_CHANNEL;
+            long received = get_ch_data(data_buf, &ch);
+            if (received <= 0)
+            {
+                continue;
+            }
+
+            stats.rx_frames.fetch_add(1, std::memory_order_relaxed);
+
+            // Classify by function code
+            if (received >= 2 && static_cast<uint8_t>(data_buf[0]) == slave_id)
+            {
+                const uint8_t fc = static_cast<uint8_t>(data_buf[1]);
+                if (fc == expected_read_fc || (expected_read_fc == 0x03 && fc == 0x04) || (expected_read_fc == 0x04 && fc == 0x03))
+                {
+                    stats.rx_read_fc.fetch_add(1, std::memory_order_relaxed);
+                }
+                else if (fc == gripper_hardware_common::ModbusConfig::Changingtek90D::WRITE_SINGLE_FUNCTION ||
+                         fc == gripper_hardware_common::ModbusConfig::Changingtek90D::WRITE_FUNCTION)
+                {
+                    stats.rx_write_fc.fetch_add(1, std::memory_order_relaxed);
+                }
+                else
+                {
+                    stats.rx_other_fc.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+
+            int torque = 0;
+            int velocity = 0;
+            double position = 0.0;
+            if (gripper->processReadResponse(data_buf, static_cast<size_t>(received), torque, velocity, position))
+            {
+                stats.read_parse_ok.fetch_add(1, std::memory_order_relaxed);
+            }
+            else
+            {
+                stats.read_parse_fail.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+    });
+
+    // set-thread: only send readStatus requests; fixed 100 frames.
+    std::thread writer([&]() {
+        const uint64_t max_frames = 100;
+        for (uint64_t i = 0; i < max_frames && !stop.load(std::memory_order_relaxed); ++i)
+        {
+            stats.read_req_sent.fetch_add(1, std::memory_order_relaxed);
+            (void)gripper->getStatus();
+            std::this_thread::sleep_for(std::chrono::milliseconds(write_period_ms));
+        }
+        writer_done.store(true, std::memory_order_relaxed);
+    });
+
+    // Wait until writer finishes sending its fixed number of frames (or duration timeout)
+    const auto start = std::chrono::steady_clock::now();
+    while (!writer_done.load(std::memory_order_relaxed))
+    {
+        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start).count();
+        if (elapsed >= duration_ms) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    // After writer is done, keep reading for an extra 1s to drain remaining responses
+    const auto after_writer = std::chrono::steady_clock::now();
+    while (true)
+    {
+        const auto elapsed_after = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - after_writer).count();
+        if (elapsed_after >= 1000) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    stop.store(true, std::memory_order_relaxed);
+    writer.join();
+    reader.join();
+
+    const uint64_t read_req = stats.read_req_sent.load(std::memory_order_relaxed);
+    const uint64_t rx = stats.rx_frames.load(std::memory_order_relaxed);
+    const uint64_t rx_read = stats.rx_read_fc.load(std::memory_order_relaxed);
+    const uint64_t rx_write = stats.rx_write_fc.load(std::memory_order_relaxed);
+    const uint64_t rx_other = stats.rx_other_fc.load(std::memory_order_relaxed);
+    const uint64_t ok = stats.read_parse_ok.load(std::memory_order_relaxed);
+    const uint64_t fail = stats.read_parse_fail.load(std::memory_order_relaxed);
+
+    const double resp_rate = (read_req > 0)
+        ? (100.0 * static_cast<double>(rx) / static_cast<double>(read_req))
+        : 0.0;
+    const double parse_ok_rate = (rx > 0)
+        ? (100.0 * static_cast<double>(ok) / static_cast<double>(rx))
+        : 0.0;
+
+    std::cout << "\n=== Async 485 read/write test summary (Changingtek 90D, channel B) ===\n";
+    std::cout << "Read requests (getStatus): sent=" << read_req << "\n";
+    std::cout << "RX frames: total=" << rx
+              << ", read_fc=" << rx_read
+              << ", write_fc=" << rx_write
+              << ", other_fc=" << rx_other
+              << " (resp_rate=" << resp_rate << "%)\n";
+    std::cout << "Read parse: ok=" << ok << ", fail=" << fail
+              << " (ok_rate=" << parse_ok_rate << "%)\n";
+    std::cout << "===============================================\n" << std::endl;
+}
+
 static bool connectToRobot(const std::string& ip, int port)
 {
     std::vector<int> ip_parts;
@@ -236,22 +386,49 @@ int main(int argc, char* argv[])
 
     std::cout << "Dual Changingtek 90D gripper initialization complete." << std::endl;
 
-    // Run 100 reads per gripper and log how many responses had function code matching send (0x03)
-    std::cout << "Running 100 reads per gripper, checking response function code vs send..." << std::endl;
-    runRead100AndLogFcMatch(left_gripper.get(), OnGetChDataA, "Left (ch A)");
-    runRead100AndLogFcMatch(right_gripper.get(), OnGetChDataB, "Right (ch B)");
-
-    // Read current status from both tools once and print
-    std::cout << "Reading left gripper (channel A) status ..." << std::endl;
-    if (!readAndPrintToolStatus(left_gripper.get(), OnGetChDataA, OnClearChDataA, "Left"))
+    std::cout << "\nSelect test mode:\n"
+              << "  1) Sync only  (100 reads per gripper + single status)\n"
+              << "  2) Async only (set/get concurrent test on right gripper)\n"
+              << "  3) Both sync then async  [default]\n"
+              << "Enter choice (1/2/3): ";
+    int mode = 3;
+    if (!(std::cin >> mode))
     {
-        std::cerr << "Left gripper status read failed." << std::endl;
+        mode = 3;
+        std::cin.clear();
     }
 
-    std::cout << "Reading right gripper (channel B) status ..." << std::endl;
-    if (!readAndPrintToolStatus(right_gripper.get(), OnGetChDataB, OnClearChDataB, "Right"))
+    if (mode == 1 || mode == 3)
     {
-        std::cerr << "Right gripper status read failed." << std::endl;
+        // Run 100 reads per gripper and log how many responses had function code matching send (0x03)
+        std::cout << "Running 100 reads per gripper, checking response function code vs send..." << std::endl;
+        runRead100AndLogFcMatch(left_gripper.get(), OnGetChDataA, "Left (ch A)");
+        runRead100AndLogFcMatch(right_gripper.get(), OnGetChDataB, "Right (ch B)");
+
+        // Read current status from both tools once and print
+        std::cout << "Reading left gripper (channel A) status ..." << std::endl;
+        if (!readAndPrintToolStatus(left_gripper.get(), OnGetChDataA, OnClearChDataA, "Left"))
+        {
+            std::cerr << "Left gripper status read failed." << std::endl;
+        }
+
+        std::cout << "Reading right gripper (channel B) status ..." << std::endl;
+        if (!readAndPrintToolStatus(right_gripper.get(), OnGetChDataB, OnClearChDataB, "Right"))
+        {
+            std::cerr << "Right gripper status read failed." << std::endl;
+        }
+    }
+
+    if (mode == 2 || mode == 3)
+    {
+        std::cout << "\nRunning async 485 read/write test on right gripper (channel B) ..." << std::endl;
+        runAsync485ReadWriteTestGripper(
+            right_gripper.get(),
+            OnGetChDataB,
+            OnClearChDataB,
+            5000,  // safety timeout ms
+            30     // write_period_ms between getStatus sends
+        );
     }
 
     std::cout << "Done." << std::endl;
