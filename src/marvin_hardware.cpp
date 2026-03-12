@@ -1549,7 +1549,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             std::vector<double> write_cmd;
             const bool should_write = shouldSendToolCommand(tool_idx, write_cmd) && !write_cmd.empty();
 
-            // Heartbeat: only care about read response frames (FC 0x04). If last response older than 10s -> offline.
+            // Heartbeat: consider link healthy if we've parsed any valid status response recently.
             if (tool_idx < tool_hb_start_ms_.size() && tool_idx < tool_hb_last_rx_ms_.size() && tool_idx < tool_hb_offline_reported_.size())
             {
                 auto start_ms = tool_hb_start_ms_[tool_idx].load();
@@ -1564,13 +1564,16 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                 {
                     tool_hb_offline_reported_[tool_idx].store(true);
                     RCLCPP_ERROR(get_logger(),
-                                 "tool heartbeat offline: tool_idx=%zu 超过%.1fs未收到读状态应答(FC 0x04)",
+                                 "tool heartbeat offline: tool_idx=%zu 超过%.1fs未收到有效状态应答",
                                  tool_idx, static_cast<double>(age_ms) / 1000.0);
                     if (hardware_error_pub_)
                     {
                         std_msgs::msg::Int64 msg;
                         msg.data = (tool_idx == 0) ? 0x410001 : 0x420001;
                         hardware_error_pub_->publish(msg);
+                        RCLCPP_ERROR(get_logger(),
+                                     "published /Base_HardwareError: tool_idx=%zu code=0x%llX",
+                                     tool_idx, static_cast<long long>(msg.data));
                     }
                 }
             }
@@ -2406,6 +2409,14 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             {
                 if (gripper_idx < tool_has_valid_state_.size())
                     tool_has_valid_state_[gripper_idx].store(true);
+                if (gripper_idx < tool_hb_last_rx_ms_.size())
+                {
+                    const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch()).count();
+                    tool_hb_last_rx_ms_[gripper_idx].store(static_cast<std::int64_t>(now_ms));
+                }
+                if (gripper_idx < tool_hb_offline_reported_.size())
+                    tool_hb_offline_reported_[gripper_idx].store(false);
                 size_t gi = gripperJointIndexForTool(gripper_idx);
                 updateGripperState(gi, position, velocity, torque);
                 if (gripper->isTargetReached() && gi < gripper_stopped_.size())
@@ -2424,6 +2435,14 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                 {
                     if (gripper_idx < tool_has_valid_state_.size())
                         tool_has_valid_state_[gripper_idx].store(true);
+                    if (gripper_idx < tool_hb_last_rx_ms_.size())
+                    {
+                        const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch()).count();
+                        tool_hb_last_rx_ms_[gripper_idx].store(static_cast<std::int64_t>(now_ms));
+                    }
+                    if (gripper_idx < tool_hb_offline_reported_.size())
+                        tool_hb_offline_reported_[gripper_idx].store(false);
                     const size_t tool_n = toolCount();
                     const size_t n = std::min(gripper_joint_name_.size(), gripper_position_.size());
                     const size_t hand_dof = hand->getJointCount();
