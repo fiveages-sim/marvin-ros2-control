@@ -2588,44 +2588,54 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
     bool MarvinHardware::readFromHardware(bool initial_frame)
     {
         OnGetBuf(&frame_data_);
-        
-        // Check error codes from Tianji robot
-        // For single arm: check the arm's error code
-        // For dual arm: check both arms' error codes
-        
-        // if (robot_arm_index_ == ARM_LEFT || robot_arm_index_ == ARM_RIGHT)
-        // {
-        //     int err_code = frame_data_.m_State[robot_arm_index_].m_ERRCode;
-        //     if (err_code != 0)
-        //     {
-        //         const char* arm_name = (robot_arm_index_ == ARM_LEFT) ? "Left" : "Right";
-        //         RCLCPP_ERROR(get_logger(), 
-        //                     "Tianji robot error detected on %s arm: error_code=%d. Deactivating controller.", 
-        //                     arm_name, err_code);
-        //         // Return false to trigger error state in read()
-        //         return false;
-        //     }
-        // }
-        // else if (robot_arm_index_ == ARM_DUAL)
-        // {
-        //     int left_err_code = frame_data_.m_State[ARM_LEFT].m_ERRCode;
-        //     int right_err_code = frame_data_.m_State[ARM_RIGHT].m_ERRCode;
-            
-        //     if (left_err_code != 0)
-        //     {
-        //         RCLCPP_ERROR(get_logger(), 
-        //                     "Tianji robot error detected on Left arm: error_code=%d. Deactivating controller.", 
-        //                     left_err_code);
-        //         return false;
-        //     }
-        //     if (right_err_code != 0)
-        //     {
-        //         RCLCPP_ERROR(get_logger(), 
-        //                     "Tianji robot error detected on Right arm: error_code=%d. Deactivating controller.", 
-        //                     right_err_code);
-        //         return false;
-        //     }
-        // }
+
+        // Publish encoded error codes when non-zero:
+        //  - Left arm:  0x600000 + m_ERRCode
+        //  - Right arm: 0x610000 + m_ERRCode
+        if (hardware_error_pub_)
+        {
+            auto publish_error_code = [&](int arm_index, int err_code)
+            {
+                if (err_code == 0)
+                    return;
+
+                int base = 0;
+                const char* arm_name = "Unknown";
+                if (arm_index == ARM_LEFT)
+                {
+                    base = 0x600000;
+                    arm_name = "Left";
+                }
+                else if (arm_index == ARM_RIGHT)
+                {
+                    base = 0x610000;
+                    arm_name = "Right";
+                }
+
+                const int encoded = base + err_code;
+
+                std_msgs::msg::Int64 msg;
+                msg.data = static_cast<int64_t>(encoded);
+                hardware_error_pub_->publish(msg);
+
+                RCLCPP_ERROR(get_logger(),
+                             "Tianji robot error on %s arm: raw_err=%d, encoded_err=0x%X",
+                             arm_name, err_code, encoded);
+            };
+
+            if (robot_arm_index_ == ARM_LEFT || robot_arm_index_ == ARM_RIGHT)
+            {
+                int err_code = frame_data_.m_State[robot_arm_index_].m_ERRCode;
+                publish_error_code(robot_arm_index_, err_code);
+            }
+            else if (robot_arm_index_ == ARM_DUAL)
+            {
+                int left_err_code = frame_data_.m_State[ARM_LEFT].m_ERRCode;
+                int right_err_code = frame_data_.m_State[ARM_RIGHT].m_ERRCode;
+                publish_error_code(ARM_LEFT, left_err_code);
+                publish_error_code(ARM_RIGHT, right_err_code);
+            }
+        }
         
         if (initial_frame)
         {
