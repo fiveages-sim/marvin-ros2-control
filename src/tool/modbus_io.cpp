@@ -9,6 +9,17 @@ namespace marvin_ros2_control
 {
     // Initialize static loggers
     rclcpp::Logger ModbusIO::logger_ = rclcpp::get_logger("modbus_io");
+    std::atomic<bool> ModbusIO::debug_enabled_{false};
+
+    void ModbusIO::setDebugEnabled(bool enabled)
+    {
+        debug_enabled_.store(enabled, std::memory_order_relaxed);
+    }
+
+    bool ModbusIO::isDebugEnabled()
+    {
+        return debug_enabled_.load(std::memory_order_relaxed);
+    }
 
     inline void hex_to_str(const unsigned char* data, int size, char* output, int output_size)
     {
@@ -278,9 +289,12 @@ namespace marvin_ros2_control
 
     bool ModbusIO::sendRequest(const std::vector<uint8_t>& request)
     {
-        char debug_str[512];
-        hex_to_str(request.data(), request.size(), debug_str, sizeof(debug_str));
-        RCLCPP_INFO(logger_, "Sending: %s", debug_str);
+        if (isDebugEnabled())
+        {
+            char debug_str[512];
+            hex_to_str(request.data(), request.size(), debug_str, sizeof(debug_str));
+            RCLCPP_INFO(logger_, "Sending: %s", debug_str);
+        }
 
         return send_485_((uint8_t*)request.data(), static_cast<long>(request.size()), COM1_CHANNEL);
     }

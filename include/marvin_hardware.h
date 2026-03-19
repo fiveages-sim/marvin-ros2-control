@@ -163,6 +163,8 @@ private:
         // Gripper parameters
         std::string gripper_type_;
         double gripper_torque_scale_ = 1.0;  // Torque scaling factor (0.0-1.0, default: 1.0)
+        /** If true, enable high-frequency INFO logs for tool (hand/gripper) and Modbus hex dumps. */
+        bool debug_tool_logs_ = false;
         bool has_gripper_ = false;
         std::vector<std::string> gripper_joint_name_;
         size_t gripper_joint_index_ = 0;
