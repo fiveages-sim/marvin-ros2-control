@@ -16,6 +16,7 @@
 #include "hardware_interface/types/hardware_interface_type_values.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include <string>
+#include "geometry_msgs/msg/wrench_stamped.hpp"
 #include "gripper_hardware_common/ChangingtekGripper.h"
 #include "gripper_hardware_common/JodellGripper.h"
 #include "marvin_ros2_control/tool/grippers/changingtek/changingtek_gripper.h"
@@ -254,6 +255,35 @@ namespace marvin_ros2_control
 
         // 先把 hardware_parameters 的初始值灌入并声明成 ROS2 参数（便于后续动态修改）
         declare_node_parameters();
+
+        // Virtual FT sensor inputs (wrench estimated elsewhere, published as WrenchStamped)
+        // These topics are optional; when not available, the FT state will stay at zeros.
+        left_wrench_topic_ = get_node_param<std::string>("left_wrench_topic", "/left_arm_external_wrench");
+        right_wrench_topic_ = get_node_param<std::string>("right_wrench_topic", "/right_arm_external_wrench");
+
+        const auto cb_left = [this](geometry_msgs::msg::WrenchStamped::SharedPtr msg) {
+            std::lock_guard<std::mutex> lock(wrench_mutex_);
+            left_ft_state_[0] = msg->wrench.force.x;
+            left_ft_state_[1] = msg->wrench.force.y;
+            left_ft_state_[2] = msg->wrench.force.z;
+            left_ft_state_[3] = msg->wrench.torque.x;
+            left_ft_state_[4] = msg->wrench.torque.y;
+            left_ft_state_[5] = msg->wrench.torque.z;
+        };
+        const auto cb_right = [this](geometry_msgs::msg::WrenchStamped::SharedPtr msg) {
+            std::lock_guard<std::mutex> lock(wrench_mutex_);
+            right_ft_state_[0] = msg->wrench.force.x;
+            right_ft_state_[1] = msg->wrench.force.y;
+            right_ft_state_[2] = msg->wrench.force.z;
+            right_ft_state_[3] = msg->wrench.torque.x;
+            right_ft_state_[4] = msg->wrench.torque.y;
+            right_ft_state_[5] = msg->wrench.torque.z;
+        };
+
+        left_wrench_sub_ = node_->create_subscription<geometry_msgs::msg::WrenchStamped>(
+            left_wrench_topic_, rclcpp::SystemDefaultsQoS(), cb_left);
+        right_wrench_sub_ = node_->create_subscription<geometry_msgs::msg::WrenchStamped>(
+            right_wrench_topic_, rclcpp::SystemDefaultsQoS(), cb_right);
         
         // Get the number of joints from the hardware info
         size_t num_joints = params.hardware_info.joints.size();
@@ -2005,6 +2035,33 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                         &gripper_effort_[i]));
             }
         }
+
+        // Export virtual FT sensor state interfaces for admittance_controller.
+        // NOTE:
+        // Some setups may not populate info_.sensors reliably even though URDF declares <sensor>.
+        // To avoid startup mismatch, we export a deterministic set based on arm configuration.
+        const auto add_ft_sensor_interfaces = [&state_interfaces](
+            const std::string& sensor_name, std::array<double, 6>& data)
+        {
+            static const std::array<const char*, 6> kNames = {
+                "force.x", "force.y", "force.z", "torque.x", "torque.y", "torque.z"};
+            for (size_t i = 0; i < kNames.size(); ++i)
+            {
+                state_interfaces.push_back(
+                    std::make_shared<hardware_interface::StateInterface>(
+                        sensor_name, kNames[i], &data[i]));
+            }
+        };
+
+        if (robot_arm_index_ == ARM_DUAL)
+        {
+            add_ft_sensor_interfaces("left_ft_sensor", left_ft_state_);
+            add_ft_sensor_interfaces("right_ft_sensor", right_ft_state_);
+        }
+        else
+        {
+            add_ft_sensor_interfaces("ft_sensor", single_ft_state_);
+        }
         return state_interfaces;
     }
 
@@ -2058,6 +2115,17 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         if (!readFromHardware(false))
         {
             return hardware_interface::return_type::ERROR;
+        }
+
+        // For single-arm setups, mirror the corresponding side into ft_sensor.
+        // This keeps the semantic-component interfaces stable regardless of arm configuration.
+        {
+            std::lock_guard<std::mutex> lock(wrench_mutex_);
+            if (robot_arm_index_ == ARM_LEFT) {
+                single_ft_state_ = left_ft_state_;
+            } else if (robot_arm_index_ == ARM_RIGHT) {
+                single_ft_state_ = right_ft_state_;
+            }
         }
 
         return hardware_interface::return_type::OK;
