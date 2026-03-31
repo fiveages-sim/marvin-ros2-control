@@ -32,11 +32,12 @@ jobs:
       ARMS_MONOREPO: fiveages-sim/arms_ros2_control
 
     steps:
+      # marvin_ros2_control links against external/TJ_FX_ROBOT_CONTRL_SDK (git submodule). Without it, CMake cannot build libKine.so / libMarvinSDK.so.
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          submodules: false
+          submodules: recursive
 
       - name: Resolve release metadata
         id: meta
