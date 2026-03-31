@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.8)
+cmake_minimum_required(VERSION 3.10)
 project(marvin_ros2_control)
 
 if (CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
@@ -23,6 +23,15 @@ set(HEADER_CONTROL_DIR "${CMAKE_SOURCE_DIR}/external/TJ_FX_ROBOT_CONTRL_SDK/cont
 set(LIB_KINE_DIR "${CMAKE_SOURCE_DIR}/external/TJ_FX_ROBOT_CONTRL_SDK/kinematicsSDK/")
 set(LIB_CONTROL_DIR "${CMAKE_SOURCE_DIR}/external/TJ_FX_ROBOT_CONTRL_SDK/contrlSDK/")
 
+# Build kinematics SDK first (libKine.so is produced by make; not present at CMake configure time)
+add_custom_command(
+    OUTPUT ${LIB_KINE_DIR}/libKine.so
+    COMMAND make -f makefile libKine.so
+    WORKING_DIRECTORY ${LIB_KINE_DIR}
+    COMMENT "Building libKine.so (kinematics SDK)"
+)
+add_custom_target(build_kine_sdk ALL DEPENDS ${LIB_KINE_DIR}/libKine.so)
+
 # build controlSDK
 add_custom_command(
     OUTPUT ${LIB_CONTROL_DIR}/libMarvinSDK.so
@@ -32,11 +41,8 @@ add_custom_command(
 )
 add_custom_target(build_marvin_sdk ALL DEPENDS ${LIB_CONTROL_DIR}/libMarvinSDK.so)
 
-# Link to the existing .so library (replace with your actual .so file name and path)
-find_library(EXTERNAL_KINEMATICSO NAMES "libKine.so" PATHS ${LIB_KINE_DIR} NO_DEFAULT_PATH)
-
-# Note: libMarvinSDK.so is built during compilation, so we link it directly via target_link_directories
-# instead of using find_library which runs at configure time
+# Full path: find_library at configure time fails because libKine.so does not exist until build_kine_sdk runs
+set(EXTERNAL_KINEMATICSO "${LIB_KINE_DIR}/libKine.so")
 
 
 # Create library
@@ -46,7 +52,7 @@ add_library(${PROJECT_NAME} SHARED
         src/tool/grippers/jodell/jd_gripper.cpp
 )
 
-add_dependencies(${PROJECT_NAME} build_marvin_sdk)
+add_dependencies(${PROJECT_NAME} build_kine_sdk build_marvin_sdk)
 
 set_target_properties(${PROJECT_NAME} PROPERTIES
     BUILD_RPATH "${LIB_KINE_DIR};${LIB_CONTROL_DIR}"
@@ -100,7 +106,7 @@ pluginlib_export_plugin_description_file(hardware_interface marvin_ros2_control.
 set(MARVIN_EXAMPLE_SRC "${CMAKE_CURRENT_SOURCE_DIR}/examples/marvin_gripper_init_example.cpp")
 if(EXISTS "${MARVIN_EXAMPLE_SRC}")
     add_executable(marvin_gripper_init_example "${MARVIN_EXAMPLE_SRC}")
-    add_dependencies(marvin_gripper_init_example build_marvin_sdk)
+    add_dependencies(marvin_gripper_init_example build_kine_sdk build_marvin_sdk)
     target_include_directories(marvin_gripper_init_example PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -135,7 +141,7 @@ endif()
 set(MARVIN_HAND_EXAMPLE_SRC "${CMAKE_CURRENT_SOURCE_DIR}/examples/marvin_hand_init_example.cpp")
 if(EXISTS "${MARVIN_HAND_EXAMPLE_SRC}")
     add_executable(marvin_hand_init_example "${MARVIN_HAND_EXAMPLE_SRC}")
-    add_dependencies(marvin_hand_init_example build_marvin_sdk)
+    add_dependencies(marvin_hand_init_example build_kine_sdk build_marvin_sdk)
     target_include_directories(marvin_hand_init_example PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/src
