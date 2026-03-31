@@ -23,14 +23,79 @@ set(HEADER_CONTROL_DIR "${CMAKE_SOURCE_DIR}/external/TJ_FX_ROBOT_CONTRL_SDK/cont
 set(LIB_KINE_DIR "${CMAKE_SOURCE_DIR}/external/TJ_FX_ROBOT_CONTRL_SDK/kinematicsSDK/")
 set(LIB_CONTROL_DIR "${CMAKE_SOURCE_DIR}/external/TJ_FX_ROBOT_CONTRL_SDK/contrlSDK/")
 
-# Build kinematics SDK first (libKine.so is produced by make; not present at CMake configure time)
-add_custom_command(
-    OUTPUT ${LIB_KINE_DIR}/libKine.so
-    COMMAND make -f makefile libKine.so
-    WORKING_DIRECTORY ${LIB_KINE_DIR}
-    COMMENT "Building libKine.so (kinematics SDK)"
-)
-add_custom_target(build_kine_sdk ALL DEPENDS ${LIB_KINE_DIR}/libKine.so)
+# Build kinematics SDK (libKine.so) if missing, and auto-rebuild if format is invalid.
+set(KINE_SO_PATH "${LIB_KINE_DIR}/libKine.so")
+
+# If libKine.so is missing, build it from sources with g++ (Linux .so).
+if(NOT EXISTS "${KINE_SO_PATH}")
+    add_custom_command(
+        OUTPUT "${KINE_SO_PATH}"
+        COMMAND /bin/bash -lc "g++ *.cpp -Wall -w -O2 -fPIC -shared -o libKine.so -lpthread -lrt"
+        WORKING_DIRECTORY "${LIB_KINE_DIR}"
+        COMMENT "Building libKine.so (kinematics SDK, Linux g++)"
+        VERBATIM
+    )
+endif()
+add_custom_target(build_kine_sdk ALL DEPENDS "${KINE_SO_PATH}")
+
+# If libKine.so exists but is not a Linux ELF (e.g. a Windows DLL renamed to .so),
+# try to rebuild it from source in kinematicsSDK/.
+option(MARVIN_AUTO_REBUILD_KINE "Auto rebuild kinematicsSDK libKine.so if format is invalid" ON)
+if(MARVIN_AUTO_REBUILD_KINE AND EXISTS "${KINE_SO_PATH}")
+    find_program(FILE_CMD file)
+    if(FILE_CMD)
+        execute_process(
+            COMMAND "${FILE_CMD}" -b "${KINE_SO_PATH}"
+            OUTPUT_VARIABLE KINE_SO_FILEINFO
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET
+        )
+        if(KINE_SO_FILEINFO MATCHES "PE32" OR KINE_SO_FILEINFO MATCHES "MS Windows")
+            message(WARNING
+                "marvin_ros2_control: ${KINE_SO_PATH} is not a Linux ELF shared library (${KINE_SO_FILEINFO}). "
+                "Attempting to rebuild via direct g++ in ${LIB_KINE_DIR} ..."
+            )
+            execute_process(
+                COMMAND "${CMAKE_COMMAND}" -E rm -f "${KINE_SO_PATH}"
+                WORKING_DIRECTORY "${LIB_KINE_DIR}"
+                OUTPUT_QUIET
+                ERROR_QUIET
+            )
+            execute_process(
+                COMMAND /bin/bash -lc "g++ *.cpp -Wall -w -O2 -fPIC -shared -o libKine.so -lpthread -lrt"
+                WORKING_DIRECTORY "${LIB_KINE_DIR}"
+                RESULT_VARIABLE KINE_BUILD_RC
+                OUTPUT_VARIABLE KINE_BUILD_OUT
+                ERROR_VARIABLE KINE_BUILD_ERR
+            )
+            if(NOT KINE_BUILD_RC EQUAL 0)
+                message(FATAL_ERROR
+                    "marvin_ros2_control: failed to rebuild libKine.so via g++ (rc=${KINE_BUILD_RC}).\n"
+                    "stdout:\n${KINE_BUILD_OUT}\n"
+                    "stderr:\n${KINE_BUILD_ERR}\n"
+                    "Please obtain/build a Linux x86_64 ELF libKine.so."
+                )
+            endif()
+            execute_process(
+                COMMAND "${FILE_CMD}" -b "${KINE_SO_PATH}"
+                OUTPUT_VARIABLE KINE_SO_FILEINFO2
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+                ERROR_QUIET
+            )
+            if(KINE_SO_FILEINFO2 MATCHES "PE32" OR KINE_SO_FILEINFO2 MATCHES "MS Windows")
+                message(FATAL_ERROR
+                    "marvin_ros2_control: after rebuild, ${KINE_SO_PATH} is still not a Linux ELF shared library:\n"
+                    "  ${KINE_SO_FILEINFO2}\n"
+                    "Please obtain/build the correct Linux version of libKine.so."
+                )
+            else()
+                message(STATUS "marvin_ros2_control: libKine.so rebuilt OK (${KINE_SO_FILEINFO2})")
+            endif()
+        endif()
+    else()
+        message(WARNING "marvin_ros2_control: 'file' command not found; cannot validate/rebuild libKine.so format.")
+    endif()
+endif()
 
 # build controlSDK
 add_custom_command(
@@ -41,8 +106,16 @@ add_custom_command(
 )
 add_custom_target(build_marvin_sdk ALL DEPENDS ${LIB_CONTROL_DIR}/libMarvinSDK.so)
 
-# Full path: find_library at configure time fails because libKine.so does not exist until build_kine_sdk runs
-set(EXTERNAL_KINEMATICSO "${LIB_KINE_DIR}/libKine.so")
+set(EXTERNAL_KINEMATICSO "${KINE_SO_PATH}")
+if(NOT EXISTS "${EXTERNAL_KINEMATICSO}")
+    message(FATAL_ERROR
+        "marvin_ros2_control: libKine.so not found at ${EXTERNAL_KINEMATICSO}. "
+        "Please build kinematicsSDK (build_kine_sdk) or provide a valid Linux ELF libKine.so."
+    )
+endif()
+
+## Note: libMarvinSDK.so is built during compilation, so we link it directly via target_link_directories
+## instead of using find_library which runs at configure time
 
 
 # Create library
