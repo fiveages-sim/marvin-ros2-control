@@ -294,6 +294,8 @@ namespace marvin_ros2_control
         // 获取夹爪力矩系数参数
         gripper_torque_scale_ = get_node_param("gripper_torque_scale", 1.0);
         use_async_tool_comm_ = get_node_param("use_async_tool_comm", true);
+        debug_tool_logs_ = get_node_param("debug_tool_logs", false);
+        marvin_ros2_control::ModbusIO::setDebugEnabled(debug_tool_logs_);
         // 限制范围在 0.0-1.0
         if (gripper_torque_scale_ < 0.0) gripper_torque_scale_ = 0.0;
         if (gripper_torque_scale_ > 1.0) gripper_torque_scale_ = 1.0;
@@ -2346,11 +2348,14 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             const size_t stable_cnt = (tool_idx < hand_stable_count_.size()) ? hand_stable_count_[tool_idx] : 0u;
             const int stabilized_i = stabilized ? 1 : 0;
             const int stopped_i = stopped ? 1 : 0;
-            RCLCPP_INFO_THROTTLE(get_logger(), *node_->get_clock(), 1000,
-                                 "isToolStopped(tool_idx=%zu) hand: stabilized=%d(stable_cnt=%zu/%d) -> stopped=%d | mapped_joints=%zu max_abs_diff=%.4f joint='%s' pos=%.4f cmd=%.4f | samples:%s",
-                                 tool_idx, stabilized_i, stable_cnt, static_cast<int>(kHandStableFrameCount), stopped_i,
-                                 mapped_joint_count, max_abs_diff, max_abs_joint.c_str(), max_pos, max_cmd,
-                                 sample_details.empty() ? " (none)" : sample_details.c_str());
+            if (debug_tool_logs_)
+            {
+                RCLCPP_INFO_THROTTLE(get_logger(), *node_->get_clock(), 1000,
+                                     "isToolStopped(tool_idx=%zu) hand: stabilized=%d(stable_cnt=%zu/%d) -> stopped=%d | mapped_joints=%zu max_abs_diff=%.4f joint='%s' pos=%.4f cmd=%.4f | samples:%s",
+                                     tool_idx, stabilized_i, stable_cnt, static_cast<int>(kHandStableFrameCount), stopped_i,
+                                     mapped_joint_count, max_abs_diff, max_abs_joint.c_str(), max_pos, max_cmd,
+                                     sample_details.empty() ? " (none)" : sample_details.c_str());
+            }
         }
         else
         {
@@ -2363,12 +2368,18 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             stopped = stabilized;
             double pos_val = (gi < gripper_position_.size()) ? gripper_position_[gi] : std::numeric_limits<double>::quiet_NaN();
             double cmd_val = (gi < gripper_position_command_.size()) ? gripper_position_command_[gi] : std::numeric_limits<double>::quiet_NaN();
-            RCLCPP_INFO_THROTTLE(get_logger(), *node_->get_clock(), 1000,
-                                 "isToolStopped(tool_idx=%zu) gripper: stabilized=%d target_reached=%d -> stopped=%d | position=%.4f command=%.4f",
-                                 tool_idx, stabilized ? 1 : 0, target_reached ? 1 : 0, stopped ? 1 : 0, pos_val, cmd_val);
+            if (debug_tool_logs_)
+            {
+                RCLCPP_INFO_THROTTLE(get_logger(), *node_->get_clock(), 1000,
+                                     "isToolStopped(tool_idx=%zu) gripper: stabilized=%d target_reached=%d -> stopped=%d | position=%.4f command=%.4f",
+                                     tool_idx, stabilized ? 1 : 0, target_reached ? 1 : 0, stopped ? 1 : 0, pos_val, cmd_val);
+            }
         }
-        RCLCPP_INFO_THROTTLE(get_logger(), *node_->get_clock(), 1000,
-                             "isToolStopped(tool_idx=%zu) -> %s", tool_idx, stopped ? "stopped" : "moving");
+        if (debug_tool_logs_)
+        {
+            RCLCPP_INFO_THROTTLE(get_logger(), *node_->get_clock(), 1000,
+                                 "isToolStopped(tool_idx=%zu) -> %s", tool_idx, stopped ? "stopped" : "moving");
+        }
         return stopped;
     }
 
@@ -2379,7 +2390,10 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         const long size = get_ch_data(tmp, &ch);
         if (size > 0)
         {
-            RCLCPP_INFO(get_logger(), "receive raw ToolResponse: %ld", size);
+            if (debug_tool_logs_)
+            {
+                RCLCPP_INFO(get_logger(), "receive raw ToolResponse: %ld", size);
+            }
             const size_t copy_len = std::min(static_cast<size_t>(size), buf_size);
             std::copy(tmp, tmp + copy_len, data_buf);
             std::string hex_log = "receiveToolResponse received (" + std::to_string(copy_len) + " bytes):";
@@ -2389,7 +2403,10 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                 snprintf(buf, sizeof(buf), " %02X", static_cast<unsigned char>(tmp[i]));
                 hex_log += buf;
             }
-            RCLCPP_INFO(get_logger(), "%s", hex_log.c_str());
+            if (debug_tool_logs_)
+            {
+                RCLCPP_INFO(get_logger(), "%s", hex_log.c_str());
+            }
             return static_cast<long>(copy_len);
         }
         return 0;

@@ -259,8 +259,11 @@ namespace marvin_ros2_control
                 snprintf(buf, sizeof(buf), "%02X ", data[i]);
                 hex_str += buf;
             }
-            RCLCPP_INFO(logger_, "LinkerHand %s (slave 0x%02X): Received %zu bytes: %s...",
-                        Traits::PRODUCT_NAME, slave_id_, data_size, hex_str.c_str());
+            if (ModbusIO::isDebugEnabled())
+            {
+                RCLCPP_INFO(logger_, "LinkerHand %s (slave 0x%02X): Received %zu bytes: %s...",
+                            Traits::PRODUCT_NAME, slave_id_, data_size, hex_str.c_str());
+            }
             
             // Parse Modbus response using inherited parseModbusResponse
             std::vector<uint16_t> registers = parseModbusResponse(
@@ -315,11 +318,11 @@ namespace marvin_ros2_control
             {
                 if (name_lower.find("thumb_joint1") != std::string::npos) return 0;
                 if (name_lower.find("thumb_joint2") != std::string::npos) return 1;
-                if (name_lower.find("thumb_joint3") != std::string::npos) return 2;
-                if (name_lower.find("index_joint") != std::string::npos)  return 3;
-                if (name_lower.find("middle_joint") != std::string::npos) return 4;
-                if (name_lower.find("ring_joint") != std::string::npos)   return 5;
-                if (name_lower.find("pinky_joint") != std::string::npos)  return 6;
+                if (name_lower.find("thumb_joint3") != std::string::npos) return 6;
+                if (name_lower.find("index_joint") != std::string::npos)  return 2;
+                if (name_lower.find("middle_joint") != std::string::npos) return 3;
+                if (name_lower.find("ring_joint") != std::string::npos)   return 4;
+                if (name_lower.find("pinky_joint") != std::string::npos)  return 5;
             }
             else  // O6/L6 (6-DOF)
             {

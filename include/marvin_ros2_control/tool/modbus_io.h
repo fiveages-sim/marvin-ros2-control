@@ -3,6 +3,7 @@
 #include <vector>
 #include <cstdint>
 #include <cstddef>
+#include <atomic>
 #include "rclcpp/logger.hpp"
 
 // Forward declaration - MarvinSDK.h will be included in implementation files
@@ -35,6 +36,10 @@ namespace marvin_ros2_control
                  GetChDataFunc on_get_ch_data = nullptr);
         
         virtual ~ModbusIO() = default;
+
+        /** Enable/disable high-frequency INFO logs (hex dumps). */
+        static void setDebugEnabled(bool enabled);
+        static bool isDebugEnabled();
 
         // Modbus communication methods
         std::vector<uint16_t> readRegisters(uint8_t slave_id, uint16_t start_addr,
@@ -69,6 +74,7 @@ namespace marvin_ros2_control
         
         // Static logger (initialized in .cpp)
         static rclcpp::Logger logger_;
+        static std::atomic<bool> debug_enabled_;
     };
 } // namespace marvin_ros2_control
 
