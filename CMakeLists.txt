@@ -276,6 +276,24 @@ install(FILES
     OPTIONAL
 )
 
+# Install Python tools as ROS executables (so `ros2 run marvin_ros2_control <tool>` works).
+install(PROGRAMS
+    scripts/tool_dyn_identify_wizard.py
+    DESTINATION lib/${PROJECT_NAME}
+    RENAME tool_dyn_identify_wizard
+)
+
+# Install SDK Python bindings and identification template data into share/ for installed script to use.
+install(
+    DIRECTORY external/TJ_FX_ROBOT_CONTRL_SDK/SDK_PYTHON
+    DESTINATION share/${PROJECT_NAME}/TJ_FX_ROBOT_CONTRL_SDK
+)
+install(
+    DIRECTORY external/TJ_FX_ROBOT_CONTRL_SDK/DEMO_PYTHON/LoadData_ccs_right/LoadData/CfgFile
+              external/TJ_FX_ROBOT_CONTRL_SDK/DEMO_PYTHON/LoadData_ccs_right/LoadData/IdenTraj
+    DESTINATION share/${PROJECT_NAME}/TJ_FX_ROBOT_CONTRL_SDK/DEMO_PYTHON/LoadData_ccs_right/LoadData
+)
+
 install(
         TARGETS ${PROJECT_NAME}
         EXPORT export_${PROJECT_NAME}
