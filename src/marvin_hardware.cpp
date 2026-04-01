@@ -326,11 +326,13 @@ namespace marvin_ros2_control
         use_async_tool_comm_ = get_node_param("use_async_tool_comm", true);
         debug_tool_logs_ = get_node_param("debug_tool_logs", false);
         marvin_ros2_control::ModbusIO::setDebugEnabled(debug_tool_logs_);
+        init_tool_on_startup_ = get_node_param("init_tool_on_startup", true);
         // 限制范围在 0.0-1.0
         if (gripper_torque_scale_ < 0.0) gripper_torque_scale_ = 0.0;
         if (gripper_torque_scale_ > 1.0) gripper_torque_scale_ = 1.0;
         RCLCPP_INFO(get_logger(), "Gripper torque scale: %.2f (actual torque = %d)", 
                     gripper_torque_scale_, static_cast<int>(100.0 * gripper_torque_scale_));
+        RCLCPP_INFO(get_logger(), "init_tool_on_startup: %s", init_tool_on_startup_ ? "true" : "false");
 
         // 获取硬件连接参数
         device_ip_ = get_node_param("device_ip", std::string("192.168.1.190"));
@@ -1305,8 +1307,8 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         rightdynParam_.resize(10, 0.0);
         
         // Connect and initialize end effector (gripper or hand) (this will update kineParam and dynPara if detected)
-        // 只有在配置了末端执行器类型时才尝试连接
-        if (has_gripper_ && !gripper_type_.empty() && gripper_type_ != "NONE")
+        // 只有在配置了末端执行器类型且允许启动初始化时才尝试连接
+        if (init_tool_on_startup_ && has_gripper_ && !gripper_type_.empty() && gripper_type_ != "NONE")
         {
             if (toolCount() == 0)
             {
@@ -1322,6 +1324,12 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                                 toolTypeLogName());
                 }
             }
+        }
+        else if (!init_tool_on_startup_ && has_gripper_ && !gripper_type_.empty() && gripper_type_ != "NONE")
+        {
+            RCLCPP_WARN(get_logger(),
+                        "Tool type '%s' is configured but init_tool_on_startup=false, skipping end-effector initialization on startup.",
+                        gripper_type_.c_str());
         }
 
         if (robot_arm_index_ == ARM_LEFT)
@@ -1385,7 +1393,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         }
 
         // One-time initial read per tool; if one side fails we mark it and continue (no abort), that side will not be polled
-        if (has_gripper_ && !gripper_type_.empty() && gripper_type_ != "NONE" && toolCount() > 0)
+        if (init_tool_on_startup_ && has_gripper_ && !gripper_type_.empty() && gripper_type_ != "NONE" && toolCount() > 0)
         {
             RCLCPP_INFO(get_logger(), "sleeping 500ms for tool initialization");
             std::this_thread::sleep_for(std::chrono::milliseconds(500)); // 如果有末端工具需要等待 工具初始化完成
@@ -1394,7 +1402,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         }
 
         // Start tool callback threads only after initial end-effector data has been updated above
-        if (has_gripper_ && !gripper_type_.empty() && gripper_type_ != "NONE" && toolCount() > 0)
+        if (init_tool_on_startup_ && has_gripper_ && !gripper_type_.empty() && gripper_type_ != "NONE" && toolCount() > 0)
         {
             if (use_async_tool_comm_)
             {
@@ -1429,7 +1437,13 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         else
         {
             // 没有配置末端执行器是正常情况，不应该返回错误
-            if (!gripper_type_.empty() && gripper_type_ != "NONE")
+            if (!init_tool_on_startup_ && !gripper_type_.empty() && gripper_type_ != "NONE")
+            {
+                RCLCPP_WARN(get_logger(),
+                            "Tool type '%s' configured but init_tool_on_startup=false, continuing without tool threads.",
+                            gripper_type_.c_str());
+            }
+            else if (!gripper_type_.empty() && gripper_type_ != "NONE")
             {
                 // 配置了末端执行器类型但连接失败
                 RCLCPP_ERROR(get_logger(), "%s type configured but connection failed", toolTypeLogName());

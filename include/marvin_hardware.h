@@ -213,6 +213,8 @@ private:
         std::vector<std::thread> tool_recv_threads_;
         /** If true, use async tool comm: recv thread(s) + send-only tool_callback_for_tool_async (see marvin_*_init_example). */
         bool use_async_tool_comm_ = true;
+        /** If true, initialize end-effector (hand/gripper) on activate. If false, skip tool initialize/reads/threads. */
+        bool init_tool_on_startup_ = true;
         /** Async heartbeat: send periodic read (getStatus) and require read response frames to declare link healthy. */
         std::array<std::atomic<std::int64_t>, kMaxTools> tool_hb_start_ms_{};
         std::array<std::atomic<std::int64_t>, kMaxTools> tool_hb_tx_ms_{};
