@@ -107,12 +107,11 @@ add_custom_command(
 add_custom_target(build_marvin_sdk ALL DEPENDS ${LIB_CONTROL_DIR}/libMarvinSDK.so)
 
 set(EXTERNAL_KINEMATICSO "${KINE_SO_PATH}")
-if(NOT EXISTS "${EXTERNAL_KINEMATICSO}")
-    message(FATAL_ERROR
-        "marvin_ros2_control: libKine.so not found at ${EXTERNAL_KINEMATICSO}. "
-        "Please build kinematicsSDK (build_kine_sdk) or provide a valid Linux ELF libKine.so."
-    )
-endif()
+#
+# NOTE:
+# Do not hard-fail at *configure time* if libKine.so is missing.
+# We deliberately allow building from sources via the build_kine_sdk target,
+# so repos can avoid tracking prebuilt .so binaries in git.
 
 ## Note: libMarvinSDK.so is built during compilation, so we link it directly via target_link_directories
 ## instead of using find_library which runs at configure time
@@ -283,16 +282,30 @@ install(PROGRAMS
     RENAME tool_dyn_identify_wizard
 )
 
-# Install SDK Python bindings and identification template data into share/ for installed script to use.
-install(
-    DIRECTORY external/TJ_FX_ROBOT_CONTRL_SDK/SDK_PYTHON
-    DESTINATION share/${PROJECT_NAME}/TJ_FX_ROBOT_CONTRL_SDK
-)
-install(
-    DIRECTORY external/TJ_FX_ROBOT_CONTRL_SDK/DEMO_PYTHON/LoadData_ccs_right/LoadData/CfgFile
-              external/TJ_FX_ROBOT_CONTRL_SDK/DEMO_PYTHON/LoadData_ccs_right/LoadData/IdenTraj
-    DESTINATION share/${PROJECT_NAME}/TJ_FX_ROBOT_CONTRL_SDK/DEMO_PYTHON/LoadData_ccs_right/LoadData
-)
+# Install SDK Python bindings and identification template data (full upstream SDK only).
+# Trimmed mirror repos (contrlSDK + kinematicsSDK only) omit SDK_PYTHON/DEMO_PYTHON; skip install in that case.
+set(_TJ_SDK_ROOT "${CMAKE_SOURCE_DIR}/external/TJ_FX_ROBOT_CONTRL_SDK")
+if(EXISTS "${_TJ_SDK_ROOT}/SDK_PYTHON")
+    install(
+        DIRECTORY external/TJ_FX_ROBOT_CONTRL_SDK/SDK_PYTHON
+        DESTINATION share/${PROJECT_NAME}/TJ_FX_ROBOT_CONTRL_SDK
+    )
+    # Keep SDK_PYTHON unmodified (upstream behavior loads .so next to the .py files),
+    # but do NOT track binaries in git: we install the freshly built .so here.
+    install(FILES
+        ${LIB_KINE_DIR}/libKine.so
+        ${LIB_CONTROL_DIR}/libMarvinSDK.so
+        DESTINATION share/${PROJECT_NAME}/TJ_FX_ROBOT_CONTRL_SDK/SDK_PYTHON
+        OPTIONAL
+    )
+endif()
+if(EXISTS "${_TJ_SDK_ROOT}/DEMO_PYTHON/LoadData_ccs_right/LoadData/CfgFile")
+    install(
+        DIRECTORY external/TJ_FX_ROBOT_CONTRL_SDK/DEMO_PYTHON/LoadData_ccs_right/LoadData/CfgFile
+                  external/TJ_FX_ROBOT_CONTRL_SDK/DEMO_PYTHON/LoadData_ccs_right/LoadData/IdenTraj
+        DESTINATION share/${PROJECT_NAME}/TJ_FX_ROBOT_CONTRL_SDK/DEMO_PYTHON/LoadData_ccs_right/LoadData
+    )
+endif()
 
 install(
         TARGETS ${PROJECT_NAME}

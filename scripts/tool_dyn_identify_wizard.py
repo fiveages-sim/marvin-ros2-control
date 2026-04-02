@@ -8,34 +8,39 @@ import logging
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
+def _has_sdk_python(root: str) -> bool:
+    return os.path.isdir(os.path.join(root, "SDK_PYTHON"))
+
+
 def _resolve_sdk_root() -> str:
     """定位 vendored TJ_FX_ROBOT_CONTRL_SDK 根目录（兼容源码运行/安装后运行）。"""
     # 1) 源码运行：<pkg>/scripts/xxx.py -> <pkg>/external/TJ_FX_ROBOT_CONTRL_SDK
     pkg_dir = os.path.dirname(CURRENT_DIR)
     cand1 = os.path.join(pkg_dir, "external", "TJ_FX_ROBOT_CONTRL_SDK")
-    if os.path.isdir(cand1):
+    if _has_sdk_python(cand1):
         return cand1
 
-    # 2) 安装后运行：<prefix>/lib/marvin_ros2_control/sdk_demos/xxx.py
-    # prefix = ../../../
-    prefix = os.path.dirname(os.path.dirname(os.path.dirname(CURRENT_DIR)))
-    cand2 = os.path.join(prefix, "share", "marvin_ros2_control", "TJ_FX_ROBOT_CONTRL_SDK")
-    if os.path.isdir(cand2):
-        return cand2
-
-    # 3) 最后尝试：用 ament 索引找到 share 目录
+    # 2) 安装后（colcon）：可执行文件在 <prefix>/lib/<pkg>/tool_dyn_identify_wizard
+    #    故 prefix = dirname(dirname(CURRENT_DIR))，share 在 <prefix>/share/<pkg>/...
     try:
         from ament_index_python.packages import get_package_share_directory  # type: ignore
 
         share_dir = get_package_share_directory("marvin_ros2_control")
-        cand3 = os.path.join(share_dir, "TJ_FX_ROBOT_CONTRL_SDK")
-        if os.path.isdir(cand3):
-            return cand3
+        cand_ament = os.path.join(share_dir, "TJ_FX_ROBOT_CONTRL_SDK")
+        if _has_sdk_python(cand_ament):
+            return cand_ament
     except Exception:
         pass
 
+    # 3) 不依赖 ament 索引时，从安装路径推断 prefix（勿用三级 dirname，否则会指到 workspace 根目录）
+    prefix = os.path.dirname(os.path.dirname(CURRENT_DIR))
+    cand2 = os.path.join(prefix, "share", "marvin_ros2_control", "TJ_FX_ROBOT_CONTRL_SDK")
+    if _has_sdk_python(cand2):
+        return cand2
+
     raise RuntimeError(
-        "无法定位 TJ_FX_ROBOT_CONTRL_SDK。请确认已安装 marvin_ros2_control，并且已安装/部署 SDK_PYTHON 目录。"
+        "无法定位 TJ_FX_ROBOT_CONTRL_SDK（需要包含 SDK_PYTHON）。"
+        "请 source install/setup.bash 后重试，并确认已重新 colcon build marvin_ros2_control（子模块含 SDK_PYTHON）。"
     )
 
 
