@@ -20,6 +20,7 @@
 #include "rclcpp_lifecycle/state.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "std_msgs/msg/int64.hpp"
+#include "geometry_msgs/msg/wrench_stamped.hpp"
 #include "MarvinSDK.h"
 #include <cmath>
 #include "marvin_ros2_control/tool/grippers/modbus_gripper.h"
@@ -101,6 +102,16 @@ private:
         std::vector<double> hw_effort_states_;
         // 复用的写入缓存（避免在 write() 控制回路中频繁分配/扩容导致抖动）
         std::vector<double> hw_commands_deg_buffer_;
+
+        // Virtual FT sensor state (filled from external wrench topic)
+        std::string left_wrench_topic_;
+        std::string right_wrench_topic_;
+        rclcpp::Subscription<geometry_msgs::msg::WrenchStamped>::SharedPtr left_wrench_sub_;
+        rclcpp::Subscription<geometry_msgs::msg::WrenchStamped>::SharedPtr right_wrench_sub_;
+        std::mutex wrench_mutex_;
+        std::array<double, 6> left_ft_state_{};
+        std::array<double, 6> right_ft_state_{};
+        std::array<double, 6> single_ft_state_{};  // used for single-arm configs
 
         // Joint limits from URDF
         std::vector<double> position_lower_limits_;
@@ -202,6 +213,8 @@ private:
         std::vector<std::thread> tool_recv_threads_;
         /** If true, use async tool comm: recv thread(s) + send-only tool_callback_for_tool_async (see marvin_*_init_example). */
         bool use_async_tool_comm_ = true;
+        /** If true, initialize end-effector (hand/gripper) on activate. If false, skip tool initialize/reads/threads. */
+        bool init_tool_on_startup_ = true;
         /** Async heartbeat: send periodic read (getStatus) and require read response frames to declare link healthy. */
         std::array<std::atomic<std::int64_t>, kMaxTools> tool_hb_start_ms_{};
         std::array<std::atomic<std::int64_t>, kMaxTools> tool_hb_tx_ms_{};

@@ -16,6 +16,7 @@
 #include "hardware_interface/types/hardware_interface_type_values.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include <string>
+#include "geometry_msgs/msg/wrench_stamped.hpp"
 #include "gripper_hardware_common/ChangingtekGripper.h"
 #include "gripper_hardware_common/JodellGripper.h"
 #include "marvin_ros2_control/tool/grippers/changingtek/changingtek_gripper.h"
@@ -254,6 +255,35 @@ namespace marvin_ros2_control
 
         // 先把 hardware_parameters 的初始值灌入并声明成 ROS2 参数（便于后续动态修改）
         declare_node_parameters();
+
+        // Virtual FT sensor inputs (wrench estimated elsewhere, published as WrenchStamped)
+        // These topics are optional; when not available, the FT state will stay at zeros.
+        left_wrench_topic_ = get_node_param<std::string>("left_wrench_topic", "/left_arm_external_wrench");
+        right_wrench_topic_ = get_node_param<std::string>("right_wrench_topic", "/right_arm_external_wrench");
+
+        const auto cb_left = [this](geometry_msgs::msg::WrenchStamped::SharedPtr msg) {
+            std::lock_guard<std::mutex> lock(wrench_mutex_);
+            left_ft_state_[0] = msg->wrench.force.x;
+            left_ft_state_[1] = msg->wrench.force.y;
+            left_ft_state_[2] = msg->wrench.force.z;
+            left_ft_state_[3] = msg->wrench.torque.x;
+            left_ft_state_[4] = msg->wrench.torque.y;
+            left_ft_state_[5] = msg->wrench.torque.z;
+        };
+        const auto cb_right = [this](geometry_msgs::msg::WrenchStamped::SharedPtr msg) {
+            std::lock_guard<std::mutex> lock(wrench_mutex_);
+            right_ft_state_[0] = msg->wrench.force.x;
+            right_ft_state_[1] = msg->wrench.force.y;
+            right_ft_state_[2] = msg->wrench.force.z;
+            right_ft_state_[3] = msg->wrench.torque.x;
+            right_ft_state_[4] = msg->wrench.torque.y;
+            right_ft_state_[5] = msg->wrench.torque.z;
+        };
+
+        left_wrench_sub_ = node_->create_subscription<geometry_msgs::msg::WrenchStamped>(
+            left_wrench_topic_, rclcpp::SystemDefaultsQoS(), cb_left);
+        right_wrench_sub_ = node_->create_subscription<geometry_msgs::msg::WrenchStamped>(
+            right_wrench_topic_, rclcpp::SystemDefaultsQoS(), cb_right);
         
         // Get the number of joints from the hardware info
         size_t num_joints = params.hardware_info.joints.size();
@@ -296,11 +326,13 @@ namespace marvin_ros2_control
         use_async_tool_comm_ = get_node_param("use_async_tool_comm", true);
         debug_tool_logs_ = get_node_param("debug_tool_logs", false);
         marvin_ros2_control::ModbusIO::setDebugEnabled(debug_tool_logs_);
+        init_tool_on_startup_ = get_node_param("init_tool_on_startup", true);
         // 限制范围在 0.0-1.0
         if (gripper_torque_scale_ < 0.0) gripper_torque_scale_ = 0.0;
         if (gripper_torque_scale_ > 1.0) gripper_torque_scale_ = 1.0;
         RCLCPP_INFO(get_logger(), "Gripper torque scale: %.2f (actual torque = %d)", 
                     gripper_torque_scale_, static_cast<int>(100.0 * gripper_torque_scale_));
+        RCLCPP_INFO(get_logger(), "init_tool_on_startup: %s", init_tool_on_startup_ ? "true" : "false");
 
         // 获取硬件连接参数
         device_ip_ = get_node_param("device_ip", std::string("192.168.1.190"));
@@ -1275,8 +1307,8 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         rightdynParam_.resize(10, 0.0);
         
         // Connect and initialize end effector (gripper or hand) (this will update kineParam and dynPara if detected)
-        // 只有在配置了末端执行器类型时才尝试连接
-        if (has_gripper_ && !gripper_type_.empty() && gripper_type_ != "NONE")
+        // 只有在配置了末端执行器类型且允许启动初始化时才尝试连接
+        if (init_tool_on_startup_ && has_gripper_ && !gripper_type_.empty() && gripper_type_ != "NONE")
         {
             if (toolCount() == 0)
             {
@@ -1292,6 +1324,12 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                                 toolTypeLogName());
                 }
             }
+        }
+        else if (!init_tool_on_startup_ && has_gripper_ && !gripper_type_.empty() && gripper_type_ != "NONE")
+        {
+            RCLCPP_WARN(get_logger(),
+                        "Tool type '%s' is configured but init_tool_on_startup=false, skipping end-effector initialization on startup.",
+                        gripper_type_.c_str());
         }
 
         if (robot_arm_index_ == ARM_LEFT)
@@ -1355,7 +1393,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         }
 
         // One-time initial read per tool; if one side fails we mark it and continue (no abort), that side will not be polled
-        if (has_gripper_ && !gripper_type_.empty() && gripper_type_ != "NONE" && toolCount() > 0)
+        if (init_tool_on_startup_ && has_gripper_ && !gripper_type_.empty() && gripper_type_ != "NONE" && toolCount() > 0)
         {
             RCLCPP_INFO(get_logger(), "sleeping 500ms for tool initialization");
             std::this_thread::sleep_for(std::chrono::milliseconds(500)); // 如果有末端工具需要等待 工具初始化完成
@@ -1364,7 +1402,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         }
 
         // Start tool callback threads only after initial end-effector data has been updated above
-        if (has_gripper_ && !gripper_type_.empty() && gripper_type_ != "NONE" && toolCount() > 0)
+        if (init_tool_on_startup_ && has_gripper_ && !gripper_type_.empty() && gripper_type_ != "NONE" && toolCount() > 0)
         {
             if (use_async_tool_comm_)
             {
@@ -1399,7 +1437,13 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         else
         {
             // 没有配置末端执行器是正常情况，不应该返回错误
-            if (!gripper_type_.empty() && gripper_type_ != "NONE")
+            if (!init_tool_on_startup_ && !gripper_type_.empty() && gripper_type_ != "NONE")
+            {
+                RCLCPP_WARN(get_logger(),
+                            "Tool type '%s' configured but init_tool_on_startup=false, continuing without tool threads.",
+                            gripper_type_.c_str());
+            }
+            else if (!gripper_type_.empty() && gripper_type_ != "NONE")
             {
                 // 配置了末端执行器类型但连接失败
                 RCLCPP_ERROR(get_logger(), "%s type configured but connection failed", toolTypeLogName());
@@ -2007,6 +2051,33 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                         &gripper_effort_[i]));
             }
         }
+
+        // Export virtual FT sensor state interfaces for admittance_controller.
+        // NOTE:
+        // Some setups may not populate info_.sensors reliably even though URDF declares <sensor>.
+        // To avoid startup mismatch, we export a deterministic set based on arm configuration.
+        const auto add_ft_sensor_interfaces = [&state_interfaces](
+            const std::string& sensor_name, std::array<double, 6>& data)
+        {
+            static const std::array<const char*, 6> kNames = {
+                "force.x", "force.y", "force.z", "torque.x", "torque.y", "torque.z"};
+            for (size_t i = 0; i < kNames.size(); ++i)
+            {
+                state_interfaces.push_back(
+                    std::make_shared<hardware_interface::StateInterface>(
+                        sensor_name, kNames[i], &data[i]));
+            }
+        };
+
+        if (robot_arm_index_ == ARM_DUAL)
+        {
+            add_ft_sensor_interfaces("left_ft_sensor", left_ft_state_);
+            add_ft_sensor_interfaces("right_ft_sensor", right_ft_state_);
+        }
+        else
+        {
+            add_ft_sensor_interfaces("ft_sensor", single_ft_state_);
+        }
         return state_interfaces;
     }
 
@@ -2060,6 +2131,17 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         if (!readFromHardware(false))
         {
             return hardware_interface::return_type::ERROR;
+        }
+
+        // For single-arm setups, mirror the corresponding side into ft_sensor.
+        // This keeps the semantic-component interfaces stable regardless of arm configuration.
+        {
+            std::lock_guard<std::mutex> lock(wrench_mutex_);
+            if (robot_arm_index_ == ARM_LEFT) {
+                single_ft_state_ = left_ft_state_;
+            } else if (robot_arm_index_ == ARM_RIGHT) {
+                single_ft_state_ = right_ft_state_;
+            }
         }
 
         return hardware_interface::return_type::OK;
