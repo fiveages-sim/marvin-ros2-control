@@ -25,8 +25,8 @@ jobs:
   build-deb:
     runs-on: ubuntu-24.04
     env:
-      PACKAGE_NAME: marvin-ros2-control-jazzy
-      DEB_FILE_PREFIX: marvin-ros2-control-jazzy
+      PACKAGE_NAME: ros-jazzy-marvin-ros2-control
+      DEB_FILE_PREFIX: ros-jazzy-marvin-ros2-control
       ROS_PKG: marvin_ros2_control
       DEFAULT_ROS_DISTRO: jazzy
       ARMS_MONOREPO: fiveages-sim/arms_ros2_control
@@ -198,11 +198,11 @@ jobs:
           Section: misc
           Priority: optional
           Architecture: amd64
-          Depends: ros-${ROS_DISTRO}-ros-base, gripper-hardware-common-${ROS_DISTRO}
+          Depends: ros-${ROS_DISTRO}-ros-base, ros-${ROS_DISTRO}-gripper-hardware-common
           Maintainer: ${GITHUB_REPOSITORY} maintainers <github-actions[bot]@users.noreply.github.com>
           Installed-Size: ${installed_size}
           Description: ${ROS_PKG} ROS 2 hardware plugin (standalone deb)
-           Installed into ${INSTALL_PREFIX} without shared prefix setup files. Requires gripper-hardware-common at runtime.
+           Installed into ${INSTALL_PREFIX} without shared prefix setup files. Requires ros-${ROS_DISTRO}-gripper-hardware-common at runtime.
           EOF
           if [[ ! -d "${install_root}/share/${ROS_PKG}" ]]; then
             echo "Missing ${install_root}/share/${ROS_PKG}" >&2
