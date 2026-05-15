@@ -144,18 +144,17 @@ namespace marvin_ros2_control
             return true;
         }
 
-        bool move_gripper(int torque, int velocity, double normalized_pos) override
+        bool move_gripper(double normalized_torque, double normalized_velocity, double normalized_pos) override
         {
-            // For compatibility with base interface, apply same values to all joints
-            std::vector<int> torques(JOINT_COUNT, torque);
-            std::vector<int> velocities(JOINT_COUNT, velocity);
+            std::vector<double> torques(JOINT_COUNT, std::clamp(normalized_torque, 0.0, 1.0));
+            std::vector<double> velocities(JOINT_COUNT, std::clamp(normalized_velocity, 0.0, 1.0));
             std::vector<double> positions(JOINT_COUNT, normalized_pos);
             return move_hand(torques, velocities, positions);
         }
 
         bool move_hand(
-            const std::vector<int>& torques,
-            const std::vector<int>& velocities,
+            const std::vector<double>& torques,
+            const std::vector<double>& velocities,
             const std::vector<double>& positions
         ) override
         {
@@ -197,7 +196,7 @@ namespace marvin_ros2_control
                 // Normalize position: map from [lower, upper] radians to [0.0, 1.0]
                 double range = upper - lower;
                 double normalized = (range > 1e-6) ? (clamped_rad - lower) / range : 0.0;
-                normalized = std::max(0.0, std::min(1.0, normalized));
+                normalized = std::clamp(normalized, 0.0, 1.0);
                 
                 // Convert normalized position (0.0-1.0) to raw Modbus value (0-255)
                 // Protocol: 0 = bend/close, 255 = straight/open
@@ -206,7 +205,7 @@ namespace marvin_ros2_control
                 raw_positions[i] = raw_value;
                 
                 // Log each joint's conversion details
-                RCLCPP_INFO(logger_, "  Register[%zu] (%s): rad=%.6f (clamped from %.6f) -> normalized=%.6f -> raw=%u (0x%02X), limits=[%.4f, %.4f] rad, torque=%d, velocity=%d",
+                RCLCPP_INFO(logger_, "  Register[%zu] (%s): rad=%.6f (clamped from %.6f) -> normalized=%.6f -> raw=%u (0x%02X), limits=[%.4f, %.4f] rad, torque=%.4f, velocity=%.4f",
                           i, joint_name.c_str(), clamped_rad, positions[i], normalized, raw_positions[i], raw_positions[i], lower, upper, torques[i], velocities[i]);
             }
 
@@ -296,7 +295,7 @@ namespace marvin_ros2_control
                 uint8_t raw_pos = static_cast<uint8_t>(registers[i] & 0xFF);
                 // Convert to normalized [0.0, 1.0]: 0 (bend) -> 1.0, 255 (straight) -> 0.0
                 double normalized = (255.0 - static_cast<double>(raw_pos)) / 255.0;
-                normalized = std::max(0.0, std::min(1.0, normalized));
+                normalized = std::clamp(normalized, 0.0, 1.0);
                 positions.push_back(normalized);
             }
             
