@@ -172,12 +172,12 @@ private:
         void declare_node_parameters();
 
         
-        // Gripper parameters
+        // Gripper / hand: per-URDF-joint command (normalized [0,1] for tools; same semantics as former ROS params).
         std::string gripper_type_;
         std::string left_ee_type_;
         std::string right_ee_type_;
-        double gripper_torque_scale_ = 1.0;  // Torque scaling factor (0.0-1.0, default: 1.0)
-        /** If true, enable high-frequency INFO logs for tool (hand/gripper) and Modbus hex dumps. */
+        std::vector<double> gripper_effort_command_;   // HW_IF_EFFORT command → normalized torque to tool
+        std::vector<double> gripper_velocity_command_; // HW_IF_VELOCITY command → normalized velocity to tool
         bool debug_tool_logs_ = false;
         bool has_gripper_ = false;
         std::vector<std::string> gripper_joint_name_;
@@ -192,6 +192,8 @@ private:
         std::vector<double> gripper_effort_;
         std::vector<double> gripper_position_command_;
         std::vector<double> last_gripper_command_;
+        std::vector<double> last_gripper_effort_ack_;
+        std::vector<double> last_gripper_velocity_ack_;
         std::vector<bool> gripper_stopped_;
         void contains_tool();
         bool eeTypeIsHand(const std::string& ee_type) const;

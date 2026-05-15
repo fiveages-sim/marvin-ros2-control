@@ -2,9 +2,11 @@
 #include "MarvinSDK.h"
 #include <thread>
 #include <chrono>
+#include <algorithm>
 #include "rclcpp/logging.hpp"
 #include "gripper_hardware_common/utils/PositionConverter.h"
 #include "gripper_hardware_common/utils/TorqueConverter.h"
+#include "gripper_hardware_common/utils/VelocityConverter.h"
 #include "gripper_hardware_common/utils/ModbusConfig.h"
 #include "gripper_hardware_common/utils/JodellCommandBuilder.h"
 
@@ -27,10 +29,9 @@ namespace marvin_ros2_control
                                       Jodell::WRITE_FUNCTION);
     }
 
-    /// input torque is uint8_t
-    /// input velocity is uint8_t
-    /// input position is normalized (0.0=closed, 1.0=open)
-    bool JDGripper::move_gripper(int trq_set, int vel_set, double normalized_pos)
+    /// Normalized torque and velocity [0,1]; position normalized (0.0=closed, 1.0=open).
+    /// Velocity maps linearly to Modbus low byte 0–255.
+    bool JDGripper::move_gripper(double normalized_torque, double normalized_velocity, double normalized_pos)
     {
         using namespace gripper_hardware_common;
         using namespace gripper_hardware_common::ModbusConfig;
@@ -38,14 +39,11 @@ namespace marvin_ros2_control
         // Convert normalized position to Jodell position (0-255)
         int pos_set = PositionConverter::Jodell::normalizedToJodell(normalized_pos);
         
-        // Convert torque: input torque (0-100, already scaled by gripper_torque_scale)
-        // is treated as normalized (0.0-1.0) and converted to Jodell torque value (20-100)
-        // This ensures torque mapping is consistent with position mapping
-        double normalized_torque = static_cast<double>(trq_set) / 100.0;  // Convert 0-100 to 0.0-1.0
         int jodell_torque = TorqueConverter::Jodell::normalizedToJodell(normalized_torque);
+        const int vel_set = VelocityConverter::Jodell::normalizedToLowByte(normalized_velocity);
         
-        RCLCPP_INFO(logger_, "JD Gripper - pos: %.3f->%d, vel: %d, trq: %d->%d (scale: %.2f)",
-                    normalized_pos, pos_set, vel_set, trq_set, jodell_torque, normalized_torque);
+        RCLCPP_INFO(logger_, "JD Gripper - pos: %.3f->%d, vel_norm: %.3f->%d, trq_norm: %.3f->%d",
+                    normalized_pos, pos_set, normalized_velocity, vel_set, normalized_torque, jodell_torque);
         
         // Use JodellCommandBuilder to build the command with converted torque
         auto position_values = JodellCommandBuilder::buildCommand(pos_set, jodell_torque, vel_set);

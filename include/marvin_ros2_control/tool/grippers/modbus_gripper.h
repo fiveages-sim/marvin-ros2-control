@@ -26,7 +26,7 @@ namespace marvin_ros2_control
 
         // GripperBase interface implementation
         bool initialize() override = 0;
-        bool move_gripper(int torque, int velocity, double position) override = 0;
+        bool move_gripper(double normalized_torque, double normalized_velocity, double position) override = 0;
         bool getStatus() override = 0;
 
         // Additional methods for Modbus grippers
