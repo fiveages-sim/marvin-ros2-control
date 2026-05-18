@@ -169,12 +169,15 @@ private:
                                     const std::vector<double>& cart_k_gains,
                                     const std::vector<double>& cart_d_gains);
         void declare_node_parameters();
+        void syncToolDynamicsFromNodeParams();
+        void applySideToolDynamics(bool is_left, double torque, double velocity);
+        static bool gripperJointIsLeft(const std::string& joint_name);
 
         
-        // Gripper / hand: per-URDF-joint command (normalized [0,1] for tools; same semantics as former ROS params).
+        // Gripper / hand: normalized torque/velocity from ROS params (not HW command interfaces).
         std::string gripper_type_;
-        std::vector<double> gripper_effort_command_;   // HW_IF_EFFORT command → normalized torque to tool
-        std::vector<double> gripper_velocity_command_; // HW_IF_VELOCITY command → normalized velocity to tool
+        std::vector<double> gripper_effort_command_;
+        std::vector<double> gripper_velocity_command_;
         bool debug_tool_logs_ = false;
         bool has_gripper_ = false;
         std::vector<std::string> gripper_joint_name_;
