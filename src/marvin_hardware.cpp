@@ -48,13 +48,14 @@ namespace marvin_ros2_control
     static const std::vector<double> kDefaultRightDynParam  = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
 
     // ctrl_mode 相关：字符串 <-> 内部 mode(int) 的单一转换来源
-    // mode: 1=POSITION, 2=JOINT_IMPEDANCE, 3=CART_IMPEDANCE
+    // mode: 1=POSITION, 2=JOINT_IMPEDANCE, 3=CART_IMPEDANCE, 4=POWER_OFF (左右臂均下使能)
     static int ctrlModeStringToMode(const std::string& ctrl_mode_raw, const rclcpp::Logger& logger)
     {
         const std::string normalized = normalizeString(ctrl_mode_raw);
         if (normalized == "POSITION") return 1;
         if (normalized == "JOINT_IMPEDANCE") return 2;
         if (normalized == "CART_IMPEDANCE") return 3;
+        if (normalized == "POWER_OFF") return 4;
         RCLCPP_WARN(logger, "Invalid ctrl_mode value: %s, defaulting to POSITION", ctrl_mode_raw.c_str());
         return 1;
     }
@@ -65,6 +66,7 @@ namespace marvin_ros2_control
             case 1: return "POSITION";
             case 2: return "JOINT_IMPEDANCE";
             case 3: return "CART_IMPEDANCE";
+            case 4: return "POWER_OFF";
             default: return "POSITION";
         }
     }
@@ -214,6 +216,11 @@ namespace marvin_ros2_control
         ensure_param("use_drag_mode", false, hw_find("use_drag_mode"),
                      [](const std::string& s, bool def) { return parseBoolLoose(s, def); });
         ensure_param("use_async_tool_comm", true, hw_find("use_async_tool_comm"),
+                     [](const std::string& s, bool def) { return parseBoolLoose(s, def); });
+        // Per-arm brake: true=force brake release (松闸); false=engage brake (抱闸)
+        ensure_param("left_brake_release", false, hw_find("left_brake_release"),
+                     [](const std::string& s, bool def) { return parseBoolLoose(s, def); });
+        ensure_param("right_brake_release", false, hw_find("right_brake_release"),
                      [](const std::string& s, bool def) { return parseBoolLoose(s, def); });
 
         // Gripper tool parameters - declared as std::vector<double> (array of doubles)
@@ -513,6 +520,48 @@ MarvinHardware::paramCallback(const std::vector<rclcpp::Parameter> & params)
             RCLCPP_INFO(get_logger(), "Reset state for %zu tool(s) to apply new torque scale", toolCount());
             
             continue;  // Skip hardware connection check for this parameter
+        }
+
+        if (param.get_name() == "left_brake_release" || param.get_name() == "right_brake_release") {
+            if (!hardware_connected_) {
+                result.successful = false;
+                result.reason = "Hardware not connected";
+                return result;
+            }
+            const bool is_left = (param.get_name() == "left_brake_release");
+            const bool arm_configured = is_left
+                ? (robot_arm_index_ == ARM_LEFT || robot_arm_index_ == ARM_DUAL)
+                : (robot_arm_index_ == ARM_RIGHT || robot_arm_index_ == ARM_DUAL);
+            if (!arm_configured) {
+                RCLCPP_WARN(get_logger(), "%s ignored: arm not configured (arm_type=%s)",
+                            param.get_name().c_str(), robot_arm_config_.c_str());
+                continue;
+            }
+
+            const bool release = param.as_bool();
+            const long sdk_value = release ? 2 : 1;  // 2=松闸, 1=抱闸
+            const int arm_index = is_left ? ARM_LEFT : ARM_RIGHT;
+            char name[30] = "";
+            std::snprintf(name, sizeof(name), "BRAK%d", arm_index);
+
+            OnClearSet();
+            if (release) {
+                // Match SDK demo: drop target state before forcing brake release.
+                if (is_left) OnSetTargetState_A(0); else OnSetTargetState_B(0);
+            }
+            OnSetIntPara(name, sdk_value);
+            OnSetSend();
+            usleep(100000);
+
+            RCLCPP_INFO(get_logger(), "%s arm brake: %s",
+                        is_left ? "Left" : "Right",
+                        release ? "BRAKE_RELEASE" : "BRAKE");
+
+            // After engaging brake, restore the operation mode requested by ctrl_mode for this arm.
+            if (!release) {
+                setArmCtrlInternal(arm_index);
+            }
+            continue;
         }
 
         // Other parameters require hardware connection
@@ -828,6 +877,17 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         
         RCLCPP_INFO(get_logger(), "Set to cartesian impedance mode with KD=[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f], speed=%.1f, acceleration=%.1f",
                     K[0], K[1], K[2], K[3], K[4], K[5], K[6], max_joint_speed, max_joint_acceleration);
+    } else if (mode == 4) {
+        // POWER_OFF: both configured arms 下使能 (target state 0)
+        OnClearSet();
+        if (update_left) {
+            OnSetTargetState_A(0);
+        }
+        if (update_right) {
+            OnSetTargetState_B(0);
+        }
+        send_and_sleep();
+        RCLCPP_INFO(get_logger(), "Set to POWER_OFF mode (左右臂下使能)");
     }
 }
 
@@ -872,6 +932,13 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         {
             OnClearSet();
             set_target_state(1); // 1:position mode
+            OnSetSend();
+            usleep(100000);
+        }
+        else if (robot_ctrl_mode_ == "POWER_OFF")
+        {
+            OnClearSet();
+            set_target_state(0); // 0:下使能 / servo off
             OnSetSend();
             usleep(100000);
         }
