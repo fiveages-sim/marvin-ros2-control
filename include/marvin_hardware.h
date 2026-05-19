@@ -170,9 +170,11 @@ private:
                                     const std::vector<double>& cart_k_gains,
                                     const std::vector<double>& cart_d_gains);
         void declare_node_parameters();
+        void syncToolDynamicsFromNodeParams();
+        void applyToolDynamics(double torque, double velocity);
 
         
-        // Gripper / hand: per-URDF-joint command (normalized [0,1] for tools; same semantics as former ROS params).
+        // Gripper / hand: normalized torque/velocity from ROS params (not HW command interfaces).
         std::string gripper_type_;
         std::string left_ee_type_;
         std::string right_ee_type_;

@@ -58,6 +58,13 @@ colcon build --packages-up-to marvin_ros2_control --symlink-install
   - `left_dyn_param`（double array，长度 10）
   - `right_kine_param`（double array，长度 6）
   - `right_dyn_param`（double array，长度 10）
+- **末端力矩/速度（归一化 0~1，所有 gripper/hand 共用，不区分左右）**
+  - `tool_torque`、`tool_velocity`
+
+```bash
+ros2 param set /<hardware_node> tool_torque 0.8
+ros2 param set /<hardware_node> tool_velocity 1.0
+```
 
 示例（动态切换控制模式/阻抗参数）：
 

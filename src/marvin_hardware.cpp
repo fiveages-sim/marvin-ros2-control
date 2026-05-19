@@ -224,6 +224,11 @@ namespace marvin_ros2_control
         ensure_double_array_sized("left_dyn_param", kDefaultLeftDynParam, 10);
         ensure_double_array_sized("right_kine_param", kDefaultRightKineParam, 6);
         ensure_double_array_sized("right_dyn_param", kDefaultRightDynParam, 10);
+
+        ensure_param("tool_torque", 1.0, nullptr,
+                     [](const std::string& s, double def) { try { return std::stod(s); } catch (...) { return def; } });
+        ensure_param("tool_velocity", 1.0, nullptr,
+                     [](const std::string& s, double def) { try { return std::stod(s); } catch (...) { return def; } });
     }
     
     hardware_interface::CallbackReturn MarvinHardware::on_init(
@@ -481,10 +486,45 @@ namespace marvin_ros2_control
         
         param_callback_handle_ = node_->add_on_set_parameters_callback(
                 std::bind(&MarvinHardware::paramCallback, this, std::placeholders::_1));
+        syncToolDynamicsFromNodeParams();
         RCLCPP_INFO(get_logger(), "Robot configuration parameters ready. Use 'ros2 param set' to change configuration dynamically.");
             
         RCLCPP_INFO(get_logger(), "Marvin Hardware Interface initialized successfully");
         return hardware_interface::CallbackReturn::SUCCESS;
+    }
+
+    void MarvinHardware::applyToolDynamics(double torque, double velocity)
+    {
+        torque = std::clamp(torque, 0.0, 1.0);
+        velocity = std::clamp(velocity, 0.0, 1.0);
+        for (size_t k = 0; k < gripper_joint_name_.size(); ++k)
+        {
+            if (k < gripper_effort_command_.size())
+            {
+                gripper_effort_command_[k] = torque;
+            }
+            if (k < gripper_velocity_command_.size())
+            {
+                gripper_velocity_command_[k] = velocity;
+            }
+            if (k < last_gripper_effort_ack_.size())
+            {
+                last_gripper_effort_ack_[k] = std::numeric_limits<double>::quiet_NaN();
+            }
+            if (k < last_gripper_velocity_ack_.size())
+            {
+                last_gripper_velocity_ack_[k] = std::numeric_limits<double>::quiet_NaN();
+            }
+        }
+    }
+
+    void MarvinHardware::syncToolDynamicsFromNodeParams()
+    {
+        if (!node_ || !has_gripper_)
+        {
+            return;
+        }
+        applyToolDynamics(get_node_param("tool_torque", 1.0), get_node_param("tool_velocity", 1.0));
     }
 
 rcl_interfaces::msg::SetParametersResult
@@ -507,6 +547,27 @@ MarvinHardware::paramCallback(const std::vector<rclcpp::Parameter> & params)
     std::vector<double> cart_d_gains;
 
     for (const auto & param : params) {
+        if (param.get_name() == "tool_torque" || param.get_name() == "tool_velocity")
+        {
+            const double v = param.as_double();
+            if (v < 0.0 || v > 1.0)
+            {
+                result.successful = false;
+                result.reason = param.get_name() + " must be in [0.0, 1.0]";
+                return result;
+            }
+            if (param.get_name() == "tool_torque")
+            {
+                applyToolDynamics(v, get_node_param("tool_velocity", 1.0));
+            }
+            else
+            {
+                applyToolDynamics(get_node_param("tool_torque", 1.0), v);
+            }
+            RCLCPP_INFO(get_logger(), "Updated %s = %.3f (all tools)", param.get_name().c_str(), v);
+            continue;
+        }
+
         // Other parameters require hardware connection
         if (!hardware_connected_) {
             result.successful = false;
@@ -2103,18 +2164,6 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                         gripper_joint_name_[i],
                         hardware_interface::HW_IF_POSITION,
                         &gripper_position_[i]));
-
-                state_interfaces.push_back(
-                    std::make_shared<hardware_interface::StateInterface>(
-                        gripper_joint_name_[i],
-                        hardware_interface::HW_IF_VELOCITY,
-                        &gripper_velocity_[i]));
-
-                state_interfaces.push_back(
-                    std::make_shared<hardware_interface::StateInterface>(
-                        gripper_joint_name_[i],
-                        hardware_interface::HW_IF_EFFORT,
-                        &gripper_effort_[i]));
             }
         }
 
@@ -2180,16 +2229,6 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                         gripper_joint_name_[i],
                         hardware_interface::HW_IF_POSITION,
                         &gripper_position_command_[i]));
-                command_interfaces.push_back(
-                    std::make_shared<hardware_interface::CommandInterface>(
-                        gripper_joint_name_[i],
-                        hardware_interface::HW_IF_VELOCITY,
-                        &gripper_velocity_command_[i]));
-                command_interfaces.push_back(
-                    std::make_shared<hardware_interface::CommandInterface>(
-                        gripper_joint_name_[i],
-                        hardware_interface::HW_IF_EFFORT,
-                        &gripper_effort_command_[i]));
             }
         }
 
