@@ -257,6 +257,7 @@ namespace marvin_ros2_control
 
         // Hardware error topic (heartbeat offline, etc.)
         hardware_error_pub_ = node_->create_publisher<std_msgs::msg::Int64>("/Base_HardwareError", rclcpp::SystemDefaultsQoS());
+        fsm_command_pub_ = node_->create_publisher<std_msgs::msg::Int32>("/fsm_command", rclcpp::SystemDefaultsQoS());
         for (auto& f : tool_has_valid_state_)
             f.store(false);
 
@@ -578,6 +579,12 @@ MarvinHardware::paramCallback(const std::vector<rclcpp::Parameter> & params)
             need_config_update = true;
             ctrl_mode_changed = true;
             RCLCPP_INFO(get_logger(), "ctrl_mode parameter changed to: %s", ctrl_mode.c_str());
+            if (mode == 4 && fsm_command_pub_) {
+                std_msgs::msg::Int32 fsm_cmd;
+                fsm_cmd.data = 2;  // HOLD
+                fsm_command_pub_->publish(fsm_cmd);
+                RCLCPP_INFO(get_logger(), "ctrl_mode=POWER_OFF: published fsm_command=2 (HOLD)");
+            }
         }
         else if (param.get_name() == "drag_mode") {
             drag_mode = param.as_int();

@@ -43,7 +43,7 @@ colcon build --packages-up-to marvin_ros2_control --symlink-install
 
 - **控制模式**
   - `ctrl_mode`：`POSITION` / `JOINT_IMPEDANCE` / `CART_IMPEDANCE` / `POWER_OFF`
-    - `POWER_OFF`：左右臂统一下使能（`OnSetTargetState_A/B(0)`）；切回其它模式时按对应模式重新上使能
+    - `POWER_OFF`：左右臂统一下使能（`OnSetTargetState_A/B(0)`），并自动发布 `/fsm_command=2` 将 FSM 切回 HOLD
 - **阻抗与拖动相关**
   - `joint_k_gains`（double array，长度 7）
   - `joint_d_gains`（double array，长度 7）

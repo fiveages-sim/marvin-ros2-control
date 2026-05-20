@@ -20,6 +20,7 @@
 #include "rclcpp_lifecycle/state.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "std_msgs/msg/int64.hpp"
+#include "std_msgs/msg/int32.hpp"
 #include "geometry_msgs/msg/wrench_stamped.hpp"
 #include "MarvinSDK.h"
 #include <cmath>
@@ -74,6 +75,7 @@ private:
         // Hardware parameters
         std::shared_ptr<rclcpp::Node> node_;
         rclcpp::Publisher<std_msgs::msg::Int64>::SharedPtr hardware_error_pub_;
+        rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr fsm_command_pub_;
         std::string device_ip_;
         int device_port_ = 8080;
         std::string robot_arm_config_;  // "LEFT", "RIGHT", "DUAL"
