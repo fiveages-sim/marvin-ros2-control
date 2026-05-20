@@ -6,6 +6,8 @@
 #include "rclcpp/logging.hpp"
 #include <vector>
 #include <cstdint>
+#include <cmath>
+#include <limits>
 #include <algorithm>
 #include <string>
 
@@ -95,6 +97,8 @@ namespace marvin_ros2_control
                 get_joint_name_func_ = PositionConverter::LinkerHandL6::getJointNameByIndex;
                 clamp_to_limits_func_ = PositionConverter::LinkerHandL6::clampToLimits;
             }
+            last_applied_torques_.assign(JOINT_COUNT, std::numeric_limits<double>::quiet_NaN());
+            last_applied_velocities_.assign(JOINT_COUNT, std::numeric_limits<double>::quiet_NaN());
         }
         
         /**
@@ -127,6 +131,45 @@ namespace marvin_ros2_control
 
     protected:
         uint8_t slave_id_;  // Modbus slave ID (0x28 for left, 0x27 for right)
+
+        // O6/L6: pos 0-5, torque 6-11, speed 12-17 (read/write 0-17 when dynamics change)
+        // O7:    pos 0-6, torque 7-13, speed 14-20
+        static constexpr uint16_t torqueRegStart()
+        {
+            return (JOINT_COUNT == 7) ? static_cast<uint16_t>(7) : static_cast<uint16_t>(6);
+        }
+        static constexpr uint16_t speedRegStart()
+        {
+            return (JOINT_COUNT == 7) ? static_cast<uint16_t>(14) : static_cast<uint16_t>(12);
+        }
+        static constexpr uint16_t fullInputRegisterCount()
+        {
+            return static_cast<uint16_t>(speedRegStart() + JOINT_COUNT);
+        }
+
+        std::vector<double> last_applied_torques_;
+        std::vector<double> last_applied_velocities_;
+        bool pending_full_register_io_{false};
+
+        bool dynamicsChanged(const std::vector<double>& torques,
+                             const std::vector<double>& velocities) const
+        {
+            constexpr double kEps = 0.001;
+            for (size_t i = 0; i < JOINT_COUNT; ++i)
+            {
+                if (std::isnan(last_applied_torques_[i]) ||
+                    std::abs(torques[i] - last_applied_torques_[i]) > kEps)
+                {
+                    return true;
+                }
+                if (std::isnan(last_applied_velocities_[i]) ||
+                    std::abs(velocities[i] - last_applied_velocities_[i]) > kEps)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
         
         // Function pointers for PositionConverter operations (polymorphic behavior)
         using GetLimitsFunction = bool(*)(const std::string&, double&, double&);
@@ -221,20 +264,55 @@ namespace marvin_ros2_control
                        Traits::PRODUCT_NAME, slave_id_, 
                        ModbusConfig::LinkerHand::THUMB_PITCH_REG, JOINT_COUNT, raw_str.c_str());
 
-            // Use Modbus function code 16 (Write Multiple Holding Registers) to write all positions at once
-            // Start address: 0x0000 (THUMB_PITCH_REG), count: JOINT_COUNT
-            return writeMultipleRegisters(slave_id_, 
-                                         ModbusConfig::LinkerHand::THUMB_PITCH_REG, 
-                                         raw_positions,
-                                         ModbusConfig::LinkerHand::WRITE_FUNCTION);
+            const bool write_dynamics = dynamicsChanged(torques, velocities);
+
+            if (write_dynamics)
+            {
+                // O6: 一次 FC16 写 0-17（位置+力矩+速度）；O7: 0-20
+                const uint16_t n_regs = fullInputRegisterCount();
+                std::vector<uint16_t> block(n_regs, 0);
+                for (size_t i = 0; i < JOINT_COUNT; ++i)
+                {
+                    block[i] = raw_positions[i];
+                    block[torqueRegStart() + i] = static_cast<uint16_t>(
+                        std::lround(std::clamp(torques[i], 0.0, 1.0) * 255.0));
+                    block[speedRegStart() + i] = static_cast<uint16_t>(
+                        std::lround(std::clamp(velocities[i], 0.0, 1.0) * 255.0));
+                }
+                if (!writeMultipleRegisters(slave_id_, ModbusConfig::LinkerHand::THUMB_PITCH_REG, block,
+                                            ModbusConfig::LinkerHand::WRITE_FUNCTION))
+                {
+                    return false;
+                }
+                last_applied_torques_ = torques;
+                last_applied_velocities_ = velocities;
+                pending_full_register_io_ = true;
+                RCLCPP_INFO(logger_,
+                            "LinkerHand %s: torque/velocity changed, FC16 write registers 0-%u",
+                            Traits::PRODUCT_NAME, static_cast<unsigned>(n_regs - 1));
+            }
+            else
+            {
+                if (!writeMultipleRegisters(slave_id_,
+                                            ModbusConfig::LinkerHand::THUMB_PITCH_REG,
+                                            raw_positions,
+                                            ModbusConfig::LinkerHand::WRITE_FUNCTION))
+                {
+                    return false;
+                }
+                pending_full_register_io_ = false;
+            }
+            return true;
         }
 
         bool getStatus() override
         {
-            // Read position registers (JOINT_COUNT registers)
-            return sendReadRequestAsync(slave_id_, 
-                                       ModbusConfig::LinkerHand::THUMB_PITCH_REG, 
-                                       static_cast<uint16_t>(JOINT_COUNT), 
+            const uint16_t count = pending_full_register_io_
+                ? fullInputRegisterCount()
+                : static_cast<uint16_t>(JOINT_COUNT);
+            return sendReadRequestAsync(slave_id_,
+                                       ModbusConfig::LinkerHand::THUMB_PITCH_REG,
+                                       count,
                                        ModbusConfig::LinkerHand::READ_FUNCTION);
         }
 
@@ -271,11 +349,13 @@ namespace marvin_ros2_control
                 ModbusConfig::LinkerHand::READ_FUNCTION
             );
             
-            // Check if we got enough registers
-            if (registers.size() < JOINT_COUNT)
+            const size_t expected_regs = pending_full_register_io_
+                ? static_cast<size_t>(fullInputRegisterCount()) : JOINT_COUNT;
+
+            if (registers.size() < expected_regs)
             {
                 RCLCPP_WARN(logger_, "LinkerHand %s: Expected %zu registers, got %zu (data_size=%zu, slave=0x%02X, func=0x%02X)",
-                           Traits::PRODUCT_NAME, JOINT_COUNT, registers.size(), data_size, 
+                           Traits::PRODUCT_NAME, expected_regs, registers.size(), data_size, 
                            slave_id_, ModbusConfig::LinkerHand::READ_FUNCTION);
                 if (data_size >= 2)
                 {
@@ -297,6 +377,11 @@ namespace marvin_ros2_control
                 double normalized = (255.0 - static_cast<double>(raw_pos)) / 255.0;
                 normalized = std::clamp(normalized, 0.0, 1.0);
                 positions.push_back(normalized);
+            }
+
+            if (pending_full_register_io_ && registers.size() >= expected_regs)
+            {
+                pending_full_register_io_ = false;
             }
             
             return true;
@@ -342,7 +427,9 @@ namespace marvin_ros2_control
 
         void resetState() override
         {
-            // Reset hand state if needed
+            last_applied_torques_.assign(JOINT_COUNT, std::numeric_limits<double>::quiet_NaN());
+            last_applied_velocities_.assign(JOINT_COUNT, std::numeric_limits<double>::quiet_NaN());
+            pending_full_register_io_ = false;
         }
 
         // Additional methods for individual finger control

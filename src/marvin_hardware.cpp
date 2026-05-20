@@ -2164,6 +2164,22 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                         gripper_joint_name_[i],
                         hardware_interface::HW_IF_POSITION,
                         &gripper_position_[i]));
+                if (i < gripper_velocity_.size())
+                {
+                    state_interfaces.push_back(
+                        std::make_shared<hardware_interface::StateInterface>(
+                            gripper_joint_name_[i],
+                            hardware_interface::HW_IF_VELOCITY,
+                            &gripper_velocity_[i]));
+                }
+                if (i < gripper_effort_.size())
+                {
+                    state_interfaces.push_back(
+                        std::make_shared<hardware_interface::StateInterface>(
+                            gripper_joint_name_[i],
+                            hardware_interface::HW_IF_EFFORT,
+                            &gripper_effort_[i]));
+                }
             }
         }
 
