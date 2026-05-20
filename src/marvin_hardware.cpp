@@ -741,6 +741,20 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
     bool update_left = (robot_arm_index_ == ARM_LEFT || robot_arm_index_ == ARM_DUAL);
     bool update_right = (robot_arm_index_ == ARM_RIGHT || robot_arm_index_ == ARM_DUAL);
 
+    const auto apply_tool_parameters = [&]() {
+        OnClearSet();
+        if (update_left) {
+            OnSetTool_A(leftkineParam_.data(), leftdynParam_.data());
+        }
+        if (update_right) {
+            OnSetTool_B(rightkineParam_.data(), rightdynParam_.data());
+        }
+        send_and_sleep();
+        RCLCPP_INFO(get_logger(), "Applied tool parameters before mode switch");
+    };
+
+    apply_tool_parameters();
+
     // Process based on selected mode
     if (mode == 1) {
         // Position mode
@@ -844,12 +858,15 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
 
         OnClearSet();
         clear_err();
-        if (is_left)
-        {
-            RCLCPP_INFO(get_logger(), "set tool load parameters");
-        }
         OnSetSend();
         usleep(100000);
+
+        OnClearSet();
+        set_tool(kine.data(), dyn.data());
+        OnSetSend();
+        usleep(100000);
+        RCLCPP_INFO(get_logger(), "Applied tool parameters on %s arm before mode switch",
+                    is_left ? "left" : "right");
 
         if (robot_ctrl_mode_ == "POSITION")
         {
