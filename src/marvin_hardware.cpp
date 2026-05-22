@@ -1625,10 +1625,10 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                 // std::this_thread::sleep_for(std::chrono::milliseconds(2));
                 continue;
             }
-            if (tool_idx < in_flight_type_.size() && in_flight_type_[tool_idx].load() == 2 &&
-                isModbusWriteAck(data_buf, static_cast<size_t>(received)))
+            if (received >= 2 && isModbusWriteAck(data_buf, static_cast<size_t>(received)))
             {
-                applyGripperWriteAckFromInFlight(tool_idx);
+                if (tool_idx < in_flight_type_.size() && in_flight_type_[tool_idx].load() == 2)
+                    applyGripperWriteAckFromInFlight(tool_idx);
                 continue;
             }
             if (received >= 2 && data_buf[1] == 0x04)
@@ -1752,6 +1752,10 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                             {
                                 last_gripper_command_[k] = write_cmd[static_cast<size_t>(li)];
                                 gripper_stopped_[k] = false;
+                                if (k < last_gripper_effort_ack_.size() && k < gripper_effort_command_.size())
+                                    last_gripper_effort_ack_[k] = gripper_effort_command_[k];
+                                if (k < last_gripper_velocity_ack_.size() && k < gripper_velocity_command_.size())
+                                    last_gripper_velocity_ack_[k] = gripper_velocity_command_[k];
                             }
                         }
                         if (tool_idx < hand_stabilized_.size() && tool_idx < hand_stable_count_.size())
@@ -2424,7 +2428,9 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                 }
             }
             if (any_changed)
-                RCLCPP_INFO(get_logger(), "shouldSendToolCommand: 需要发送新的写指令 tool_idx=%zu (hand)", tool_idx);
+            {
+                RCLCPP_DEBUG(get_logger(), "shouldSendToolCommand: hand write tool_idx=%zu", tool_idx);
+            }
             return any_changed;
         }
         size_t gi = gripperJointIndexForTool(tool_idx); // gripper index 
@@ -2443,7 +2449,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         if (!pos_changed && !trq_changed && !vel_changed)
             return false;
         write_cmd_out = { gripper_position_command_[gi] };
-        RCLCPP_INFO(get_logger(), "shouldSendToolCommand: 需要发送新的写指令 tool_idx=%zu (gripper)", tool_idx);
+        RCLCPP_DEBUG(get_logger(), "shouldSendToolCommand: gripper write tool_idx=%zu", tool_idx);
         return true;
     }
 
@@ -2652,6 +2658,9 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
     {
         auto* tool = toolAt(gripper_idx);
         if (!tool) return;
+
+        if (size >= 2 && isModbusWriteAck(data_buf, size))
+            return;
 
         auto* gripper = dynamic_cast<ModbusGripper*>(tool);
         if (gripper)

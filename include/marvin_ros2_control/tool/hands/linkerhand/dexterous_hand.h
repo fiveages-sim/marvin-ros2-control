@@ -214,11 +214,7 @@ namespace marvin_ros2_control
             // Only write position registers (0x0000-0x0005 for 6-DOF, 0x0000-0x0006 for 7-DOF)
             // Note: positions[] array order matches mapJointNameToIndex() return order, which should match Modbus register order
             std::vector<uint16_t> raw_positions(JOINT_COUNT, 0);
-            
-            // Log detailed joint information before conversion
-            RCLCPP_INFO(logger_, "LinkerHand %s (Slave ID: 0x%02X): Converting %zu joint positions", 
-                       Traits::PRODUCT_NAME, slave_id_, JOINT_COUNT);
-            
+
             for (size_t i = 0; i < JOINT_COUNT; ++i)
             {
                 // Get joint name using helper method
@@ -247,22 +243,10 @@ namespace marvin_ros2_control
                 uint16_t raw_value = static_cast<uint16_t>(255 - std::round(normalized * 255.0));
                 raw_positions[i] = raw_value;
                 
-                // Log each joint's conversion details
-                RCLCPP_INFO(logger_, "  Register[%zu] (%s): rad=%.6f (clamped from %.6f) -> normalized=%.6f -> raw=%u (0x%02X), limits=[%.4f, %.4f] rad, torque=%.4f, velocity=%.4f",
-                          i, joint_name.c_str(), clamped_rad, positions[i], normalized, raw_positions[i], raw_positions[i], lower, upper, torques[i], velocities[i]);
+                RCLCPP_DEBUG(logger_,
+                          "  Register[%zu] (%s): rad=%.4f -> raw=%u, torque=%.2f, velocity=%.2f",
+                          i, joint_name.c_str(), clamped_rad, raw_positions[i], torques[i], velocities[i]);
             }
-
-            // Summary log: all raw positions being sent
-            std::string raw_str = "Raw positions [";
-            for (size_t i = 0; i < JOINT_COUNT; ++i)
-            {
-                if (i > 0) raw_str += ", ";
-                raw_str += std::to_string(raw_positions[i]);
-            }
-            raw_str += "]";
-            RCLCPP_DEBUG(logger_, "LinkerHand %s: Sending Modbus FC16 command to slave 0x%02X, start_addr=0x%04X, %zu registers: %s", 
-                       Traits::PRODUCT_NAME, slave_id_, 
-                       ModbusConfig::LinkerHand::THUMB_PITCH_REG, JOINT_COUNT, raw_str.c_str());
 
             const bool write_dynamics = dynamicsChanged(torques, velocities);
 
@@ -287,9 +271,12 @@ namespace marvin_ros2_control
                 last_applied_torques_ = torques;
                 last_applied_velocities_ = velocities;
                 pending_full_register_io_ = true;
-                RCLCPP_INFO(logger_,
-                            "LinkerHand %s: torque/velocity changed, FC16 write registers 0-%u",
-                            Traits::PRODUCT_NAME, static_cast<unsigned>(n_regs - 1));
+                {
+                    static rclcpp::Clock kLogClock(RCL_STEADY_TIME);
+                    RCLCPP_INFO_THROTTLE(logger_, kLogClock, 2000,
+                                        "LinkerHand %s (0x%02X): FC16 write regs 0-%u (pos+torque+velocity)",
+                                        Traits::PRODUCT_NAME, slave_id_, static_cast<unsigned>(n_regs - 1));
+                }
             }
             else
             {
@@ -301,6 +288,24 @@ namespace marvin_ros2_control
                     return false;
                 }
                 pending_full_register_io_ = false;
+                if (ModbusIO::isDebugEnabled())
+                {
+                    std::string raw_str;
+                    for (size_t i = 0; i < JOINT_COUNT; ++i)
+                    {
+                        if (i > 0) raw_str += ", ";
+                        raw_str += std::to_string(raw_positions[i]);
+                    }
+                    RCLCPP_DEBUG(logger_, "LinkerHand %s (0x%02X): FC16 position write raw=[%s]",
+                                 Traits::PRODUCT_NAME, slave_id_, raw_str.c_str());
+                }
+                else
+                {
+                    static rclcpp::Clock kLogClock(RCL_STEADY_TIME);
+                    RCLCPP_INFO_THROTTLE(logger_, kLogClock, 2000,
+                                        "LinkerHand %s (0x%02X): FC16 position write (%zu joints)",
+                                        Traits::PRODUCT_NAME, slave_id_, JOINT_COUNT);
+                }
             }
             return true;
         }
@@ -354,13 +359,19 @@ namespace marvin_ros2_control
 
             if (registers.size() < expected_regs)
             {
-                RCLCPP_WARN(logger_, "LinkerHand %s: Expected %zu registers, got %zu (data_size=%zu, slave=0x%02X, func=0x%02X)",
-                           Traits::PRODUCT_NAME, expected_regs, registers.size(), data_size, 
-                           slave_id_, ModbusConfig::LinkerHand::READ_FUNCTION);
-                if (data_size >= 2)
+                const uint8_t actual_fc = (data_size >= 2) ? data[1] : 0;
+                if (actual_fc == ModbusConfig::LinkerHand::WRITE_FUNCTION)
                 {
-                    RCLCPP_WARN(logger_, "  Actual response: slave=0x%02X, func=0x%02X, byte_count=%u",
-                               data[0], data[1], data_size >= 3 ? data[2] : 0);
+                    RCLCPP_DEBUG(logger_,
+                                 "LinkerHand %s: ignored write ACK (FC 0x10) while expecting read",
+                                 Traits::PRODUCT_NAME);
+                }
+                else
+                {
+                    static rclcpp::Clock kReadWarnClock(RCL_STEADY_TIME);
+                    RCLCPP_WARN_THROTTLE(logger_, kReadWarnClock, 2000,
+                                        "LinkerHand %s: read expected %zu registers, got %zu (fc=0x%02X)",
+                                        Traits::PRODUCT_NAME, expected_regs, registers.size(), actual_fc);
                 }
                 return false;
             }
