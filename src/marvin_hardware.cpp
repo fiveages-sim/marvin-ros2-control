@@ -546,22 +546,17 @@ MarvinHardware::paramCallback(const std::vector<rclcpp::Parameter> & params)
             std::snprintf(name, sizeof(name), "BRAK%d", arm_index);
 
             OnClearSet();
-            if (release) {
-                // Match SDK demo: drop target state before forcing brake release.
-                if (is_left) OnSetTargetState_A(0); else OnSetTargetState_B(0);
-            }
+           
             OnSetIntPara(name, sdk_value);
             OnSetSend();
             usleep(100000);
 
+            if (is_left) left_brake_released_ = true;
+            else right_brake_released_ = true;
+
             RCLCPP_INFO(get_logger(), "%s arm brake: %s",
                         is_left ? "Left" : "Right",
                         release ? "BRAKE_RELEASE" : "BRAKE");
-
-            // After engaging brake, restore the operation mode requested by ctrl_mode for this arm.
-            if (!release) {
-                setArmCtrlInternal(arm_index);
-            }
             continue;
         }
 
@@ -584,6 +579,10 @@ MarvinHardware::paramCallback(const std::vector<rclcpp::Parameter> & params)
                 fsm_cmd.data = 2;  // HOLD
                 fsm_command_pub_->publish(fsm_cmd);
                 RCLCPP_INFO(get_logger(), "ctrl_mode=POWER_OFF: published fsm_command=2 (HOLD)");
+            }
+            if (mode != 4) {
+                if (robot_arm_index_ == ARM_LEFT || robot_arm_index_ == ARM_DUAL) left_brake_released_ = false;
+                if (robot_arm_index_ == ARM_RIGHT || robot_arm_index_ == ARM_DUAL) right_brake_released_ = false;
             }
         }
         else if (param.get_name() == "drag_mode") {
@@ -2038,6 +2037,26 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         const rclcpp_lifecycle::State& /*previous_state*/)
     {
         RCLCPP_INFO(get_logger(), "Deactivating Marvin Hardware Interface...");
+
+        if (hardware_connected_) {
+            const bool update_left = (robot_arm_index_ == ARM_LEFT || robot_arm_index_ == ARM_DUAL);
+            const bool update_right = (robot_arm_index_ == ARM_RIGHT || robot_arm_index_ == ARM_DUAL);
+            const auto ensure_brake = [this](int arm_index, bool is_left) {
+                char name[30] = {};
+                std::snprintf(name, sizeof(name), "BRAK%d", arm_index);
+                long value = 0;
+                OnGetIntPara(name, &value);
+                if (value != 1) {
+                    OnClearSet();
+                    OnSetIntPara(name, 1);
+                    OnSetSend();
+                    usleep(100000);
+                }
+            };
+            if (update_left) ensure_brake(ARM_LEFT, true);
+            if (update_right) ensure_brake(ARM_RIGHT, false);
+        }
+
         OnClearSet();
         if (robot_arm_index_ == ARM_LEFT)
         {
@@ -2896,20 +2915,28 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
 
     bool MarvinHardware::writeToHardware(std::vector<double>& hw_commands)
     {
+        if (robot_ctrl_mode_ == "POWER_OFF") {
+            return true;
+        }
+
         bool result = true;
         OnClearSet();
         if (robot_arm_index_ == ARM_LEFT)
         {
-            result = OnSetJointCmdPos_A(hw_commands.data());
+            if (!left_brake_released_)
+                result = OnSetJointCmdPos_A(hw_commands.data());
         }
         else if (robot_arm_index_ == ARM_RIGHT)
         {
-            result = OnSetJointCmdPos_B(hw_commands.data());
+            if (!right_brake_released_)
+                result = OnSetJointCmdPos_B(hw_commands.data());
         }
         else if (robot_arm_index_ == ARM_DUAL)
         {
-            result = OnSetJointCmdPos_A(hw_commands.data());
-            result = result && OnSetJointCmdPos_B(hw_commands.data() + 7);
+            if (!left_brake_released_)
+                result = OnSetJointCmdPos_A(hw_commands.data());
+            if (!right_brake_released_)
+                result = OnSetJointCmdPos_B(hw_commands.data() + 7) && result;
         }
         OnSetSend();
         return result;

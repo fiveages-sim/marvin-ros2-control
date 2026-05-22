@@ -43,7 +43,7 @@ colcon build --packages-up-to marvin_ros2_control --symlink-install
 
 - **控制模式**
   - `ctrl_mode`：`POSITION` / `JOINT_IMPEDANCE` / `CART_IMPEDANCE` / `POWER_OFF`
-    - `POWER_OFF`：左右臂统一下使能（`OnSetTargetState_A/B(0)`），并自动发布 `/fsm_command=2` 将 FSM 切回 HOLD
+    - `POWER_OFF`：左右臂统一下使能（`OnSetTargetState_A/B(0)`），不下发关节指令，并发布 `/fsm_command=2` 切回 HOLD
 - **阻抗与拖动相关**
   - `joint_k_gains`（double array，长度 7）
   - `joint_d_gains`（double array，长度 7）
@@ -55,8 +55,8 @@ colcon build --packages-up-to marvin_ros2_control --symlink-install
   - `max_joint_speed`（double）
   - `max_joint_acceleration`（double）
 - **抱闸 / 松闸（急停后手动调整姿态，左右臂独立）**
-  - `left_brake_release`（bool）：左臂 `true` 强制松闸（BRAK0=2），`false` 强制抱闸（BRAK0=1）并恢复 `ctrl_mode` 对应运行模式
-  - `right_brake_release`（bool）：右臂 `true` 强制松闸（BRAK1=2），`false` 强制抱闸（BRAK1=1）并恢复 `ctrl_mode` 对应运行模式
+  - `left_brake_release`（bool）：左臂 `true` 松闸（BRAK0=2），`false` 抱闸（BRAK0=1）；期间暂停 A 臂关节指令，恢复需 `ros2 param set ... ctrl_mode POSITION`
+  - `right_brake_release`（bool）：右臂 `true` 松闸（BRAK1=2），`false` 抱闸（BRAK1=1）；恢复方式同上
 - **工具/夹爪负载参数**
   - `left_kine_param`（double array，长度 6）
   - `left_dyn_param`（double array，长度 10）
@@ -79,13 +79,16 @@ ros2 param set /m6_ccs_system joint_d_gains "[0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4]
 ```bash
 # 左臂松闸（OnSetIntPara BRAK0=2）
 ros2 param set /m6_ccs_system left_brake_release true
-# 左臂手动调整完毕后抱闸（BRAK0=1），并按当前 ctrl_mode 重新进入位置/阻抗模式
+# 左臂手动调整完毕后抱闸（BRAK0=1），再恢复控制：
 ros2 param set /m6_ccs_system left_brake_release false
+ros2 param set /m6_ccs_system ctrl_mode POSITION
 
 # 右臂同理（OnSetIntPara BRAK1）
 ros2 param set /m6_ccs_system right_brake_release true
 ros2 param set /m6_ccs_system right_brake_release false
 ```
+
+> `ros2_control` 退出（硬件 `on_deactivate`）时会 `OnGetIntPara` 检查 `BRAK0/BRAK1`，未抱闸（`!=1`）则强制 `=1`，再下使能并断开连接。
 
 统一下使能 / 上使能示例（左右臂都生效）：
 

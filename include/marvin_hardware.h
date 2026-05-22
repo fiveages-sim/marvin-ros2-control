@@ -132,7 +132,9 @@ private:
         bool readFromHardware(bool initial_frame);
         bool writeToHardware(std::vector<double>& hw_commands);
         void setArmCtrlInternal(int arm_index);
-                
+        bool left_brake_released_ = false;
+        bool right_brake_released_ = false;
+
         // Helper method to create tool (gripper or hand) based on type
         // tool_index: 0 for left hand (in dual arm) or single left arm, 1 for right hand (in dual arm) or single right arm
         std::unique_ptr<gripper_hardware_common::GripperBase> createTool(
