@@ -539,6 +539,15 @@ MarvinHardware::paramCallback(const std::vector<rclcpp::Parameter> & params)
                 continue;
             }
 
+            if (robot_ctrl_mode_ != "POWER_OFF") {
+                result.successful = false;
+                result.reason = "ctrl_mode must be POWER_OFF before brake operation (current: "
+                                  + robot_ctrl_mode_ + ")";
+                RCLCPP_WARN(get_logger(), "Rejected %s: %s",
+                            param.get_name().c_str(), result.reason.c_str());
+                return result;
+            }
+
             const bool release = param.as_bool();
             const long sdk_value = release ? 2 : 1;  // 2=松闸, 1=抱闸
             const int arm_index = is_left ? ARM_LEFT : ARM_RIGHT;
@@ -546,13 +555,16 @@ MarvinHardware::paramCallback(const std::vector<rclcpp::Parameter> & params)
             std::snprintf(name, sizeof(name), "BRAK%d", arm_index);
 
             OnClearSet();
-           
+            if (release) {
+                if (is_left) OnSetTargetState_A(0);
+                else OnSetTargetState_B(0);
+            }
             OnSetIntPara(name, sdk_value);
             OnSetSend();
             usleep(100000);
 
-            if (is_left) left_brake_released_ = true;
-            else right_brake_released_ = true;
+            if (is_left) left_brake_released_ = release;
+            else right_brake_released_ = release;
 
             RCLCPP_INFO(get_logger(), "%s arm brake: %s",
                         is_left ? "Left" : "Right",
@@ -569,6 +581,25 @@ MarvinHardware::paramCallback(const std::vector<rclcpp::Parameter> & params)
         if (param.get_name() == "ctrl_mode") {
             std::string ctrl_mode_str = param.as_string();
             const int mode = ctrlModeStringToMode(ctrl_mode_str, get_logger());
+            if (mode != 4) {
+                const bool left_released = (robot_arm_index_ == ARM_LEFT || robot_arm_index_ == ARM_DUAL)
+                    && left_brake_released_;
+                const bool right_released = (robot_arm_index_ == ARM_RIGHT || robot_arm_index_ == ARM_DUAL)
+                    && right_brake_released_;
+                if (left_released || right_released) {
+                    std::string arms;
+                    if (left_released) arms += "left";
+                    if (right_released) {
+                        if (!arms.empty()) arms += "+";
+                        arms += "right";
+                    }
+                    result.successful = false;
+                    result.reason = "brake released on " + arms + " arm(s), only POWER_OFF is allowed";
+                    RCLCPP_WARN(get_logger(), "Rejected ctrl_mode=%s: %s",
+                                ctrl_mode_str.c_str(), result.reason.c_str());
+                    return result;
+                }
+            }
             ctrl_mode = modeToCtrlModeString(mode);
             robot_ctrl_mode_ = ctrl_mode;
             need_config_update = true;
@@ -884,15 +915,19 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         RCLCPP_INFO(get_logger(), "Set to cartesian impedance mode with KD=[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f], speed=%.1f, acceleration=%.1f",
                     K[0], K[1], K[2], K[3], K[4], K[5], K[6], max_joint_speed, max_joint_acceleration);
     } else if (mode == 4) {
-        // POWER_OFF: both configured arms 下使能 (target state 0)
-        OnClearSet();
+        // POWER_OFF: 下使能；A/B 分两次下发，避免同包卡顿
         if (update_left) {
+            OnClearSet();
             OnSetTargetState_A(0);
+            OnSetSend();
+            usleep(100000);
         }
         if (update_right) {
+            OnClearSet();
             OnSetTargetState_B(0);
+            OnSetSend();
+            usleep(100000);
         }
-        send_and_sleep();
         RCLCPP_INFO(get_logger(), "Set to POWER_OFF mode (左右臂下使能)");
     }
 }
@@ -2057,24 +2092,32 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             if (update_right) ensure_brake(ARM_RIGHT, false);
         }
 
-        OnClearSet();
         if (robot_arm_index_ == ARM_LEFT)
         {
+            OnClearSet();
             OnSetDragSpace_A(0);
             OnSetTargetState_A(0);
+            OnSetSend();
+            usleep(100000);
         }
         else if (robot_arm_index_ == ARM_RIGHT)
         {
+            OnClearSet();
             OnSetTargetState_B(0);
+            OnSetSend();
+            usleep(100000);
         }
         else if (robot_arm_index_ == ARM_DUAL)
         {
+            OnClearSet();
             OnSetTargetState_A(0);
+            OnSetSend();
+            usleep(100000);
+            OnClearSet();
             OnSetTargetState_B(0);
+            OnSetSend();
+            usleep(100000);
         }
-
-        OnSetSend();
-        usleep(100000);
 
         if (hardware_connected_)
         {
