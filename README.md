@@ -43,7 +43,8 @@ colcon build --packages-up-to marvin_ros2_control --symlink-install
 
 - **控制模式**
   - `ctrl_mode`：`POSITION` / `JOINT_IMPEDANCE` / `CART_IMPEDANCE` / `POWER_OFF`
-    - `POWER_OFF`：左右臂统一下使能（`OnSetTargetState_A/B(0)`），不下发关节指令，并发布 `/fsm_command=2` 切回 HOLD
+    - `POWER_OFF`：发布 `/fsm_command=2`（HOLD），SDK 下使能（保持连接）；控制器 lifecycle 由外部管理（见下方操作流程）
+    - `POSITION` / `JOINT_IMPEDANCE` / `CART_IMPEDANCE`：发布 `/fsm_command=3`（OCS2），SDK 上使能
 - **阻抗与拖动相关**
   - `joint_k_gains`（double array，长度 7）
   - `joint_d_gains`（double array，长度 7）
@@ -93,11 +94,16 @@ ros2 param set /m6_ccs_system right_brake_release false
 统一下使能 / 上使能示例（左右臂都生效）：
 
 ```bash
-# 左右臂统一下使能（OnSetTargetState_A/B(0)）
+# 1. 先 deactivate 控制器（FSM 冻结，update() 停止）
+ros2 control switch_controllers --deactivate ocs2_wbc_controller
+# 2. 再下使能硬件
 ros2 param set /m6_ccs_system ctrl_mode POWER_OFF
 
-# 切回位置模式（按 ctrl_mode 重新上使能）
+# 恢复：
+# 1. 先上使能硬件
 ros2 param set /m6_ccs_system ctrl_mode POSITION
+# 2. 再 activate 控制器
+ros2 control switch_controllers --activate ocs2_wbc_controller
 ```
 
 > 注：以上示例中的节点名 `/m6_ccs_system` 对应 m6_ccs 描述包默认配置；其他描述包请根据 `ros2_control` 启动方式确认 controller_manager 所在节点名，可用 `ros2 param list` 查找包含上述参数的节点。

@@ -80,7 +80,8 @@ private:
         int device_port_ = 8080;
         std::string robot_arm_config_;  // "LEFT", "RIGHT", "DUAL"
         int robot_arm_index_ = 0;       // 0=LEFT, 1=RIGHT, 2=DUAL (在初始化时设定)
-        std::string robot_ctrl_mode_;   // "POSITION", "JOINT_IMPEDANCE", "CART_IMPEDANCE"
+        std::string robot_ctrl_mode_;   // "POSITION", "JOINT_IMPEDANCE", "CART_IMPEDANCE", "POWER_OFF"
+        std::string last_active_ctrl_mode_ = "POSITION";
         int previous_message_frame_ = 0;
         DCSS frame_data_;
 

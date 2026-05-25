@@ -222,7 +222,6 @@ namespace marvin_ros2_control
                      [](const std::string& s, bool def) { return parseBoolLoose(s, def); });
         ensure_param("right_brake_release", false, hw_find("right_brake_release"),
                      [](const std::string& s, bool def) { return parseBoolLoose(s, def); });
-
         // Gripper tool parameters - declared as std::vector<double> (array of doubles)
         // kineParam: kinematic parameters (6 values), dynPara: dynamic parameters (10 values)
         ensure_double_array_sized("left_kine_param", kDefaultLeftKineParam, 6);
@@ -602,14 +601,16 @@ MarvinHardware::paramCallback(const std::vector<rclcpp::Parameter> & params)
             }
             ctrl_mode = modeToCtrlModeString(mode);
             robot_ctrl_mode_ = ctrl_mode;
+            if (mode != 4) last_active_ctrl_mode_ = ctrl_mode;
             need_config_update = true;
             ctrl_mode_changed = true;
             RCLCPP_INFO(get_logger(), "ctrl_mode parameter changed to: %s", ctrl_mode.c_str());
-            if (mode == 4 && fsm_command_pub_) {
-                std_msgs::msg::Int32 fsm_cmd;
-                fsm_cmd.data = 2;  // HOLD
-                fsm_command_pub_->publish(fsm_cmd);
-                RCLCPP_INFO(get_logger(), "ctrl_mode=POWER_OFF: published fsm_command=2 (HOLD)");
+            if (mode == 4) {
+                on_deactivate(rclcpp_lifecycle::State{});
+                need_config_update = false;
+            } else {
+                on_activate(rclcpp_lifecycle::State{});
+                need_config_update = false;
             }
             if (mode != 4) {
                 if (robot_arm_index_ == ARM_LEFT || robot_arm_index_ == ARM_DUAL) left_brake_released_ = false;
@@ -729,14 +730,12 @@ MarvinHardware::paramCallback(const std::vector<rclcpp::Parameter> & params)
         }
     }
 
-    // Apply configuration if needed
     if (need_config_update) {
         const int mode = ctrl_mode.empty() ? -1 : ctrlModeStringToMode(ctrl_mode, get_logger());
         applyRobotConfiguration(mode, drag_mode, cart_type,
                               max_joint_speed, max_joint_acceleration,
                               joint_k_gains, joint_d_gains, cart_k_gains, cart_d_gains);
-        
-        // If ctrl_mode changed, update the arm control mode
+
         if (ctrl_mode_changed) {
             if (robot_arm_index_ == ARM_LEFT || robot_arm_index_ == ARM_DUAL) {
                 setArmCtrlInternal(ARM_LEFT);
@@ -826,20 +825,6 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
     // Determine which arms to update (统一使用 arm_type / robot_arm_index_)
     bool update_left = (robot_arm_index_ == ARM_LEFT || robot_arm_index_ == ARM_DUAL);
     bool update_right = (robot_arm_index_ == ARM_RIGHT || robot_arm_index_ == ARM_DUAL);
-
-    const auto apply_tool_parameters = [&]() {
-        OnClearSet();
-        if (update_left) {
-            OnSetTool_A(leftkineParam_.data(), leftdynParam_.data());
-        }
-        if (update_right) {
-            OnSetTool_B(rightkineParam_.data(), rightdynParam_.data());
-        }
-        send_and_sleep();
-        RCLCPP_INFO(get_logger(), "Applied tool parameters before mode switch");
-    };
-
-    apply_tool_parameters();
 
     // Process based on selected mode
     if (mode == 1) {
@@ -962,16 +947,10 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         OnSetSend();
         usleep(100000);
 
-        OnClearSet();
-        set_tool(kine.data(), dyn.data());
-        OnSetSend();
-        usleep(100000);
-        RCLCPP_INFO(get_logger(), "Applied tool parameters on %s arm before mode switch",
-                    is_left ? "left" : "right");
-
         if (robot_ctrl_mode_ == "POSITION")
         {
             OnClearSet();
+            set_tool(kine.data(), dyn.data());
             set_target_state(1); // 1:position mode
             OnSetSend();
             usleep(100000);
@@ -986,8 +965,8 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         else
         {
             OnClearSet();
-            set_target_state(3); // 3:torque mode
             set_tool(kine.data(), dyn.data());
+            set_target_state(3); // 3:torque mode
 
             if (robot_ctrl_mode_ == "JOINT_IMPEDANCE")
             {
@@ -1309,7 +1288,22 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         const rclcpp_lifecycle::State& /*previous_state*/)
     {
         RCLCPP_INFO(get_logger(), "Activating Marvin Hardware Interface...");
-        // Connect to real hardware
+
+        if (hardware_connected_) {
+            robot_ctrl_mode_ = last_active_ctrl_mode_;
+            int mode = ctrlModeStringToMode(robot_ctrl_mode_, get_logger());
+            RCLCPP_INFO(get_logger(), "Already connected, re-enabling arms (resume to %s)", robot_ctrl_mode_.c_str());
+            applyRobotConfiguration(mode, -1, -1, -1.0, -1.0,
+                                    std::vector<double>(), std::vector<double>(),
+                                    std::vector<double>(), std::vector<double>());
+            if (robot_arm_index_ == ARM_LEFT || robot_arm_index_ == ARM_DUAL)
+                setArmCtrlInternal(ARM_LEFT);
+            if (robot_arm_index_ == ARM_RIGHT || robot_arm_index_ == ARM_DUAL)
+                setArmCtrlInternal(ARM_RIGHT);
+            return hardware_interface::CallbackReturn::SUCCESS;
+        }
+
+        // First-time activation: connect to real hardware
         if (!connectToHardware())
         {
             RCLCPP_ERROR(get_logger(), "Failed to connect to Marvin hardware");
@@ -2071,26 +2065,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
     hardware_interface::CallbackReturn MarvinHardware::on_deactivate(
         const rclcpp_lifecycle::State& /*previous_state*/)
     {
-        RCLCPP_INFO(get_logger(), "Deactivating Marvin Hardware Interface...");
-
-        if (hardware_connected_) {
-            const bool update_left = (robot_arm_index_ == ARM_LEFT || robot_arm_index_ == ARM_DUAL);
-            const bool update_right = (robot_arm_index_ == ARM_RIGHT || robot_arm_index_ == ARM_DUAL);
-            const auto ensure_brake = [this](int arm_index, bool is_left) {
-                char name[30] = {};
-                std::snprintf(name, sizeof(name), "BRAK%d", arm_index);
-                long value = 0;
-                OnGetIntPara(name, &value);
-                if (value != 1) {
-                    OnClearSet();
-                    OnSetIntPara(name, 1);
-                    OnSetSend();
-                    usleep(100000);
-                }
-            };
-            if (update_left) ensure_brake(ARM_LEFT, true);
-            if (update_right) ensure_brake(ARM_RIGHT, false);
-        }
+        RCLCPP_INFO(get_logger(), "Deactivating Marvin Hardware Interface (power off, keep connection)...");
 
         if (robot_arm_index_ == ARM_LEFT)
         {
@@ -2119,10 +2094,8 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             usleep(100000);
         }
 
-        if (hardware_connected_)
-        {
-            disconnectFromHardware();
-        }
+        robot_ctrl_mode_ = "POWER_OFF";
+
         return hardware_interface::CallbackReturn::SUCCESS;
     }
 
@@ -2131,8 +2104,38 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
     {
         RCLCPP_INFO(get_logger(), "Shutting down Marvin Hardware Interface...");
 
-        if (hardware_connected_)
-        {
+        if (hardware_connected_) {
+            const bool update_left = (robot_arm_index_ == ARM_LEFT || robot_arm_index_ == ARM_DUAL);
+            const bool update_right = (robot_arm_index_ == ARM_RIGHT || robot_arm_index_ == ARM_DUAL);
+            const auto ensure_brake = [this](int arm_index) {
+                char name[30] = {};
+                std::snprintf(name, sizeof(name), "BRAK%d", arm_index);
+                long value = 0;
+                OnGetIntPara(name, &value);
+                if (value != 1) {
+                    OnClearSet();
+                    OnSetIntPara(name, 1);
+                    OnSetSend();
+                    usleep(100000);
+                    RCLCPP_WARN(get_logger(), "Emergency brake engaged: %s", name);
+                }
+            };
+            if (update_left) ensure_brake(ARM_LEFT);
+            if (update_right) ensure_brake(ARM_RIGHT);
+
+            if (robot_arm_index_ == ARM_LEFT || robot_arm_index_ == ARM_DUAL) {
+                OnClearSet();
+                OnSetTargetState_A(0);
+                OnSetSend();
+                usleep(100000);
+            }
+            if (robot_arm_index_ == ARM_RIGHT || robot_arm_index_ == ARM_DUAL) {
+                OnClearSet();
+                OnSetTargetState_B(0);
+                OnSetSend();
+                usleep(100000);
+            }
+
             disconnectFromHardware();
         }
 
@@ -2142,11 +2145,40 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
     hardware_interface::CallbackReturn MarvinHardware::on_error(
         const rclcpp_lifecycle::State& /*previous_state*/)
     {
-        RCLCPP_ERROR(get_logger(), "Error in Marvin Hardware Interface");
+        RCLCPP_ERROR(get_logger(), "Error in Marvin Hardware Interface, emergency brake...");
 
-        // Attempt to safely disconnect from hardware
-        if (hardware_connected_)
-        {
+        if (hardware_connected_) {
+            const bool update_left = (robot_arm_index_ == ARM_LEFT || robot_arm_index_ == ARM_DUAL);
+            const bool update_right = (robot_arm_index_ == ARM_RIGHT || robot_arm_index_ == ARM_DUAL);
+            const auto ensure_brake = [this](int arm_index) {
+                char name[30] = {};
+                std::snprintf(name, sizeof(name), "BRAK%d", arm_index);
+                long value = 0;
+                OnGetIntPara(name, &value);
+                if (value != 1) {
+                    OnClearSet();
+                    OnSetIntPara(name, 1);
+                    OnSetSend();
+                    usleep(100000);
+                    RCLCPP_WARN(get_logger(), "Emergency brake engaged: %s", name);
+                }
+            };
+            if (update_left) ensure_brake(ARM_LEFT);
+            if (update_right) ensure_brake(ARM_RIGHT);
+
+            if (robot_arm_index_ == ARM_LEFT || robot_arm_index_ == ARM_DUAL) {
+                OnClearSet();
+                OnSetTargetState_A(0);
+                OnSetSend();
+                usleep(100000);
+            }
+            if (robot_arm_index_ == ARM_RIGHT || robot_arm_index_ == ARM_DUAL) {
+                OnClearSet();
+                OnSetTargetState_B(0);
+                OnSetSend();
+                usleep(100000);
+            }
+
             disconnectFromHardware();
         }
 
