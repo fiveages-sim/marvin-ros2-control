@@ -149,14 +149,6 @@ target_link_directories(${PROJECT_NAME} PRIVATE
     ${LIB_CONTROL_DIR}
 )
 
-ament_target_dependencies(${PROJECT_NAME}
-        hardware_interface
-        rclcpp
-        rclcpp_lifecycle
-        pluginlib
-        gripper_hardware_common
-)
-
 # # Detect architecture and set library path
 # if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
 #     set(XCORE_LIB_DIR "aarch64")
@@ -165,7 +157,12 @@ ament_target_dependencies(${PROJECT_NAME}
 # endif()
 
 # # Link xCoreSDK libraries
-target_link_libraries(${PROJECT_NAME}
+target_link_libraries(${PROJECT_NAME} PUBLIC
+        ${hardware_interface_TARGETS}
+        ${rclcpp_TARGETS}
+        ${rclcpp_lifecycle_TARGETS}
+        ${pluginlib_TARGETS}
+        gripper_hardware_common::gripper_hardware_common
         ${EXTERNAL_KINEMATICSO}
         MarvinSDK
         pthread
@@ -195,9 +192,10 @@ if(EXISTS "${MARVIN_EXAMPLE_SRC}")
         INSTALL_RPATH "$ORIGIN;$ORIGIN/../lib"
         INSTALL_RPATH_USE_LINK_PATH TRUE
     )
-    ament_target_dependencies(marvin_gripper_init_example rclcpp gripper_hardware_common)
     target_link_libraries(marvin_gripper_init_example
         ${PROJECT_NAME}
+        ${rclcpp_TARGETS}
+        gripper_hardware_common::gripper_hardware_common
         ${EXTERNAL_KINEMATICSO}
         MarvinSDK
         pthread
@@ -230,9 +228,10 @@ if(EXISTS "${MARVIN_HAND_EXAMPLE_SRC}")
         INSTALL_RPATH "$ORIGIN;$ORIGIN/../lib"
         INSTALL_RPATH_USE_LINK_PATH TRUE
     )
-    ament_target_dependencies(marvin_hand_init_example rclcpp gripper_hardware_common)
     target_link_libraries(marvin_hand_init_example
         ${PROJECT_NAME}
+        ${rclcpp_TARGETS}
+        gripper_hardware_common::gripper_hardware_common
         ${EXTERNAL_KINEMATICSO}
         MarvinSDK
         pthread
@@ -320,7 +319,7 @@ if (BUILD_TESTING)
     ament_lint_auto_find_test_dependencies()
 endif ()
 
-ament_export_dependencies(${dependencies})
+ament_export_dependencies(hardware_interface rclcpp rclcpp_lifecycle pluginlib gripper_hardware_common)
 ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
 
 ament_package()
