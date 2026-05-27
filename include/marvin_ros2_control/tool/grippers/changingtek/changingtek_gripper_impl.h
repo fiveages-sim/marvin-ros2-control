@@ -23,9 +23,6 @@ namespace marvin_ros2_control
     template<typename Config>
     bool ChangingtekGripper<Config>::initialize()
     {
-        acceleration_set_ = true;
-        deceleration_set_ = true;
-        
         bool result = writeSingleRegister(Config::SLAVE_ID, Config::INIT_REG_ADDR, Config::POWER_ON,
                                         Config::WRITE_SINGLE_FUNCTION);
         RCLCPP_INFO(logger_, "Initializing Changingtek Gripper (slave: 0x%02X)", Config::SLAVE_ID);
@@ -62,29 +59,22 @@ namespace marvin_ros2_control
                                        Config::WRITE_FUNCTION) && result;
             
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
-        // Configure acceleration if not set
         if (!acceleration_set_)
         {
             result = writeSingleRegister(Config::SLAVE_ID, Config::ACCELERATION_REG, Config::DEFAULT_ACCELERATION,
                                         Config::WRITE_SINGLE_FUNCTION) && result;
             acceleration_set_ = true;
-            
-            // Write velocity
-            result = writeSingleRegister(Config::SLAVE_ID, Config::VELOCITY_REG, vel_value,
-                                        Config::WRITE_SINGLE_FUNCTION) && result;
-            
-            // Write torque
-            result = writeSingleRegister(Config::SLAVE_ID, Config::TORQUE_REG, trq_value,
-                                        Config::WRITE_SINGLE_FUNCTION) && result;
         }
-        
-        // Configure deceleration if not set
         if (!deceleration_set_)
         {
             result = writeSingleRegister(Config::SLAVE_ID, Config::DECELERATION_REG, Config::DEFAULT_DECELERATION,
                                         Config::WRITE_SINGLE_FUNCTION) && result;
             deceleration_set_ = true;
         }
+        result = writeSingleRegister(Config::SLAVE_ID, Config::VELOCITY_REG, vel_value,
+                                    Config::WRITE_SINGLE_FUNCTION) && result;
+        result = writeSingleRegister(Config::SLAVE_ID, Config::TORQUE_REG, trq_value,
+                                    Config::WRITE_SINGLE_FUNCTION) && result;
         // Trigger movement
         result = writeSingleRegister(Config::SLAVE_ID, Config::TRIGGER_REG_ADDR, Config::TRIGGER_VALUE,
                                     Config::WRITE_SINGLE_FUNCTION) && result;
