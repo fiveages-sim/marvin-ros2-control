@@ -22,6 +22,7 @@
 #include "marvin_ros2_control/tool/grippers/changingtek/changingtek_gripper.h"
 #include "marvin_ros2_control/tool/grippers/jodell/jd_gripper.h"
 #include "marvin_ros2_control/tool/hands/linkerhand/dexterous_hand.h"
+#include "marvin_ros2_control/tool/hands/inspire/inspire_hand.h"
 
 using namespace gripper_hardware_common;
 
@@ -953,6 +954,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         // Also support short forms: O7, O6, L6
         static const std::set<std::string> hand_types = {
             "LINKERHAND_O7", "LINKERHAND_O6", "LINKERHAND_L6",
+            "INSPIRE_RH56E2", "RH56E2",
             "O7", "O6", "L6"
         };
         
@@ -974,7 +976,17 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         if (is_hand_type)
         {
             // Extract hand model from type string and create corresponding hand object
-            if (gripper_type_.find("O7") != std::string::npos || gripper_type_ == "O7")
+            if (gripper_type_.find("INSPIRE") != std::string::npos ||
+                gripper_type_.find("RH56E2") != std::string::npos)
+            {
+                hand_model = "RH56E2";
+                RCLCPP_INFO(get_logger(), "Creating Inspire RH56E2 (6-DOF, %s hand, slave: %u)",
+                           is_left_hand ? "left" : "right",
+                           is_left_hand ? 2 : 1);
+                return std::make_unique<marvin_ros2_control::InspireHandRH56E2>(
+                    clear_485, send_485, get_ch_data, is_left_hand);
+            }
+            else if (gripper_type_.find("O7") != std::string::npos || gripper_type_ == "O7")
             {
                 hand_model = "O7";
                 RCLCPP_INFO(get_logger(), "Creating LinkerHand O7 (7-DOF, %s hand, slave: 0x%02X)", 
@@ -1106,6 +1118,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         // Also support short forms: O7, O6, L6
         static const std::set<std::string> hand_types = {
             "LINKERHAND_O7", "LINKERHAND_O6", "LINKERHAND_L6",
+            "INSPIRE_RH56E2", "RH56E2",
             "O7", "O6", "L6"
         };
         // Gripper types: JD, Changingtek variants
@@ -1121,7 +1134,8 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         {
             is_hand_type = true;
         }
-        else if (gripper_type_.find("LINKERHAND") != std::string::npos || 
+        else if (gripper_type_.find("LINKERHAND") != std::string::npos ||
+                 gripper_type_.find("INSPIRE") != std::string::npos ||
                  (gripper_type_.find("HAND") != std::string::npos && 
                   gripper_type_.find("GRIPPER") == std::string::npos))
         {
