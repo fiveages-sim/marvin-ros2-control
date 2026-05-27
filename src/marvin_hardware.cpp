@@ -1290,6 +1290,22 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         RCLCPP_INFO(get_logger(), "Activating Marvin Hardware Interface...");
 
         if (hardware_connected_) {
+            // Resume from POWER_OFF: re-engage brake if it was released (via existing brake params)
+            if (robot_arm_index_ == ARM_LEFT || robot_arm_index_ == ARM_DUAL) {
+                const bool param_released = node_->has_parameter("left_brake_release")
+                    && node_->get_parameter("left_brake_release").as_bool();
+                if (left_brake_released_ || param_released) {
+                    node_->set_parameter(rclcpp::Parameter("left_brake_release", false));
+                }
+            }
+            if (robot_arm_index_ == ARM_RIGHT || robot_arm_index_ == ARM_DUAL) {
+                const bool param_released = node_->has_parameter("right_brake_release")
+                    && node_->get_parameter("right_brake_release").as_bool();
+                if (right_brake_released_ || param_released) {
+                    node_->set_parameter(rclcpp::Parameter("right_brake_release", false));
+                }
+            }
+
             robot_ctrl_mode_ = last_active_ctrl_mode_;
             int mode = ctrlModeStringToMode(robot_ctrl_mode_, get_logger());
             RCLCPP_INFO(get_logger(), "Already connected, re-enabling arms (resume to %s)", robot_ctrl_mode_.c_str());
