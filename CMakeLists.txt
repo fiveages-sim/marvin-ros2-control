@@ -100,7 +100,8 @@ endif()
 # build controlSDK
 add_custom_command(
     OUTPUT ${LIB_CONTROL_DIR}/libMarvinSDK.so
-    COMMAND make -f makefile libMarvinSDK.so
+    COMMAND ${CMAKE_COMMAND} -E env --unset=MAKEFLAGS
+            ${CMAKE_MAKE_PROGRAM} -f makefile libMarvinSDK.so
     WORKING_DIRECTORY ${LIB_CONTROL_DIR}
     COMMENT "Building Marvin SDK with Makefile"
 )

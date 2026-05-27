@@ -114,7 +114,7 @@ static bool readAndPrintToolStatus(
     const char* label)
 {
     if (!gripper || !get_ch_data) return false;
-    // clear_ch();
+    (void)clear_ch;
     std::this_thread::sleep_for(std::chrono::milliseconds(1000));
     gripper->getStatus();
     std::this_thread::sleep_for(std::chrono::milliseconds(10));

@@ -95,8 +95,9 @@ namespace marvin_ros2_control
         
         // Print received Modbus message
         char hex_str[512] = {0};
-        int pos = 0;
-        for (size_t i = 0; i < data_size && i < 256 && pos < sizeof(hex_str) - 3; i++)
+        size_t pos = 0;
+        constexpr size_t hex_str_limit = sizeof(hex_str) - 3;
+        for (size_t i = 0; i < data_size && i < 256 && pos < hex_str_limit; i++)
         {
             pos += snprintf(hex_str + pos, sizeof(hex_str) - pos, "%02X ", data[i]);
         }
