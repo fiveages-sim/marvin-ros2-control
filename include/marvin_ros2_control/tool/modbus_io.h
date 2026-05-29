@@ -19,6 +19,7 @@ namespace marvin_ros2_control
     using GetChDataFunc = long(*)(unsigned char*, long*);
 
     // Constants
+    constexpr long CANFD_CHANNEL = 1;
     constexpr long COM1_CHANNEL = 2;
     constexpr size_t MAX_MODBUS_REGISTERS = 125;
     constexpr size_t MAX_BUFFER_SIZE = 256;
@@ -77,4 +78,3 @@ namespace marvin_ros2_control
         static std::atomic<bool> debug_enabled_;
     };
 } // namespace marvin_ros2_control
-

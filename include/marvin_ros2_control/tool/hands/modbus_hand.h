@@ -49,9 +49,12 @@ namespace marvin_ros2_control
         virtual bool processReadResponse(const uint8_t* data, size_t data_size,
                                         std::vector<double>& positions) = 0;
 
+        // Marvin end-effector communication channel.
+        // 1: CAN/CANFD, 2: COM1, 3: COM2.
+        virtual long communicationChannel() const { return COM1_CHANNEL; }
+
     protected:
         // Convenience methods that use ModbusIO (inherited from ModbusIO)
         // These are available directly without qualification
     };
 } // namespace marvin_ros2_control
-

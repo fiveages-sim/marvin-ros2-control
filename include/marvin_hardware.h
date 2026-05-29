@@ -227,7 +227,7 @@ private:
         /** Async: same loop as tool_callback_for_tool but only sends (getStatus/move); no blocking receive. */
         void tool_callback_for_tool_async(size_t tool_idx);
         /** Read once from channel, copy to data_buf, return byte count or 0. */
-        long receiveToolResponse(unsigned char* data_buf, size_t buf_size, GetChDataFunc get_ch_data);
+        long receiveToolResponse(unsigned char* data_buf, size_t buf_size, GetChDataFunc get_ch_data, long channel);
         void processToolResponse(const unsigned char* data_buf, size_t size, size_t gripper_idx);
         bool isToolStateCloseToCommand(size_t tool_idx, double threshold);
         /** True if tool is stopped (hand: at command and stabilized; gripper: at target and stopped). */
