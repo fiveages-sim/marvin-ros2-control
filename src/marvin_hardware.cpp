@@ -1794,9 +1794,23 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             }
             if (!ok)
             {
-                RCLCPP_WARN(get_logger(), "Initial tool read failed for tool_idx=%zu after %d attempts (no valid status); no longer read this side", ti, kMaxRetries);
+                const bool is_freedom_arm_can_hand =
+                    dynamic_cast<marvin_ros2_control::FreedomArmCanHand*>(toolAt(ti)) != nullptr;
                 if (ti < tool_init_failed_.size())
-                    tool_init_failed_[ti] = true;
+                {
+                    if (is_freedom_arm_can_hand)
+                    {
+                        tool_init_failed_[ti] = false;
+                        RCLCPP_WARN(get_logger(),
+                                     "Freedom arm CAN hand tool_idx=%zu initial read failed, but writes remain enabled for debug",
+                                     ti);
+                    }
+                    else
+                    {
+                        RCLCPP_WARN(get_logger(), "Initial tool read failed for tool_idx=%zu after %d attempts (no valid status); no longer read this side", ti, kMaxRetries);
+                        tool_init_failed_[ti] = true;
+                    }
+                }
                 if (ti < tool_initial_read_done_.size())
                     tool_initial_read_done_[ti] = true;
                 size_t gi = gripperJointIndexForTool(ti);
