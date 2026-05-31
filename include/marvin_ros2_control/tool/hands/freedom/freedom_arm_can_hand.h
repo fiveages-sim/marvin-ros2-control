@@ -9,7 +9,6 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
-#include <sstream>
 #include <string>
 #include <vector>
 
@@ -142,25 +141,14 @@ namespace marvin_ros2_control
         {
             if (frame.empty() || frame.size() > MAX_BUFFER_SIZE)
             {
-                RCLCPP_WARN(logger_, "Freedom arm CAN hand: invalid frame size %zu", frame.size());
                 return false;
             }
             std::vector<uint8_t> tx_frame = frame;
-            std::ostringstream hex;
-            for (const auto byte : tx_frame)
-            {
-                char buf[8];
-                snprintf(buf, sizeof(buf), " %02X", byte);
-                hex << buf;
-            }
 
-            const bool ok = send_485_(
+            return send_485_(
                 tx_frame.data(),
                 static_cast<long>(tx_frame.size()),
                 CANFD_CHANNEL);
-            RCLCPP_INFO(logger_, "Freedom arm CAN hand send channel=%ld size=%zu ok=%d frame:%s",
-                        CANFD_CHANNEL, tx_frame.size(), ok ? 1 : 0, hex.str().c_str());
-            return ok;
         }
 
         uint8_t radiansToProtocolAngle(double radians, std::size_t joint_index) const
