@@ -323,7 +323,14 @@ namespace marvin_ros2_control
         left_ee_type_ = normalizeString(get_node_param("left_ee_type", std::string("")));
         right_ee_type_ = normalizeString(get_node_param("right_ee_type", std::string("")));
         gripper_type_.clear();
-        if (!left_ee_type_.empty()) {
+        // Keep legacy global classification aligned with mixed-mode behavior:
+        // if either side is a hand, prefer hand classification so hand joint
+        // arrays are fully allocated and mapped.
+        if (eeTypeIsHand(left_ee_type_)) {
+            gripper_type_ = left_ee_type_;
+        } else if (eeTypeIsHand(right_ee_type_)) {
+            gripper_type_ = right_ee_type_;
+        } else if (!left_ee_type_.empty()) {
             gripper_type_ = left_ee_type_;
         } else if (!right_ee_type_.empty()) {
             gripper_type_ = right_ee_type_;
@@ -383,11 +390,14 @@ namespace marvin_ros2_control
             const size_t expected_end_effectors = (robot_arm_index_ == ARM_DUAL)
                                                     ? static_cast<size_t>(has_left_ee) + static_cast<size_t>(has_right_ee)
                                                     : 1;
+            const bool has_hand_ee =
+                (has_left_ee && eeTypeIsHand(left_ee_type_)) ||
+                (has_right_ee && eeTypeIsHand(right_ee_type_));
             
             // 对于gripper：每个末端执行器只有1个关节，数组大小 = expected_end_effectors
             // 对于hand：每个末端执行器有多个关节（O7=7, O6/L6=6），数组大小 = gripper_joint_name_.size()
             // gripper_joint_name_.size() 对于gripper是1，对于hand是关节数量
-            const size_t array_size = (tool_type_ == ToolType::Hand) ? gripper_joint_name_.size() : expected_end_effectors;
+            const size_t array_size = has_hand_ee ? gripper_joint_name_.size() : expected_end_effectors;
 
             gripper_position_command_.assign(array_size, -1.0);
             gripper_position_.assign(array_size, 0.0);
