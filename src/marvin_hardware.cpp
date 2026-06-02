@@ -322,11 +322,6 @@ namespace marvin_ros2_control
         // 获取末端执行器类型参数（仅使用左右独立参数）
         left_ee_type_ = normalizeString(get_node_param("left_ee_type", std::string("")));
         right_ee_type_ = normalizeString(get_node_param("right_ee_type", std::string("")));
-        const auto is_hand_type = [](const std::string& ee_type) {
-            return ee_type == "LINKERHAND_O7" || ee_type == "LINKERHAND_O6" || ee_type == "LINKERHAND_L6" ||
-                   ee_type == "O7" || ee_type == "O6" || ee_type == "L6" ||
-                   ee_type.find("LINKERHAND") != std::string::npos;
-        };
         gripper_type_.clear();
         if (!left_ee_type_.empty()) {
             gripper_type_ = left_ee_type_;
@@ -382,15 +377,6 @@ namespace marvin_ros2_control
         const bool has_left_ee = !left_ee_type_.empty() && left_ee_type_ != "NONE";
         const bool has_right_ee = !right_ee_type_.empty() && right_ee_type_ != "NONE";
         const bool has_any_ee = has_left_ee || has_right_ee;
-        if (has_left_ee && has_right_ee && is_hand_type(left_ee_type_) != is_hand_type(right_ee_type_))
-        {
-            RCLCPP_ERROR(
-                get_logger(),
-                "Mixed EE categories are not supported yet: left_ee_type=%s, right_ee_type=%s",
-                left_ee_type_.c_str(),
-                right_ee_type_.c_str());
-            return hardware_interface::CallbackReturn::ERROR;
-        }
 
         if (has_gripper_ && has_any_ee)
         {
@@ -1129,6 +1115,25 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         return "None";
     }
 
+    bool MarvinHardware::eeTypeIsHand(const std::string& ee_type) const
+    {
+        return ee_type == "LINKERHAND_O7" || ee_type == "LINKERHAND_O6" || ee_type == "LINKERHAND_L6" ||
+               ee_type == "O7" || ee_type == "O6" || ee_type == "L6" ||
+               ee_type.find("LINKERHAND") != std::string::npos;
+    }
+
+    std::string MarvinHardware::eeTypeForTool(size_t tool_idx) const
+    {
+        if (robot_arm_index_ == ARM_LEFT) return left_ee_type_;
+        if (robot_arm_index_ == ARM_RIGHT) return right_ee_type_;
+        return (tool_idx == 0) ? left_ee_type_ : right_ee_type_;
+    }
+
+    bool MarvinHardware::toolIsHand(size_t tool_idx) const
+    {
+        return eeTypeIsHand(eeTypeForTool(tool_idx));
+    }
+
     void MarvinHardware::contains_tool()
     {
         int joint_index = 0;
@@ -1680,7 +1685,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             // 一个控制周期内只发一条 set：优先控制指令，其次读状态
             if (should_write)
             {
-                if (tool_type_ == ToolType::Hand)
+                if (toolIsHand(tool_idx))
                 {
                     auto* hand = dynamic_cast<ModbusHand*>(tool);
                     if (hand && write_cmd.size() >= hand->getJointCount())
@@ -1825,7 +1830,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
 
             // After the initial successful read, sync command to current state so we don't start from -1.0 commands.
             // For Hand: sync all mapped joints for this tool; for Gripper: sync the single joint for this tool.
-            if (tool_type_ == ToolType::Hand)
+            if (toolIsHand(ti))
             {
                 const size_t tool_n = toolCount();
                 const size_t n_j = std::min(gripper_joint_name_.size(),
@@ -1920,7 +1925,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             return false;
         GetChDataFunc get_ch = (robot_arm_index_ == ARM_LEFT || (robot_arm_index_ == ARM_DUAL && tool_idx == 0))
             ? OnGetChDataA : OnGetChDataB;
-        if (tool_type_ == ToolType::Hand)
+        if (toolIsHand(tool_idx))
         {
             auto* hand = dynamic_cast<marvin_ros2_control::ModbusHand*>(tool);
             if (!hand || write_cmd.size() < hand->getJointCount())
@@ -1946,7 +1951,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         long received = receiveToolResponse(data_buf, sizeof(data_buf), get_ch);
         if (received <= 0 || !isModbusWriteAck(data_buf, static_cast<size_t>(received)))
             return false;
-        if (tool_type_ != ToolType::Hand && tool_idx < in_flight_type_.size())
+        if (!toolIsHand(tool_idx) && tool_idx < in_flight_type_.size())
             in_flight_type_[tool_idx].store(0);
         std::string hex_log = "writeToolStatusSync(tool_idx=" + std::to_string(tool_idx) + ") received (" + std::to_string(received) + " bytes):";
         for (long i = 0; i < received && i < 256; ++i)
@@ -1957,7 +1962,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         }
         RCLCPP_INFO(get_logger(), "%s", hex_log.c_str());
         size_t gi = gripperJointIndexForTool(tool_idx);
-        if (tool_type_ == ToolType::Hand)
+        if (toolIsHand(tool_idx))
         {
             auto* hand = dynamic_cast<marvin_ros2_control::ModbusHand*>(tool);
             if (hand)
@@ -2266,7 +2271,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
     {
         if (!has_gripper_ || toolCount() == 0)
             return true;
-        if (tool_type_ == ToolType::Hand)
+        if (toolIsHand(tool_idx))
         {
             const size_t tool_n = toolCount();
             const size_t n = std::min(gripper_joint_name_.size(),
@@ -2311,7 +2316,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         auto* tool = toolAt(tool_idx);
         if (!tool)
             return false;
-        if (tool_type_ == ToolType::Hand)
+        if (toolIsHand(tool_idx))
         {
             auto* hand = dynamic_cast<marvin_ros2_control::ModbusHand*>(tool);
             if (!hand)
@@ -2367,7 +2372,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         if (write_cmd.empty())
             return;
         size_t gi = gripperJointIndexForTool(tool_idx);
-        if (tool_type_ == ToolType::Hand)
+        if (toolIsHand(tool_idx))
         {
             auto* hand = dynamic_cast<marvin_ros2_control::ModbusHand*>(toolAt(tool_idx));
             if (hand)
@@ -2432,7 +2437,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         if (!has_gripper_ || toolCount() == 0)
             return true;
         bool stopped = false;
-        if (tool_type_ == ToolType::Hand)
+        if (toolIsHand(tool_idx))
         {
             // 仅用 stabilized 判断，不再乘 at_command
             const bool stabilized = (tool_idx < hand_stabilized_.size() && hand_stabilized_[tool_idx]);
@@ -2577,7 +2582,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             return;
         }
 
-        if (tool_type_ == ToolType::Hand)
+        if (toolIsHand(gripper_idx))
         {
             auto* hand = dynamic_cast<ModbusHand*>(tool);
             if (hand)

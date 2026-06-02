@@ -194,6 +194,9 @@ private:
         std::vector<double> last_gripper_command_;
         std::vector<bool> gripper_stopped_;
         void contains_tool();
+        bool eeTypeIsHand(const std::string& ee_type) const;
+        std::string eeTypeForTool(size_t tool_idx) const;
+        bool toolIsHand(size_t tool_idx) const;
         std::vector<std::unique_ptr<gripper_hardware_common::GripperBase>> tool_ptr_;  // Unified container for hand/gripper
         ToolType tool_type_ = ToolType::None;  // Hand, Gripper, Others, or None - determines move_hand vs move_gripper
         const char* toolTypeLogName() const;
