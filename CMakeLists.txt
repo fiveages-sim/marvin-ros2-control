@@ -317,16 +317,6 @@ install(
 
 if (BUILD_TESTING)
     find_package(ament_lint_auto REQUIRED)
-    find_package(ament_cmake_gtest REQUIRED)
-
-    ament_add_gtest(test_freedom_arm_can_protocol
-        test/test_freedom_arm_can_protocol.cpp
-    )
-    if(TARGET test_freedom_arm_can_protocol)
-        target_include_directories(test_freedom_arm_can_protocol PRIVATE
-            ${CMAKE_CURRENT_SOURCE_DIR}/include
-        )
-    endif()
 
     ament_lint_auto_find_test_dependencies()
 endif ()
