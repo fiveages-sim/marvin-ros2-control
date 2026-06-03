@@ -520,12 +520,30 @@ namespace marvin_ros2_control
         return 0;
     }
 
-    void MarvinHardware::applyAllToolDynamics()
+    static bool isToolDynamicsParamName(const std::string& name)
     {
-        const double left_torque = std::clamp(get_node_param("left_tool_torque", 1.0), 0.0, 1.0);
-        const double left_velocity = std::clamp(get_node_param("left_tool_velocity", 1.0), 0.0, 1.0);
-        const double right_torque = std::clamp(get_node_param("right_tool_torque", 1.0), 0.0, 1.0);
-        const double right_velocity = std::clamp(get_node_param("right_tool_velocity", 1.0), 0.0, 1.0);
+        return name == "left_tool_torque" || name == "left_tool_velocity"
+            || name == "right_tool_torque" || name == "right_tool_velocity";
+    }
+
+    void MarvinHardware::applyAllToolDynamics(const std::unordered_map<std::string, double>* pending)
+    {
+        auto read_tool_param = [this, pending](const std::string& name, double default_val) {
+            if (pending)
+            {
+                const auto it = pending->find(name);
+                if (it != pending->end())
+                {
+                    return it->second;
+                }
+            }
+            return get_node_param(name, default_val);
+        };
+
+        const double left_torque = std::clamp(read_tool_param("left_tool_torque", 1.0), 0.0, 1.0);
+        const double left_velocity = std::clamp(read_tool_param("left_tool_velocity", 1.0), 0.0, 1.0);
+        const double right_torque = std::clamp(read_tool_param("right_tool_torque", 1.0), 0.0, 1.0);
+        const double right_velocity = std::clamp(read_tool_param("right_tool_velocity", 1.0), 0.0, 1.0);
 
         const size_t n = std::max({gripper_joint_name_.size(), gripper_effort_command_.size(),
                                    gripper_velocity_command_.size()});
@@ -581,20 +599,36 @@ MarvinHardware::paramCallback(const std::vector<rclcpp::Parameter> & params)
     std::vector<double> cart_k_gains;
     std::vector<double> cart_d_gains;
 
+    std::unordered_map<std::string, double> tool_dyn_batch;
+    for (const auto& param : params)
+    {
+        const std::string& pname = param.get_name();
+        if (!isToolDynamicsParamName(pname))
+        {
+            continue;
+        }
+        const double v = param.as_double();
+        if (v < 0.0 || v > 1.0)
+        {
+            result.successful = false;
+            result.reason = pname + " must be in [0.0, 1.0]";
+            return result;
+        }
+        tool_dyn_batch[pname] = v;
+    }
+    if (!tool_dyn_batch.empty())
+    {
+        applyAllToolDynamics(&tool_dyn_batch);
+        for (const auto& entry : tool_dyn_batch)
+        {
+            RCLCPP_INFO(get_logger(), "Updated %s = %.3f", entry.first.c_str(), entry.second);
+        }
+    }
+
     for (const auto & param : params) {
         const std::string& pname = param.get_name();
-        if (pname == "left_tool_torque" || pname == "left_tool_velocity"
-            || pname == "right_tool_torque" || pname == "right_tool_velocity")
+        if (isToolDynamicsParamName(pname))
         {
-            const double v = param.as_double();
-            if (v < 0.0 || v > 1.0)
-            {
-                result.successful = false;
-                result.reason = pname + " must be in [0.0, 1.0]";
-                return result;
-            }
-            applyAllToolDynamics();
-            RCLCPP_INFO(get_logger(), "Updated %s = %.3f", pname.c_str(), v);
             continue;
         }
 

@@ -4,6 +4,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <unordered_map>
 #include <thread>
 #include <array>
 #include <atomic>
@@ -171,7 +172,7 @@ private:
                                     const std::vector<double>& cart_d_gains);
         void declare_node_parameters();
         void syncToolDynamicsFromNodeParams();
-        void applyAllToolDynamics();
+        void applyAllToolDynamics(const std::unordered_map<std::string, double>* pending = nullptr);
         /** 0=left, 1=right; maps gripper/hand command index to arm side. */
         size_t sideForGripperIndex(size_t k) const;
 
