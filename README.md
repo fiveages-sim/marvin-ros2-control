@@ -42,7 +42,9 @@ colcon build --packages-up-to marvin_ros2_control --symlink-install
 以下参数在运行时可通过 `ros2 param set` 修改，并由参数回调应用到硬件：
 
 - **控制模式**
-  - `ctrl_mode`：`POSITION` / `JOINT_IMPEDANCE` / `CART_IMPEDANCE`
+  - `ctrl_mode`：`POSITION` / `JOINT_IMPEDANCE` / `CART_IMPEDANCE` / `POWER_OFF`
+    - `POWER_OFF`：发布 `/fsm_command=2`（HOLD），SDK 下使能（保持连接）；控制器 lifecycle 由外部管理（见下方操作流程）
+    - `POSITION` / `JOINT_IMPEDANCE` / `CART_IMPEDANCE`：发布 `/fsm_command=3`（OCS2），SDK 上使能
 - **阻抗与拖动相关**
   - `joint_k_gains`（double array，长度 7）
   - `joint_d_gains`（double array，长度 7）
@@ -53,6 +55,9 @@ colcon build --packages-up-to marvin_ros2_control --symlink-install
 - **限速**
   - `max_joint_speed`（double）
   - `max_joint_acceleration`（double）
+- **抱闸 / 松闸（急停后手动调整姿态，左右臂独立）**
+  - `left_brake_release`（bool）：左臂 `true` 松闸（BRAK0=2），`false` 抱闸（BRAK0=1）；期间暂停 A 臂关节指令，恢复需 `ros2 param set ... ctrl_mode POSITION`
+  - `right_brake_release`（bool）：右臂 `true` 松闸（BRAK1=2），`false` 抱闸（BRAK1=1）；恢复方式同上
 - **工具/夹爪负载参数**
   - `left_kine_param`（double array，长度 6）
   - `left_dyn_param`（double array，长度 10）
@@ -63,14 +68,45 @@ colcon build --packages-up-to marvin_ros2_control --symlink-install
 
 ```bash
 # 切换控制模式
-ros2 param set /<controller_manager_node_name> ctrl_mode JOINT_IMPEDANCE
+ros2 param set /m6_ccs_system ctrl_mode JOINT_IMPEDANCE
 
 # 设置关节阻抗 K/D（7 维）
-ros2 param set /<controller_manager_node_name> joint_k_gains "[2.0, 2.0, 2.0, 1.6, 1.0, 1.0, 1.0]"
-ros2 param set /<controller_manager_node_name> joint_d_gains "[0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4]"
+ros2 param set /m6_ccs_system joint_k_gains "[2.0, 2.0, 2.0, 1.6, 1.0, 1.0, 1.0]"
+ros2 param set /m6_ccs_system joint_d_gains "[0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4]"
 ```
 
-> 注：节点名取决于你的 `ros2_control` 启动方式，常见为 controller_manager 所在节点。可先用 `ros2 param list` 查找包含上述参数的节点名。
+抱闸松闸示例（飞车/撞机急停后手动摆正关节，再恢复控制；左右臂分别设置）：
+
+```bash
+# 左臂松闸（OnSetIntPara BRAK0=2）
+ros2 param set /m6_ccs_system left_brake_release true
+# 左臂手动调整完毕后抱闸（BRAK0=1），再恢复控制：
+ros2 param set /m6_ccs_system left_brake_release false
+ros2 param set /m6_ccs_system ctrl_mode POSITION
+
+# 右臂同理（OnSetIntPara BRAK1）
+ros2 param set /m6_ccs_system right_brake_release true
+ros2 param set /m6_ccs_system right_brake_release false
+```
+
+> `ros2_control` 退出（硬件 `on_deactivate`）时会 `OnGetIntPara` 检查 `BRAK0/BRAK1`，未抱闸（`!=1`）则强制 `=1`，再下使能并断开连接。
+
+统一下使能 / 上使能示例（左右臂都生效）：
+
+```bash
+# 1. 先 deactivate 控制器（FSM 冻结，update() 停止）
+ros2 control switch_controllers --deactivate ocs2_wbc_controller
+# 2. 再下使能硬件
+ros2 param set /m6_ccs_system ctrl_mode POWER_OFF
+
+# 恢复：
+# 1. 先上使能硬件
+ros2 param set /m6_ccs_system ctrl_mode POSITION
+# 2. 再 activate 控制器
+ros2 control switch_controllers --activate ocs2_wbc_controller
+```
+
+> 注：以上示例中的节点名 `/m6_ccs_system` 对应 m6_ccs 描述包默认配置；其他描述包请根据 `ros2_control` 启动方式确认 controller_manager 所在节点名，可用 `ros2 param list` 查找包含上述参数的节点。
 
 ### 3.3 hardware_parameters 中常用参数（初始配置）
 
