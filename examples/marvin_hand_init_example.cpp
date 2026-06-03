@@ -139,7 +139,7 @@ static void runAsync485ReadWriteTest(
     Clear485Func clear_ch_data,
     int duration_ms,
     int write_period_ms,
-    int read_period_ms)
+    [[maybe_unused]] int read_period_ms)
 {
     if (!hand || !get_ch_data || !clear_ch_data)
     {

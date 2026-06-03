@@ -137,7 +137,8 @@ private:
             Clear485Func clear_485, 
             Send485Func send_485,
             GetChDataFunc get_ch_data,
-            size_t tool_index = 0);
+            size_t tool_index = 0,
+            const std::string& ee_type = "");
         void set_tool_parameters();
 
         static double degreeToRad(const double degree)
@@ -173,6 +174,8 @@ private:
         
         // Gripper parameters
         std::string gripper_type_;
+        std::string left_ee_type_;
+        std::string right_ee_type_;
         double gripper_torque_scale_ = 1.0;  // Torque scaling factor (0.0-1.0, default: 1.0)
         /** If true, enable high-frequency INFO logs for tool (hand/gripper) and Modbus hex dumps. */
         bool debug_tool_logs_ = false;
@@ -191,6 +194,9 @@ private:
         std::vector<double> last_gripper_command_;
         std::vector<bool> gripper_stopped_;
         void contains_tool();
+        bool eeTypeIsHand(const std::string& ee_type) const;
+        std::string eeTypeForTool(size_t tool_idx) const;
+        bool toolIsHand(size_t tool_idx) const;
         std::vector<std::unique_ptr<gripper_hardware_common::GripperBase>> tool_ptr_;  // Unified container for hand/gripper
         ToolType tool_type_ = ToolType::None;  // Hand, Gripper, Others, or None - determines move_hand vs move_gripper
         const char* toolTypeLogName() const;
