@@ -171,7 +171,9 @@ private:
                                     const std::vector<double>& cart_d_gains);
         void declare_node_parameters();
         void syncToolDynamicsFromNodeParams();
-        void applyToolDynamics(double torque, double velocity);
+        void applyAllToolDynamics();
+        /** 0=left, 1=right; maps gripper/hand command index to arm side. */
+        size_t sideForGripperIndex(size_t k) const;
 
         
         // Gripper / hand: normalized torque/velocity from ROS params (not HW command interfaces).

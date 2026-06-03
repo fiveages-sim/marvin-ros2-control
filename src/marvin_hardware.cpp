@@ -225,9 +225,13 @@ namespace marvin_ros2_control
         ensure_double_array_sized("right_kine_param", kDefaultRightKineParam, 6);
         ensure_double_array_sized("right_dyn_param", kDefaultRightDynParam, 10);
 
-        ensure_param("tool_torque", 1.0, nullptr,
+        ensure_param("left_tool_torque", 1.0, hw_find("left_tool_torque"),
                      [](const std::string& s, double def) { try { return std::stod(s); } catch (...) { return def; } });
-        ensure_param("tool_velocity", 1.0, nullptr,
+        ensure_param("left_tool_velocity", 1.0, hw_find("left_tool_velocity"),
+                     [](const std::string& s, double def) { try { return std::stod(s); } catch (...) { return def; } });
+        ensure_param("right_tool_torque", 1.0, hw_find("right_tool_torque"),
+                     [](const std::string& s, double def) { try { return std::stod(s); } catch (...) { return def; } });
+        ensure_param("right_tool_velocity", 1.0, hw_find("right_tool_velocity"),
                      [](const std::string& s, double def) { try { return std::stod(s); } catch (...) { return def; } });
     }
     
@@ -493,12 +497,43 @@ namespace marvin_ros2_control
         return hardware_interface::CallbackReturn::SUCCESS;
     }
 
-    void MarvinHardware::applyToolDynamics(double torque, double velocity)
+    size_t MarvinHardware::sideForGripperIndex(size_t k) const
     {
-        torque = std::clamp(torque, 0.0, 1.0);
-        velocity = std::clamp(velocity, 0.0, 1.0);
-        for (size_t k = 0; k < gripper_joint_name_.size(); ++k)
+        if (tool_type_ != ToolType::Hand)
         {
+            if (toolCount() >= 2)
+            {
+                return k;
+            }
+            return (robot_arm_index_ == ARM_RIGHT) ? 1u : 0u;
+        }
+        if (k >= gripper_joint_name_.size())
+        {
+            return 0;
+        }
+        std::string name_lower = gripper_joint_name_[k];
+        std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
+        if (toolCount() >= 2 && name_lower.find("right") != std::string::npos)
+        {
+            return 1;
+        }
+        return 0;
+    }
+
+    void MarvinHardware::applyAllToolDynamics()
+    {
+        const double left_torque = std::clamp(get_node_param("left_tool_torque", 1.0), 0.0, 1.0);
+        const double left_velocity = std::clamp(get_node_param("left_tool_velocity", 1.0), 0.0, 1.0);
+        const double right_torque = std::clamp(get_node_param("right_tool_torque", 1.0), 0.0, 1.0);
+        const double right_velocity = std::clamp(get_node_param("right_tool_velocity", 1.0), 0.0, 1.0);
+
+        const size_t n = std::max({gripper_joint_name_.size(), gripper_effort_command_.size(),
+                                   gripper_velocity_command_.size()});
+        for (size_t k = 0; k < n; ++k)
+        {
+            const size_t side = sideForGripperIndex(k);
+            const double torque = (side == 0) ? left_torque : right_torque;
+            const double velocity = (side == 0) ? left_velocity : right_velocity;
             if (k < gripper_effort_command_.size())
             {
                 gripper_effort_command_[k] = torque;
@@ -524,7 +559,7 @@ namespace marvin_ros2_control
         {
             return;
         }
-        applyToolDynamics(get_node_param("tool_torque", 1.0), get_node_param("tool_velocity", 1.0));
+        applyAllToolDynamics();
     }
 
 rcl_interfaces::msg::SetParametersResult
@@ -547,24 +582,19 @@ MarvinHardware::paramCallback(const std::vector<rclcpp::Parameter> & params)
     std::vector<double> cart_d_gains;
 
     for (const auto & param : params) {
-        if (param.get_name() == "tool_torque" || param.get_name() == "tool_velocity")
+        const std::string& pname = param.get_name();
+        if (pname == "left_tool_torque" || pname == "left_tool_velocity"
+            || pname == "right_tool_torque" || pname == "right_tool_velocity")
         {
             const double v = param.as_double();
             if (v < 0.0 || v > 1.0)
             {
                 result.successful = false;
-                result.reason = param.get_name() + " must be in [0.0, 1.0]";
+                result.reason = pname + " must be in [0.0, 1.0]";
                 return result;
             }
-            if (param.get_name() == "tool_torque")
-            {
-                applyToolDynamics(v, get_node_param("tool_velocity", 1.0));
-            }
-            else
-            {
-                applyToolDynamics(get_node_param("tool_torque", 1.0), v);
-            }
-            RCLCPP_INFO(get_logger(), "Updated %s = %.3f (all tools)", param.get_name().c_str(), v);
+            applyAllToolDynamics();
+            RCLCPP_INFO(get_logger(), "Updated %s = %.3f", pname.c_str(), v);
             continue;
         }
 
