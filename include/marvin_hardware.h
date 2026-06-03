@@ -20,6 +20,7 @@
 #include "rclcpp_lifecycle/state.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "std_msgs/msg/int64.hpp"
+#include "std_msgs/msg/int32.hpp"
 #include "geometry_msgs/msg/wrench_stamped.hpp"
 #include "MarvinSDK.h"
 #include <cmath>
@@ -74,11 +75,13 @@ private:
         // Hardware parameters
         std::shared_ptr<rclcpp::Node> node_;
         rclcpp::Publisher<std_msgs::msg::Int64>::SharedPtr hardware_error_pub_;
+        rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr fsm_command_pub_;
         std::string device_ip_;
         int device_port_ = 8080;
         std::string robot_arm_config_;  // "LEFT", "RIGHT", "DUAL"
         int robot_arm_index_ = 0;       // 0=LEFT, 1=RIGHT, 2=DUAL (在初始化时设定)
-        std::string robot_ctrl_mode_;   // "POSITION", "JOINT_IMPEDANCE", "CART_IMPEDANCE"
+        std::string robot_ctrl_mode_;   // "POSITION", "JOINT_IMPEDANCE", "CART_IMPEDANCE", "POWER_OFF"
+        std::string last_active_ctrl_mode_ = "POSITION";
         int previous_message_frame_ = 0;
         DCSS frame_data_;
 
@@ -130,7 +133,9 @@ private:
         bool readFromHardware(bool initial_frame);
         bool writeToHardware(std::vector<double>& hw_commands);
         void setArmCtrlInternal(int arm_index);
-                
+        bool left_brake_released_ = false;
+        bool right_brake_released_ = false;
+
         // Helper method to create tool (gripper or hand) based on type
         // tool_index: 0 for left hand (in dual arm) or single left arm, 1 for right hand (in dual arm) or single right arm
         std::unique_ptr<gripper_hardware_common::GripperBase> createTool(
