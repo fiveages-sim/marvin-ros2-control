@@ -90,18 +90,17 @@ namespace marvin_ros2_control
     {
         using namespace gripper_hardware_common;
         using namespace gripper_hardware_common::ModbusConfig;
-        
-        // Print received Modbus message
+
         char hex_str[512] = {0};
-        size_t pos = 0;
+        size_t hex_pos = 0;
         constexpr size_t hex_str_limit = sizeof(hex_str) - 3;
-        for (size_t i = 0; i < data_size && i < 256 && pos < hex_str_limit; i++)
+        for (size_t i = 0; i < data_size && i < 256 && hex_pos < hex_str_limit; i++)
         {
-            pos += snprintf(hex_str + pos, sizeof(hex_str) - pos, "%02X ", data[i]);
+            hex_pos += snprintf(hex_str + hex_pos, sizeof(hex_str) - hex_pos, "%02X ", data[i]);
         }
-        if (pos > 0 && hex_str[pos - 1] == ' ')
-            hex_str[pos - 1] = '\0';
-        RCLCPP_INFO(logger_, "JD Gripper RX: %s (size=%zu)", hex_str, data_size);
+        if (hex_pos > 0 && hex_str[hex_pos - 1] == ' ')
+            hex_str[hex_pos - 1] = '\0';
+        RCLCPP_DEBUG(logger_, "JD Gripper RX: %s (size=%zu)", hex_str, data_size);
         
         if (data_size < 3)
         {

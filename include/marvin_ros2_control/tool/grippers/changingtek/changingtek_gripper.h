@@ -32,6 +32,9 @@ namespace marvin_ros2_control
     private:
         bool acceleration_set_;
         bool deceleration_set_;
+        /** Last values written to VELOCITY_REG / TORQUE_REG; 0xFFFF = not yet written. */
+        uint16_t cached_velocity_reg_ = 0xFFFF;
+        uint16_t cached_torque_reg_ = 0xFFFF;
     };
 
     // Type aliases for specific variants
