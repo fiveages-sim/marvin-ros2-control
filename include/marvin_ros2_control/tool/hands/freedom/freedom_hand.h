@@ -19,8 +19,9 @@ namespace marvin_ros2_control
 
         FreedomHandV1(Clear485Func clear_485, Send485Func send_485,
                       GetChDataFunc on_get_ch_data = nullptr,
-                      bool is_left_hand = true)
-            : ModbusHand(clear_485, send_485, on_get_ch_data),
+                      bool is_left_hand = true,
+                      long channel = COM1_CHANNEL)
+            : ModbusHand(clear_485, send_485, on_get_ch_data, channel),
               slave_id_(is_left_hand ? kLeftSlaveId : kRightSlaveId)
         {
         }
@@ -100,11 +101,28 @@ namespace marvin_ros2_control
                 0x00,
                 kFrameTail};
             frame[frame.size() - 2] = checksum(frame);
+            if (channel_ == CAN_CHANNEL)
+            {
+                std::vector<uint8_t> frame1 = buildCanFrame(
+                    makeCanId(slave_id_, kMoveCommand, 2, 1),
+                    {0x01, angles[0], 0x01, angles[1], 0x01, angles[2], 0x01, angles[3]});
+                std::vector<uint8_t> frame2 = buildCanFrame(
+                    makeCanId(slave_id_, kMoveCommand, 2, 2),
+                    {0x01, angles[4], 0x01, angles[5]});
+                return sendRequest(frame1) && sendRequest(frame2);
+            }
             return sendRequest(frame);
         }
 
         bool getStatus() override
         {
+            if (channel_ == CAN_CHANNEL)
+            {
+                return sendRequest(buildCanFrame(
+                    makeCanId(slave_id_, kAngleQueryCommand, 1, 1),
+                    {0x00}));
+            }
+
             std::vector<uint8_t> query = {
                 kFrameHead,
                 slave_id_,
@@ -122,6 +140,37 @@ namespace marvin_ros2_control
                                  std::vector<double>& positions) override
         {
             positions.clear();
+            if (channel_ == CAN_CHANNEL)
+            {
+                const uint8_t* payload = data;
+                size_t payload_size = data_size;
+                if (data_size >= 4)
+                {
+                    const uint32_t can_id =
+                        static_cast<uint32_t>(data[0]) |
+                        (static_cast<uint32_t>(data[1]) << 8) |
+                        (static_cast<uint32_t>(data[2]) << 16) |
+                        (static_cast<uint32_t>(data[3]) << 24);
+                    if (canDeviceId(can_id) == slave_id_ &&
+                        canCommand(can_id) == kAngleQueryCommand)
+                    {
+                        payload = data + 4;
+                        payload_size = data_size - 4;
+                    }
+                }
+
+                if (payload_size < JOINT_COUNT)
+                {
+                    return false;
+                }
+                positions.reserve(JOINT_COUNT);
+                for (size_t i = 0; i < JOINT_COUNT; ++i)
+                {
+                    positions.push_back(protocolAngleToRadians(payload[i], i));
+                }
+                return true;
+            }
+
             if (data_size != kAngleResponseLength ||
                 data[0] != kFrameHead ||
                 data[1] != slave_id_ ||
@@ -208,6 +257,36 @@ namespace marvin_ros2_control
                 sum += frame[i];
             }
             return static_cast<uint8_t>(sum & 0xFF);
+        }
+
+        static uint32_t makeCanId(uint8_t device_id, uint8_t command, uint8_t total_frames, uint8_t frame_seq)
+        {
+            return (static_cast<uint32_t>(device_id & 0x1F) << 24) |
+                   (static_cast<uint32_t>(command) << 16) |
+                   (static_cast<uint32_t>(total_frames) << 8) |
+                   static_cast<uint32_t>(frame_seq);
+        }
+
+        static uint8_t canDeviceId(uint32_t can_id)
+        {
+            return static_cast<uint8_t>((can_id >> 24) & 0x1F);
+        }
+
+        static uint8_t canCommand(uint32_t can_id)
+        {
+            return static_cast<uint8_t>((can_id >> 16) & 0xFF);
+        }
+
+        static std::vector<uint8_t> buildCanFrame(uint32_t can_id, const std::vector<uint8_t>& payload)
+        {
+            std::vector<uint8_t> frame;
+            frame.reserve(4 + payload.size());
+            frame.push_back(static_cast<uint8_t>(can_id & 0xFF));
+            frame.push_back(static_cast<uint8_t>((can_id >> 8) & 0xFF));
+            frame.push_back(static_cast<uint8_t>((can_id >> 16) & 0xFF));
+            frame.push_back(static_cast<uint8_t>((can_id >> 24) & 0xFF));
+            frame.insert(frame.end(), payload.begin(), payload.end());
+            return frame;
         }
     };
 } // namespace marvin_ros2_control

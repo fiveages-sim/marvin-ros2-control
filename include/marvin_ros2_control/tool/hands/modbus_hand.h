@@ -17,8 +17,9 @@ namespace marvin_ros2_control
     {
     public:
         ModbusHand(Clear485Func clear_485, Send485Func send_485,
-                  GetChDataFunc on_get_ch_data = nullptr)
-            : ModbusIO(clear_485, send_485, on_get_ch_data)
+                  GetChDataFunc on_get_ch_data = nullptr,
+                  long channel = COM1_CHANNEL)
+            : ModbusIO(clear_485, send_485, on_get_ch_data, channel)
         {
         }
         
@@ -54,4 +55,3 @@ namespace marvin_ros2_control
         // These are available directly without qualification
     };
 } // namespace marvin_ros2_control
-

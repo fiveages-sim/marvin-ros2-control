@@ -190,6 +190,10 @@ namespace marvin_ros2_control
                      [](const std::string& s, const std::string& def) { (void)def; return s; });
         ensure_param("right_ee_type", std::string(""), hw_find("right_ee_type"),
                      [](const std::string& s, const std::string& def) { (void)def; return s; });
+        ensure_param("left_ee_channel", static_cast<int>(COM1_CHANNEL), hw_find("left_ee_channel"),
+                     [](const std::string& s, int def) { try { return std::stoi(s); } catch (...) { return def; } });
+        ensure_param("right_ee_channel", static_cast<int>(COM1_CHANNEL), hw_find("right_ee_channel"),
+                     [](const std::string& s, int def) { try { return std::stoi(s); } catch (...) { return def; } });
         ensure_param("device_ip", std::string("192.168.1.190"), hw_find("device_ip"),
                      [](const std::string& s, const std::string& def) { (void)def; return s; });
         ensure_param("device_port", 8080, hw_find("device_port"),
@@ -331,6 +335,10 @@ namespace marvin_ros2_control
         // 获取末端执行器类型参数（仅使用左右独立参数）
         left_ee_type_ = normalizeString(get_node_param("left_ee_type", std::string("")));
         right_ee_type_ = normalizeString(get_node_param("right_ee_type", std::string("")));
+        left_ee_channel_ = static_cast<long>(get_node_param("left_ee_channel", static_cast<int>(COM1_CHANNEL)));
+        right_ee_channel_ = static_cast<long>(get_node_param("right_ee_channel", static_cast<int>(COM1_CHANNEL)));
+        if (left_ee_channel_ < CAN_CHANNEL || left_ee_channel_ > 3) left_ee_channel_ = COM1_CHANNEL;
+        if (right_ee_channel_ < CAN_CHANNEL || right_ee_channel_ > 3) right_ee_channel_ = COM1_CHANNEL;
         gripper_type_.clear();
         // Keep legacy global classification aligned with mixed-mode behavior:
         // if either side is a hand, prefer hand classification so hand joint
@@ -427,14 +435,14 @@ namespace marvin_ros2_control
             if (robot_arm_index_ == ARM_LEFT)
             {
                 // tool_idx=0 is always left/A.
-                tool_ptr_[0] = createTool(OnClearChDataA, OnSetChDataA, OnGetChDataA, 0, left_ee_type_);
+                tool_ptr_[0] = createTool(OnClearChDataA, OnSetChDataA, OnGetChDataA, 0, left_ee_type_, left_ee_channel_);
                 tool_is_left_side_[0] = true;
                 tool_ee_types_[0] = left_ee_type_;
             }
             else if (robot_arm_index_ == ARM_RIGHT)
             {
                 // tool_idx=1 is always right/B, even if left has no tool.
-                tool_ptr_[1] = createTool(OnClearChDataB, OnSetChDataB, OnGetChDataB, 1, right_ee_type_);
+                tool_ptr_[1] = createTool(OnClearChDataB, OnSetChDataB, OnGetChDataB, 1, right_ee_type_, right_ee_channel_);
                 tool_is_left_side_[1] = false;
                 tool_ee_types_[1] = right_ee_type_;
             }
@@ -444,11 +452,11 @@ namespace marvin_ros2_control
                 tool_is_left_side_[1] = false;
                 // Dual arm: [0]=A(left), [1]=B(right); unconfigured sides remain nullptr.
                 if (has_left_ee) {
-                    tool_ptr_[0] = createTool(OnClearChDataA, OnSetChDataA, OnGetChDataA, 0, left_ee_type_);
+                    tool_ptr_[0] = createTool(OnClearChDataA, OnSetChDataA, OnGetChDataA, 0, left_ee_type_, left_ee_channel_);
                     tool_ee_types_[0] = left_ee_type_;
                 }
                 if (has_right_ee) {
-                    tool_ptr_[1] = createTool(OnClearChDataB, OnSetChDataB, OnGetChDataB, 1, right_ee_type_);
+                    tool_ptr_[1] = createTool(OnClearChDataB, OnSetChDataB, OnGetChDataB, 1, right_ee_type_, right_ee_channel_);
                     tool_ee_types_[1] = right_ee_type_;
                 }
             }
@@ -1070,7 +1078,8 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         marvin_ros2_control::Send485Func send_485,
         marvin_ros2_control::GetChDataFunc get_ch_data,
         size_t tool_index,
-        const std::string& ee_type)
+        const std::string& ee_type,
+        long channel)
     {
         /// 启动的时候调用
         // clear_485();
@@ -1118,10 +1127,12 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             if (normalized_ee_type.find("FREEDOM") != std::string::npos)
             {
                 hand_model = "FREEDOM_V1";
-                RCLCPP_INFO(get_logger(), "Creating Freedom-V1 hand (6-DOF, %s hand, slave: 0x%02X)",
+                RCLCPP_INFO(get_logger(), "Creating Freedom-V1 hand (6-DOF, %s hand, slave: 0x%02X, channel: %ld)",
                            is_left_hand ? "left" : "right",
-                           is_left_hand ? 0x00 : 0x01);
-                return std::make_unique<marvin_ros2_control::FreedomHandV1>(clear_485, send_485, get_ch_data, is_left_hand);
+                           is_left_hand ? 0x00 : 0x01,
+                           channel);
+                return std::make_unique<marvin_ros2_control::FreedomHandV1>(
+                    clear_485, send_485, get_ch_data, is_left_hand, channel);
             }
             else if (normalized_ee_type.find("INSPIRE") != std::string::npos ||
                      normalized_ee_type.find("RH56E2") != std::string::npos)
@@ -1287,6 +1298,11 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             return tool_is_left_side_[tool_idx];
         }
         return robot_arm_index_ == ARM_LEFT || (robot_arm_index_ == ARM_DUAL && tool_idx == 0);
+    }
+
+    long MarvinHardware::toolChannel(size_t tool_idx) const
+    {
+        return toolUsesLeftChannel(tool_idx) ? left_ee_channel_ : right_ee_channel_;
     }
 
     void MarvinHardware::contains_tool()
@@ -1773,10 +1789,10 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         GetChDataFunc get_ch = toolUsesLeftChannel(tool_idx)
             ? OnGetChDataA : OnGetChDataB;
         unsigned char data_buf[256] = {0};
-        long ch = COM1_CHANNEL;
+        long ch = toolChannel(tool_idx);
         while (hardware_connected_)
         {
-            ch = COM1_CHANNEL;
+            ch = toolChannel(tool_idx);
             long received = get_ch(data_buf, &ch);
             if (received <= 0)
             {
@@ -2089,7 +2105,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         RCLCPP_INFO(get_logger(), "Sleeping tool %d ms", elapsed_time_for_poll);
         std::this_thread::sleep_for(std::chrono::milliseconds(elapsed_time_for_poll));
         unsigned char data_buf[256] = {0};
-        long received = receiveToolResponse(data_buf, sizeof(data_buf), get_ch);
+        long received = receiveToolResponse(data_buf, sizeof(data_buf), get_ch, toolChannel(tool_idx));
         if (received <= 0)
             return false;
         std::string hex_log = "readToolStatusSync(tool_idx=" + std::to_string(tool_idx) + ") received (" + std::to_string(received) + " bytes):";
@@ -2143,7 +2159,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(wait_ms));
         unsigned char data_buf[256] = {0};
-        long received = receiveToolResponse(data_buf, sizeof(data_buf), get_ch);
+        long received = receiveToolResponse(data_buf, sizeof(data_buf), get_ch, toolChannel(tool_idx));
         if (received <= 0 || !isModbusWriteAck(data_buf, static_cast<size_t>(received)))
             return false;
         if (!toolIsHand(tool_idx) && tool_idx < in_flight_type_.size())
@@ -2680,7 +2696,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         GetChDataFunc get_ch = toolUsesLeftChannel(tool_idx)
             ? OnGetChDataA : OnGetChDataB;
         unsigned char data_buf[256] = {0};
-        long received = receiveToolResponse(data_buf, sizeof(data_buf), get_ch);
+        long received = receiveToolResponse(data_buf, sizeof(data_buf), get_ch, toolChannel(tool_idx));
         if (received <= 0)
             return;
         if (isModbusWriteAck(data_buf, static_cast<size_t>(received)))
@@ -2784,9 +2800,9 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         return stopped;
     }
 
-    long MarvinHardware::receiveToolResponse(unsigned char* data_buf, size_t buf_size, GetChDataFunc get_ch_data)
+    long MarvinHardware::receiveToolResponse(unsigned char* data_buf, size_t buf_size, GetChDataFunc get_ch_data, long channel)
     {
-        long ch = COM1_CHANNEL;
+        long ch = channel;
         unsigned char tmp[256] = {0};
         const long size = get_ch_data(tmp, &ch);
         if (size > 0)

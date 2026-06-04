@@ -70,10 +70,12 @@ namespace marvin_ros2_control
     // ==============================================
 
     ModbusIO::ModbusIO(Clear485Func clear_485, Send485Func send_485,
-                       GetChDataFunc on_get_ch_data)
+                       GetChDataFunc on_get_ch_data,
+                       long channel)
         : clear_485_(clear_485),
           send_485_(send_485),
-          on_get_ch_data_(on_get_ch_data ? on_get_ch_data : OnGetChDataA)
+          on_get_ch_data_(on_get_ch_data ? on_get_ch_data : OnGetChDataA),
+          channel_(channel)
     {
 
     }
@@ -106,7 +108,7 @@ namespace marvin_ros2_control
         std::vector<uint16_t> result;
         uint8_t data_buf[MAX_BUFFER_SIZE];
         char hex_str1[512];
-        long set_ch1 = COM1_CHANNEL;
+        long set_ch1 = channel_;
 
         // Limit attempts to avoid an infinite loop, but preserve the requested read pattern
         const int max_attempts = 50;
@@ -296,7 +298,7 @@ namespace marvin_ros2_control
             RCLCPP_INFO(logger_, "Sending: %s", debug_str);
         }
 
-        return send_485_((uint8_t*)request.data(), static_cast<long>(request.size()), COM1_CHANNEL);
+        return send_485_((uint8_t*)request.data(), static_cast<long>(request.size()), channel_);
     }
 
     std::vector<uint8_t> ModbusIO::receiveResponse(int max_attempts, int timeout_ms)
@@ -305,8 +307,8 @@ namespace marvin_ros2_control
 
         for (int attempt = 0; attempt < max_attempts; attempt++)
         {
-            long channel = COM1_CHANNEL;
-            int received = OnGetChDataA(buffer, &channel);
+            long channel = channel_;
+            int received = on_get_ch_data_(buffer, &channel);
 
             if (received > 0)
             {
