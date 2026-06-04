@@ -203,6 +203,9 @@ private:
         std::string eeTypeForTool(size_t tool_idx) const;
         bool toolIsHand(size_t tool_idx) const;
         std::vector<std::unique_ptr<gripper_hardware_common::GripperBase>> tool_ptr_;  // Unified container for hand/gripper
+        std::vector<bool> tool_is_left_side_;
+        std::vector<std::string> tool_ee_types_;
+        bool toolUsesLeftChannel(size_t tool_idx) const;
         ToolType tool_type_ = ToolType::None;  // Hand, Gripper, Others, or None - determines move_hand vs move_gripper
         const char* toolTypeLogName() const;
         // Single in-flight task per tool: 0=None, 1=Read (waiting response), 2=Write (waiting response)
