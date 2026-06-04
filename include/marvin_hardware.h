@@ -263,7 +263,7 @@ private:
         void disconnect_gripper();
         /** One-time initial read per tool during on_activate; updates state and sets tool_initial_read_done_. Returns false if any tool fails to respond. */
         bool doInitialToolReads();
-        /** Map tool_idx (0=left, 1=right) to gripper joint index by name; returns tool_idx if single tool or no match. */
+        /** Map tool_idx (0=left/A, 1=right/B) to gripper joint array index. */
         size_t gripperJointIndexForTool(size_t tool_idx) const;
 
         // Unified tool access helpers

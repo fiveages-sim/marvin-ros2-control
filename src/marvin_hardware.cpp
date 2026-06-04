@@ -398,9 +398,10 @@ namespace marvin_ros2_control
 
         if (has_gripper_ && has_any_ee)
         {
-            const size_t expected_end_effectors = (robot_arm_index_ == ARM_DUAL)
-                                                    ? static_cast<size_t>(has_left_ee) + static_cast<size_t>(has_right_ee)
-                                                    : 1;
+            const size_t expected_end_effectors =
+                (robot_arm_index_ == ARM_LEFT || robot_arm_index_ == ARM_RIGHT || robot_arm_index_ == ARM_DUAL)
+                    ? 2u
+                    : 1u;
             const bool has_hand_ee =
                 (has_left_ee && eeTypeIsHand(left_ee_type_)) ||
                 (has_right_ee && eeTypeIsHand(right_ee_type_));
@@ -420,40 +421,44 @@ namespace marvin_ros2_control
             gripper_stable_count_.assign(array_size, 0);
 
             // Create tool objects (hand or gripper) using unified createTool method
-            tool_ptr_.reserve(expected_end_effectors);
+            tool_ptr_.resize(expected_end_effectors);
+            tool_is_left_side_.assign(expected_end_effectors, false);
+            tool_ee_types_.assign(expected_end_effectors, "");
             if (robot_arm_index_ == ARM_LEFT)
             {
-                // Left arm tool uses A channel
-                tool_ptr_.emplace_back(createTool(OnClearChDataA, OnSetChDataA, OnGetChDataA, 0, left_ee_type_));
-                tool_is_left_side_.push_back(true);
-                tool_ee_types_.push_back(left_ee_type_);
+                // tool_idx=0 is always left/A.
+                tool_ptr_[0] = createTool(OnClearChDataA, OnSetChDataA, OnGetChDataA, 0, left_ee_type_);
+                tool_is_left_side_[0] = true;
+                tool_ee_types_[0] = left_ee_type_;
             }
             else if (robot_arm_index_ == ARM_RIGHT)
             {
-                // Right arm tool uses B channel
-                tool_ptr_.emplace_back(createTool(OnClearChDataB, OnSetChDataB, OnGetChDataB, 1, right_ee_type_));
-                tool_is_left_side_.push_back(false);
-                tool_ee_types_.push_back(right_ee_type_);
+                // tool_idx=1 is always right/B, even if left has no tool.
+                tool_ptr_[1] = createTool(OnClearChDataB, OnSetChDataB, OnGetChDataB, 1, right_ee_type_);
+                tool_is_left_side_[1] = false;
+                tool_ee_types_[1] = right_ee_type_;
             }
             else if (robot_arm_index_ == ARM_DUAL)
             {
-                // Dual arm: [0]=A(left), [1]=B(right); create only configured tool sides.
+                tool_is_left_side_[0] = true;
+                tool_is_left_side_[1] = false;
+                // Dual arm: [0]=A(left), [1]=B(right); unconfigured sides remain nullptr.
                 if (has_left_ee) {
-                    tool_ptr_.emplace_back(createTool(OnClearChDataA, OnSetChDataA, OnGetChDataA, 0, left_ee_type_));
-                    tool_is_left_side_.push_back(true);
-                    tool_ee_types_.push_back(left_ee_type_);
+                    tool_ptr_[0] = createTool(OnClearChDataA, OnSetChDataA, OnGetChDataA, 0, left_ee_type_);
+                    tool_ee_types_[0] = left_ee_type_;
                 }
                 if (has_right_ee) {
-                    tool_ptr_.emplace_back(createTool(OnClearChDataB, OnSetChDataB, OnGetChDataB, 1, right_ee_type_));
-                    tool_is_left_side_.push_back(false);
-                    tool_ee_types_.push_back(right_ee_type_);
+                    tool_ptr_[1] = createTool(OnClearChDataB, OnSetChDataB, OnGetChDataB, 1, right_ee_type_);
+                    tool_ee_types_[1] = right_ee_type_;
                 }
             }
 
+            const size_t created_tool_count =
+                static_cast<size_t>(toolAt(0) != nullptr) + static_cast<size_t>(toolAt(1) != nullptr);
             RCLCPP_INFO(get_logger(),
                         "%s init: arm_type=%s, tool_type=%s, detected_joints=%zu, created_tools=%zu",
                         toolTypeLogName(),
-                        robot_arm_config_.c_str(), gripper_type_.c_str(), gripper_joint_name_.size(), tool_ptr_.size());
+                        robot_arm_config_.c_str(), gripper_type_.c_str(), gripper_joint_name_.size(), created_tool_count);
         }
         
         // Initialize hardware connection status
@@ -1946,14 +1951,20 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         {
             if (auto* tool = toolAt(i))
             {
-                result = result && tool->initialize();
-                if (result)
+                const bool tool_ok = tool->initialize();
+                result = tool_ok && result;
+                if (tool_ok)
                 {
                     // Clear this tool's channel receive buffer once at init
                     if (i == 0)
-                         OnClearChDataA();
+                        OnClearChDataA();
                     else if (i == 1)
-                         OnClearChDataB();
+                        OnClearChDataB();
+                }
+                else
+                {
+                    RCLCPP_WARN(get_logger(), "%s initialization failed for tool_idx=%zu",
+                                toolTypeLogName(), i);
                 }
             }
         }
@@ -1964,7 +1975,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
     {
         const size_t n = toolCount();
         constexpr int kMaxRetries = 3;
-        constexpr int kFirstWaitMs = 10;
+        constexpr int kFirstWaitMs = 100;
         constexpr int kRetryWaitMs = 100;
         for (size_t ti = 0; ti < n; ++ti)
         {
@@ -1988,9 +1999,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             }
             if (!ok)
             {
-                RCLCPP_WARN(get_logger(), "Initial tool read failed for tool_idx=%zu after %d attempts (no valid status); no longer read this side", ti, kMaxRetries);
-                if (ti < tool_init_failed_.size())
-                    tool_init_failed_[ti] = true;
+                RCLCPP_WARN(get_logger(), "Initial tool read failed for tool_idx=%zu after %d attempts (no valid status); continuing to poll this side", ti, kMaxRetries);
                 if (ti < tool_initial_read_done_.size())
                     tool_initial_read_done_[ti] = true;
                 size_t gi = gripperJointIndexForTool(ti);
@@ -2547,8 +2556,6 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
 
     size_t MarvinHardware::gripperJointIndexForTool(size_t tool_idx) const
     {
-        if (toolCount() < 2 || gripper_joint_name_.size() < 2)
-            return tool_idx;
         for (size_t k = 0; k < gripper_joint_name_.size(); ++k)
         {
             std::string name_lower = gripper_joint_name_[k];
@@ -2557,6 +2564,8 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             if (mapped == tool_idx)
                 return k;
         }
+        if (gripper_joint_name_.size() == 1)
+            return 0;
         return tool_idx;
     }
 
