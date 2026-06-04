@@ -16,7 +16,9 @@ namespace marvin_ros2_control
     template<typename Config>
     ChangingtekGripper<Config>::ChangingtekGripper(Clear485Func clear_485, Send485Func send_485,
                                                    GetChDataFunc on_get_ch_data)
-        : ModbusGripper(clear_485, send_485, on_get_ch_data), acceleration_set_(false), deceleration_set_(false)
+        : ModbusGripper(clear_485, send_485, on_get_ch_data),
+          acceleration_set_(false), deceleration_set_(false),
+          cached_velocity_reg_(0xFFFF), cached_torque_reg_(0xFFFF)
     {
     }
 
@@ -71,10 +73,18 @@ namespace marvin_ros2_control
                                         Config::WRITE_SINGLE_FUNCTION) && result;
             deceleration_set_ = true;
         }
-        result = writeSingleRegister(Config::SLAVE_ID, Config::VELOCITY_REG, vel_value,
-                                    Config::WRITE_SINGLE_FUNCTION) && result;
-        result = writeSingleRegister(Config::SLAVE_ID, Config::TORQUE_REG, trq_value,
-                                    Config::WRITE_SINGLE_FUNCTION) && result;
+        if (vel_value != cached_velocity_reg_)
+        {
+            result = writeSingleRegister(Config::SLAVE_ID, Config::VELOCITY_REG, vel_value,
+                                        Config::WRITE_SINGLE_FUNCTION) && result;
+            cached_velocity_reg_ = vel_value;
+        }
+        if (trq_value != cached_torque_reg_)
+        {
+            result = writeSingleRegister(Config::SLAVE_ID, Config::TORQUE_REG, trq_value,
+                                        Config::WRITE_SINGLE_FUNCTION) && result;
+            cached_torque_reg_ = trq_value;
+        }
         // Trigger movement
         result = writeSingleRegister(Config::SLAVE_ID, Config::TRIGGER_REG_ADDR, Config::TRIGGER_VALUE,
                                     Config::WRITE_SINGLE_FUNCTION) && result;
@@ -161,7 +171,7 @@ namespace marvin_ros2_control
         position = PositionConverter::Changingtek90::modbusToNormalized(modbus_pos);
         velocity = 0;
         torque = 0;
-        RCLCPP_INFO(logger_, "Changingtek processReadResponse: regs [0x%04X 0x%04X] -> modbus_pos=%u -> normalized=%.4f",
+        RCLCPP_DEBUG(logger_, "Changingtek processReadResponse: regs [0x%04X 0x%04X] -> modbus_pos=%u -> normalized=%.4f",
                      registers[0], registers[1], modbus_pos, position);
         return true;
     }
@@ -171,6 +181,8 @@ namespace marvin_ros2_control
     {
         acceleration_set_ = false;
         deceleration_set_ = false;
+        cached_velocity_reg_ = 0xFFFF;
+        cached_torque_reg_ = 0xFFFF;
         RCLCPP_INFO(logger_, "Changingtek Gripper deinitialized");
     }
 
@@ -179,6 +191,8 @@ namespace marvin_ros2_control
     {
         acceleration_set_ = false;
         deceleration_set_ = false;
+        cached_velocity_reg_ = 0xFFFF;
+        cached_torque_reg_ = 0xFFFF;
     }
 } // namespace marvin_ros2_control
 
