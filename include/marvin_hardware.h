@@ -4,6 +4,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <unordered_map>
 #include <thread>
 #include <array>
 #include <atomic>
@@ -176,9 +177,13 @@ private:
                                     const std::vector<double>& cart_k_gains,
                                     const std::vector<double>& cart_d_gains);
         void declare_node_parameters();
+        void syncToolDynamicsFromNodeParams();
+        void applyAllToolDynamics(const std::unordered_map<std::string, double>* pending = nullptr);
+        /** 0=left, 1=right; maps gripper/hand command index to arm side. */
+        size_t sideForGripperIndex(size_t k) const;
 
         
-        // Gripper parameters
+        // Gripper / hand: normalized torque/velocity from ROS params (not HW command interfaces).
         std::string gripper_type_;
         std::string left_ee_type_;
         std::string right_ee_type_;
@@ -186,6 +191,8 @@ private:
         long right_ee_channel_ = COM1_CHANNEL;
         double gripper_torque_scale_ = 1.0;  // Torque scaling factor (0.0-1.0, default: 1.0)
         /** If true, enable high-frequency INFO logs for tool (hand/gripper) and Modbus hex dumps. */
+        std::vector<double> gripper_effort_command_;   // HW_IF_EFFORT command → normalized torque to tool
+        std::vector<double> gripper_velocity_command_; // HW_IF_VELOCITY command → normalized velocity to tool
         bool debug_tool_logs_ = false;
         bool has_gripper_ = false;
         std::vector<std::string> gripper_joint_name_;
@@ -200,6 +207,8 @@ private:
         std::vector<double> gripper_effort_;
         std::vector<double> gripper_position_command_;
         std::vector<double> last_gripper_command_;
+        std::vector<double> last_gripper_effort_ack_;
+        std::vector<double> last_gripper_velocity_ack_;
         std::vector<bool> gripper_stopped_;
         void contains_tool();
         bool eeTypeIsHand(const std::string& ee_type) const;

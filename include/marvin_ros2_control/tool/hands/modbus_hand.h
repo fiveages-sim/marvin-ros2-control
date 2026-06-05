@@ -27,12 +27,12 @@ namespace marvin_ros2_control
 
         // GripperBase interface implementation
         bool initialize() override = 0;
-        bool move_gripper(int torque, int velocity, double position) override = 0;
+        bool move_gripper(double normalized_torque, double normalized_velocity, double position) override = 0;
         // Multi-joint hand command (normalized positions per joint).
         // Concrete hands (O7/O6/L6) should implement this.
         virtual bool move_hand(
-            const std::vector<int>& torques,
-            const std::vector<int>& velocities,
+            const std::vector<double>& torques,
+            const std::vector<double>& velocities,
             const std::vector<double>& positions
         ) = 0;
         bool getStatus() override = 0;

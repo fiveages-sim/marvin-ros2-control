@@ -236,18 +236,15 @@ namespace marvin_ros2_control
         ensure_double_array_sized("left_dyn_param", kDefaultLeftDynParam, 10);
         ensure_double_array_sized("right_kine_param", kDefaultRightKineParam, 6);
         ensure_double_array_sized("right_dyn_param", kDefaultRightDynParam, 10);
-        
-        // Gripper torque scaling factor (0.0-1.0, default: 1.0)
-        // Actual torque sent = max_torque(100) * gripper_torque_scale
-        ensure_param("gripper_torque_scale", 1.0, hw_find("gripper_torque_scale"),
-                     [](const std::string& s, double def) { 
-                         try { 
-                             double val = std::stod(s);
-                             return (val < 0.0) ? 0.0 : ((val > 1.0) ? 1.0 : val);
-                         } catch (...) { 
-                             return def; 
-                         } 
-                     });
+
+        ensure_param("left_tool_torque", 1.0, hw_find("left_tool_torque"),
+                     [](const std::string& s, double def) { try { return std::stod(s); } catch (...) { return def; } });
+        ensure_param("left_tool_velocity", 1.0, hw_find("left_tool_velocity"),
+                     [](const std::string& s, double def) { try { return std::stod(s); } catch (...) { return def; } });
+        ensure_param("right_tool_torque", 1.0, hw_find("right_tool_torque"),
+                     [](const std::string& s, double def) { try { return std::stod(s); } catch (...) { return def; } });
+        ensure_param("right_tool_velocity", 1.0, hw_find("right_tool_velocity"),
+                     [](const std::string& s, double def) { try { return std::stod(s); } catch (...) { return def; } });
     }
     
     hardware_interface::CallbackReturn MarvinHardware::on_init(
@@ -352,18 +349,12 @@ namespace marvin_ros2_control
         } else if (!right_ee_type_.empty()) {
             gripper_type_ = right_ee_type_;
         }
-        
-        // 获取夹爪力矩系数参数
-        gripper_torque_scale_ = get_node_param("gripper_torque_scale", 1.0);
+
         use_async_tool_comm_ = get_node_param("use_async_tool_comm", true);
         debug_tool_logs_ = get_node_param("debug_tool_logs", false);
         marvin_ros2_control::ModbusIO::setDebugEnabled(debug_tool_logs_);
         init_tool_on_startup_ = get_node_param("init_tool_on_startup", true);
-        // 限制范围在 0.0-1.0
-        if (gripper_torque_scale_ < 0.0) gripper_torque_scale_ = 0.0;
-        if (gripper_torque_scale_ > 1.0) gripper_torque_scale_ = 1.0;
-        RCLCPP_INFO(get_logger(), "Gripper torque scale: %.2f (actual torque = %d)", 
-                    gripper_torque_scale_, static_cast<int>(100.0 * gripper_torque_scale_));
+
         RCLCPP_INFO(get_logger(), "init_tool_on_startup: %s", init_tool_on_startup_ ? "true" : "false");
 
         // 获取硬件连接参数
@@ -420,10 +411,14 @@ namespace marvin_ros2_control
             const size_t array_size = has_hand_ee ? gripper_joint_name_.size() : expected_end_effectors;
 
             gripper_position_command_.assign(array_size, -1.0);
+            gripper_effort_command_.assign(array_size, 1.0);
+            gripper_velocity_command_.assign(array_size, 1.0);
             gripper_position_.assign(array_size, 0.0);
             gripper_velocity_.assign(array_size, 0.0);
             gripper_effort_.assign(array_size, 0.0);
             last_gripper_command_.assign(array_size, -1.0);
+            last_gripper_effort_ack_.assign(array_size, std::numeric_limits<double>::quiet_NaN());
+            last_gripper_velocity_ack_.assign(array_size, std::numeric_limits<double>::quiet_NaN());
             gripper_stopped_.assign(array_size, true);
             gripper_previous_position_.assign(array_size, std::numeric_limits<double>::quiet_NaN());
             gripper_stable_count_.assign(array_size, 0);
@@ -527,10 +522,94 @@ namespace marvin_ros2_control
         
         param_callback_handle_ = node_->add_on_set_parameters_callback(
                 std::bind(&MarvinHardware::paramCallback, this, std::placeholders::_1));
+        syncToolDynamicsFromNodeParams();
         RCLCPP_INFO(get_logger(), "Robot configuration parameters ready. Use 'ros2 param set' to change configuration dynamically.");
             
         RCLCPP_INFO(get_logger(), "Marvin Hardware Interface initialized successfully");
         return hardware_interface::CallbackReturn::SUCCESS;
+    }
+
+    size_t MarvinHardware::sideForGripperIndex(size_t k) const
+    {
+        if (tool_type_ != ToolType::Hand)
+        {
+            if (toolCount() >= 2)
+            {
+                return k;
+            }
+            return (robot_arm_index_ == ARM_RIGHT) ? 1u : 0u;
+        }
+        if (k >= gripper_joint_name_.size())
+        {
+            return 0;
+        }
+        std::string name_lower = gripper_joint_name_[k];
+        std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
+        if (toolCount() >= 2 && name_lower.find("right") != std::string::npos)
+        {
+            return 1;
+        }
+        return 0;
+    }
+
+    static bool isToolDynamicsParamName(const std::string& name)
+    {
+        return name == "left_tool_torque" || name == "left_tool_velocity"
+            || name == "right_tool_torque" || name == "right_tool_velocity";
+    }
+
+    void MarvinHardware::applyAllToolDynamics(const std::unordered_map<std::string, double>* pending)
+    {
+        auto read_tool_param = [this, pending](const std::string& name, double default_val) {
+            if (pending)
+            {
+                const auto it = pending->find(name);
+                if (it != pending->end())
+                {
+                    return it->second;
+                }
+            }
+            return get_node_param(name, default_val);
+        };
+
+        const double left_torque = std::clamp(read_tool_param("left_tool_torque", 1.0), 0.0, 1.0);
+        const double left_velocity = std::clamp(read_tool_param("left_tool_velocity", 1.0), 0.0, 1.0);
+        const double right_torque = std::clamp(read_tool_param("right_tool_torque", 1.0), 0.0, 1.0);
+        const double right_velocity = std::clamp(read_tool_param("right_tool_velocity", 1.0), 0.0, 1.0);
+
+        const size_t n = std::max({gripper_joint_name_.size(), gripper_effort_command_.size(),
+                                   gripper_velocity_command_.size()});
+        for (size_t k = 0; k < n; ++k)
+        {
+            const size_t side = sideForGripperIndex(k);
+            const double torque = (side == 0) ? left_torque : right_torque;
+            const double velocity = (side == 0) ? left_velocity : right_velocity;
+            if (k < gripper_effort_command_.size())
+            {
+                gripper_effort_command_[k] = torque;
+            }
+            if (k < gripper_velocity_command_.size())
+            {
+                gripper_velocity_command_[k] = velocity;
+            }
+            if (k < last_gripper_effort_ack_.size())
+            {
+                last_gripper_effort_ack_[k] = std::numeric_limits<double>::quiet_NaN();
+            }
+            if (k < last_gripper_velocity_ack_.size())
+            {
+                last_gripper_velocity_ack_[k] = std::numeric_limits<double>::quiet_NaN();
+            }
+        }
+    }
+
+    void MarvinHardware::syncToolDynamicsFromNodeParams()
+    {
+        if (!node_ || !has_gripper_)
+        {
+            return;
+        }
+        applyAllToolDynamics();
     }
 
 rcl_interfaces::msg::SetParametersResult
@@ -552,29 +631,37 @@ MarvinHardware::paramCallback(const std::vector<rclcpp::Parameter> & params)
     std::vector<double> cart_k_gains;
     std::vector<double> cart_d_gains;
 
+    std::unordered_map<std::string, double> tool_dyn_batch;
+    for (const auto& param : params)
+    {
+        const std::string& pname = param.get_name();
+        if (!isToolDynamicsParamName(pname))
+        {
+            continue;
+        }
+        const double v = param.as_double();
+        if (v < 0.0 || v > 1.0)
+        {
+            result.successful = false;
+            result.reason = pname + " must be in [0.0, 1.0]";
+            return result;
+        }
+        tool_dyn_batch[pname] = v;
+    }
+    if (!tool_dyn_batch.empty())
+    {
+        applyAllToolDynamics(&tool_dyn_batch);
+        for (const auto& entry : tool_dyn_batch)
+        {
+            RCLCPP_INFO(get_logger(), "Updated %s = %.3f", entry.first.c_str(), entry.second);
+        }
+    }
+
     for (const auto & param : params) {
-        // Handle gripper_torque_scale separately - it doesn't require hardware connection
-        if (param.get_name() == "gripper_torque_scale") {
-            double scale = param.as_double();
-            // Limit range to 0.0-1.0
-            if (scale < 0.0) scale = 0.0;
-            if (scale > 1.0) scale = 1.0;
-            gripper_torque_scale_ = scale;
-            RCLCPP_INFO(get_logger(), "Gripper torque scale updated to: %.2f (actual torque = %d)", 
-                        gripper_torque_scale_, static_cast<int>(100.0 * gripper_torque_scale_));
-            
-            // Reset end effector state so that acceleration/torque will be re-sent with new scale value
-            // This is especially important for ChangingtekGripper which caches acceleration_set_
-            for (size_t i = 0; i < toolCount(); i++)
-            {
-                if (auto* tool = toolAt(i))
-                {
-                    tool->resetState();
-                }
-            }
-            RCLCPP_INFO(get_logger(), "Reset state for %zu tool(s) to apply new torque scale", toolCount());
-            
-            continue;  // Skip hardware connection check for this parameter
+        const std::string& pname = param.get_name();
+        if (isToolDynamicsParamName(pname))
+        {
+            continue;
         }
 
         if (param.get_name() == "left_brake_release" || param.get_name() == "right_brake_release") {
@@ -1799,10 +1886,10 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                 // std::this_thread::sleep_for(std::chrono::milliseconds(2));
                 continue;
             }
-            if (tool_idx < in_flight_type_.size() && in_flight_type_[tool_idx].load() == 2 &&
-                isModbusWriteAck(data_buf, static_cast<size_t>(received)))
+            if (received >= 2 && isModbusWriteAck(data_buf, static_cast<size_t>(received)))
             {
-                applyGripperWriteAckFromInFlight(tool_idx);
+                if (tool_idx < in_flight_type_.size() && in_flight_type_[tool_idx].load() == 2)
+                    applyGripperWriteAckFromInFlight(tool_idx);
                 continue;
             }
             if (received >= 2 && data_buf[1] == 0x04)
@@ -1898,8 +1985,21 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                     if (hand && write_cmd.size() >= hand->getJointCount())
                     {
                         const size_t dof = hand->getJointCount();
-                        std::vector<int> torques(dof, static_cast<int>(100.0 * gripper_torque_scale_));
-                        std::vector<int> velocities(dof, 100);
+                        std::vector<double> torques(dof, 1.0);
+                        std::vector<double> velocities(dof, 1.0);
+                        for (size_t k = 0; k < gripper_joint_name_.size() && k < gripper_effort_command_.size() && k < gripper_velocity_command_.size(); ++k)
+                        {
+                            std::string name_lower = gripper_joint_name_[k];
+                            std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
+                            size_t mapped = (toolCount() >= 2 && name_lower.find("right_hand_") != std::string::npos) ? 1 : 0;
+                            if (mapped != tool_idx) continue;
+                            int li = hand->mapJointNameToIndex(gripper_joint_name_[k]);
+                            if (li >= 0 && static_cast<size_t>(li) < dof)
+                            {
+                                torques[static_cast<size_t>(li)] = std::clamp(gripper_effort_command_[k], 0.0, 1.0);
+                                velocities[static_cast<size_t>(li)] = std::clamp(gripper_velocity_command_[k], 0.0, 1.0);
+                            }
+                        }
                         std::vector<double> pos(write_cmd.begin(), write_cmd.begin() + static_cast<std::vector<double>::difference_type>(dof));
                         hand->move_hand(torques, velocities, pos);
                         for (size_t k = 0; k < gripper_joint_name_.size() && k < last_gripper_command_.size() && k < gripper_stopped_.size(); ++k)
@@ -1913,6 +2013,10 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                             {
                                 last_gripper_command_[k] = write_cmd[static_cast<size_t>(li)];
                                 gripper_stopped_[k] = false;
+                                if (k < last_gripper_effort_ack_.size() && k < gripper_effort_command_.size())
+                                    last_gripper_effort_ack_[k] = gripper_effort_command_[k];
+                                if (k < last_gripper_velocity_ack_.size() && k < gripper_velocity_command_.size())
+                                    last_gripper_velocity_ack_[k] = gripper_velocity_command_[k];
                             }
                         }
                         if (tool_idx < hand_stabilized_.size() && tool_idx < hand_stable_count_.size())
@@ -1924,7 +2028,12 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                 }
                 else
                 {
-                    if (tool->move_gripper(static_cast<int>(100.0 * gripper_torque_scale_), 100, write_cmd[0]))
+                    const size_t gi = gripperJointIndexForTool(tool_idx);
+                    const double nt = (gi < gripper_effort_command_.size())
+                        ? std::clamp(gripper_effort_command_[gi], 0.0, 1.0) : 1.0;
+                    const double nv = (gi < gripper_velocity_command_.size())
+                        ? std::clamp(gripper_velocity_command_[gi], 0.0, 1.0) : 1.0;
+                    if (tool->move_gripper(nt, nv, write_cmd[0]))
                     {
                         if (tool_idx < in_flight_write_command_.size())
                         {
@@ -2142,14 +2251,32 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             if (!hand || write_cmd.size() < hand->getJointCount())
                 return false;
             const size_t dof = hand->getJointCount();
-            std::vector<int> torques(dof, static_cast<int>(100.0 * gripper_torque_scale_));
-            std::vector<int> velocities(dof, 100);
+            std::vector<double> torques(dof, 1.0);
+            std::vector<double> velocities(dof, 1.0);
+            for (size_t k = 0; k < gripper_joint_name_.size() && k < gripper_effort_command_.size() && k < gripper_velocity_command_.size(); ++k)
+            {
+                std::string name_lower = gripper_joint_name_[k];
+                std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
+                size_t mapped = (toolCount() >= 2 && name_lower.find("right_hand_") != std::string::npos) ? 1 : 0;
+                if (mapped != tool_idx) continue;
+                int li = hand->mapJointNameToIndex(gripper_joint_name_[k]);
+                if (li >= 0 && static_cast<size_t>(li) < dof)
+                {
+                    torques[static_cast<size_t>(li)] = std::clamp(gripper_effort_command_[k], 0.0, 1.0);
+                    velocities[static_cast<size_t>(li)] = std::clamp(gripper_velocity_command_[k], 0.0, 1.0);
+                }
+            }
             std::vector<double> pos(write_cmd.begin(), write_cmd.begin() + static_cast<std::vector<double>::difference_type>(dof));
             hand->move_hand(torques, velocities, pos);
         }
         else
         {
-            if (!tool->move_gripper(static_cast<int>(100.0 * gripper_torque_scale_), 100, write_cmd[0]))
+            const size_t gi = gripperJointIndexForTool(tool_idx);
+            const double nt = (gi < gripper_effort_command_.size())
+                ? std::clamp(gripper_effort_command_[gi], 0.0, 1.0) : 1.0;
+            const double nv = (gi < gripper_velocity_command_.size())
+                ? std::clamp(gripper_velocity_command_[gi], 0.0, 1.0) : 1.0;
+            if (!tool->move_gripper(nt, nv, write_cmd[0]))
                 return false;
             if (tool_idx < in_flight_type_.size() && tool_idx < in_flight_write_command_.size())
             {
@@ -2372,18 +2499,22 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                         gripper_joint_name_[i],
                         hardware_interface::HW_IF_POSITION,
                         &gripper_position_[i]));
-
-                state_interfaces.push_back(
-                    std::make_shared<hardware_interface::StateInterface>(
-                        gripper_joint_name_[i],
-                        hardware_interface::HW_IF_VELOCITY,
-                        &gripper_velocity_[i]));
-
-                state_interfaces.push_back(
-                    std::make_shared<hardware_interface::StateInterface>(
-                        gripper_joint_name_[i],
-                        hardware_interface::HW_IF_EFFORT,
-                        &gripper_effort_[i]));
+                if (i < gripper_velocity_.size())
+                {
+                    state_interfaces.push_back(
+                        std::make_shared<hardware_interface::StateInterface>(
+                            gripper_joint_name_[i],
+                            hardware_interface::HW_IF_VELOCITY,
+                            &gripper_velocity_[i]));
+                }
+                if (i < gripper_effort_.size())
+                {
+                    state_interfaces.push_back(
+                        std::make_shared<hardware_interface::StateInterface>(
+                            gripper_joint_name_[i],
+                            hardware_interface::HW_IF_EFFORT,
+                            &gripper_effort_[i]));
+                }
             }
         }
 
@@ -2617,10 +2748,20 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                     if (gi < last_gripper_command_.size() &&
                         CommandChangeDetector::hasChanged(last_gripper_command_[gi], gripper_position_command_[gi], 0.001))
                         any_changed = true;
+                    if (gi < gripper_effort_command_.size() && gi < last_gripper_effort_ack_.size() &&
+                        (std::isnan(last_gripper_effort_ack_[gi]) ||
+                         CommandChangeDetector::hasChanged(last_gripper_effort_ack_[gi], gripper_effort_command_[gi], 0.001)))
+                        any_changed = true;
+                    if (gi < gripper_velocity_command_.size() && gi < last_gripper_velocity_ack_.size() &&
+                        (std::isnan(last_gripper_velocity_ack_[gi]) ||
+                         CommandChangeDetector::hasChanged(last_gripper_velocity_ack_[gi], gripper_velocity_command_[gi], 0.001)))
+                        any_changed = true;
                 }
             }
             if (any_changed)
-                RCLCPP_INFO(get_logger(), "shouldSendToolCommand: 需要发送新的写指令 tool_idx=%zu (hand)", tool_idx);
+            {
+                RCLCPP_DEBUG(get_logger(), "shouldSendToolCommand: hand write tool_idx=%zu", tool_idx);
+            }
             return any_changed;
         }
         size_t gi = gripperJointIndexForTool(tool_idx); // gripper index 
@@ -2629,10 +2770,17 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         // 已有写指令在途未响应时不再发新写，直到该写的响应被消费（同步模式；异步模式不设 in_flight=2）
         if (tool_idx < in_flight_type_.size() && in_flight_type_[tool_idx].load() == 2)
             return false;
-        if (!CommandChangeDetector::hasChanged(last_gripper_command_[gi], gripper_position_command_[gi]))
+        const bool pos_changed = CommandChangeDetector::hasChanged(last_gripper_command_[gi], gripper_position_command_[gi]);
+        const bool trq_changed = (gi < gripper_effort_command_.size() && gi < last_gripper_effort_ack_.size() &&
+            (std::isnan(last_gripper_effort_ack_[gi]) ||
+             CommandChangeDetector::hasChanged(last_gripper_effort_ack_[gi], gripper_effort_command_[gi], 0.001)));
+        const bool vel_changed = (gi < gripper_velocity_command_.size() && gi < last_gripper_velocity_ack_.size() &&
+            (std::isnan(last_gripper_velocity_ack_[gi]) ||
+             CommandChangeDetector::hasChanged(last_gripper_velocity_ack_[gi], gripper_velocity_command_[gi], 0.001)));
+        if (!pos_changed && !trq_changed && !vel_changed)
             return false;
         write_cmd_out = { gripper_position_command_[gi] };
-        RCLCPP_INFO(get_logger(), "shouldSendToolCommand: 需要发送新的写指令 tool_idx=%zu (gripper)", tool_idx);
+        RCLCPP_DEBUG(get_logger(), "shouldSendToolCommand: gripper write tool_idx=%zu", tool_idx);
         return true;
     }
 
@@ -2666,6 +2814,10 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                     {
                         last_gripper_command_[k] = write_cmd[li];
                         gripper_stopped_[k] = false;
+                        if (k < last_gripper_effort_ack_.size() && k < gripper_effort_command_.size())
+                            last_gripper_effort_ack_[k] = gripper_effort_command_[k];
+                        if (k < last_gripper_velocity_ack_.size() && k < gripper_velocity_command_.size())
+                            last_gripper_velocity_ack_[k] = gripper_velocity_command_[k];
                     }
                 }
                 if (tool_idx < hand_stabilized_.size() && tool_idx < hand_stable_count_.size())
@@ -2678,6 +2830,10 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         else if (gi < last_gripper_command_.size())
         {
             last_gripper_command_[gi] = write_cmd[0];
+            if (gi < last_gripper_effort_ack_.size() && gi < gripper_effort_command_.size())
+                last_gripper_effort_ack_[gi] = gripper_effort_command_[gi];
+            if (gi < last_gripper_velocity_ack_.size() && gi < gripper_velocity_command_.size())
+                last_gripper_velocity_ack_[gi] = gripper_velocity_command_[gi];
             if (gi < gripper_stopped_.size())
                 gripper_stopped_[gi] = false;
             if (gi < gripper_stable_count_.size())
@@ -2833,6 +2989,9 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
     {
         auto* tool = toolAt(gripper_idx);
         if (!tool) return;
+
+        if (size >= 2 && isModbusWriteAck(data_buf, size))
+            return;
 
         auto* gripper = dynamic_cast<ModbusGripper*>(tool);
         if (gripper)

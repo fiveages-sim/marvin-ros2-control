@@ -5,25 +5,26 @@
 #include <thread>
 #include <chrono>
 #include <cstdio>
+#include <algorithm>
 #include "rclcpp/logging.hpp"
 #include "gripper_hardware_common/utils/PositionConverter.h"
 #include "gripper_hardware_common/utils/TorqueConverter.h"
+#include "gripper_hardware_common/utils/VelocityConverter.h"
 
 namespace marvin_ros2_control
 {
     template<typename Config>
     ChangingtekGripper<Config>::ChangingtekGripper(Clear485Func clear_485, Send485Func send_485,
                                                    GetChDataFunc on_get_ch_data)
-        : ModbusGripper(clear_485, send_485, on_get_ch_data), acceleration_set_(false), deceleration_set_(false)
+        : ModbusGripper(clear_485, send_485, on_get_ch_data),
+          acceleration_set_(false), deceleration_set_(false),
+          cached_velocity_reg_(0xFFFF), cached_torque_reg_(0xFFFF)
     {
     }
 
     template<typename Config>
     bool ChangingtekGripper<Config>::initialize()
     {
-        acceleration_set_ = true;
-        deceleration_set_ = true;
-        
         bool result = writeSingleRegister(Config::SLAVE_ID, Config::INIT_REG_ADDR, Config::POWER_ON,
                                         Config::WRITE_SINGLE_FUNCTION);
         RCLCPP_INFO(logger_, "Initializing Changingtek Gripper (slave: 0x%02X)", Config::SLAVE_ID);
@@ -32,7 +33,7 @@ namespace marvin_ros2_control
     }
 
     template<typename Config>
-    bool ChangingtekGripper<Config>::move_gripper(int torque, int velocity, double normalized_pos)
+    bool ChangingtekGripper<Config>::move_gripper(double normalized_torque, double normalized_velocity, double normalized_pos)
     {
         using namespace gripper_hardware_common;
         
@@ -40,17 +41,14 @@ namespace marvin_ros2_control
         uint16_t modbus_pos = PositionConverter::Changingtek90::normalizedToModbus(normalized_pos);
         int position = static_cast<int>(modbus_pos);
         
-        // Convert torque: input torque (0-100, already scaled by gripper_torque_scale) 
-        // is treated as normalized (0.0-1.0) and converted to Modbus torque value (0-255, 0xFF)
-        // This ensures torque mapping is consistent with position mapping
-        double normalized_torque = static_cast<double>(torque) / 100.0;  // Convert 0-100 to 0.0-1.0
         int modbus_torque = TorqueConverter::Changingtek90::normalizedToModbus(normalized_torque);
+        const int vel_byte = VelocityConverter::Changingtek90::normalizedToVelocityRegister(normalized_velocity);
+        uint16_t vel_value = static_cast<uint16_t>(vel_byte);
         
-        RCLCPP_INFO(logger_, "Changingtek Gripper - pos: %.3f->%d, vel: %d, trq: %d->%d (scale: %.2f)", 
-                   normalized_pos, position, velocity, torque, modbus_torque, normalized_torque);
+        RCLCPP_INFO(logger_, "Changingtek Gripper - pos: %.3f->%d, vel_norm: %.3f->%u, trq_norm: %.3f->%d",
+                   normalized_pos, position, normalized_velocity, vel_value, normalized_torque, modbus_torque);
         
         // Prepare values
-        uint16_t vel_value = static_cast<uint16_t>(velocity & 0xFFFF);
         uint16_t trq_value = static_cast<uint16_t>(modbus_torque & 0xFFFF);
         uint16_t pos_low = 0x0000;
         uint16_t pos_high = static_cast<uint16_t>(position & 0xFFFF);
@@ -63,28 +61,29 @@ namespace marvin_ros2_control
                                        Config::WRITE_FUNCTION) && result;
             
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
-        // Configure acceleration if not set
         if (!acceleration_set_)
         {
             result = writeSingleRegister(Config::SLAVE_ID, Config::ACCELERATION_REG, Config::DEFAULT_ACCELERATION,
                                         Config::WRITE_SINGLE_FUNCTION) && result;
             acceleration_set_ = true;
-            
-            // Write velocity
-            result = writeSingleRegister(Config::SLAVE_ID, Config::VELOCITY_REG, vel_value,
-                                        Config::WRITE_SINGLE_FUNCTION) && result;
-            
-            // Write torque
-            result = writeSingleRegister(Config::SLAVE_ID, Config::TORQUE_REG, trq_value,
-                                        Config::WRITE_SINGLE_FUNCTION) && result;
         }
-        
-        // Configure deceleration if not set
         if (!deceleration_set_)
         {
             result = writeSingleRegister(Config::SLAVE_ID, Config::DECELERATION_REG, Config::DEFAULT_DECELERATION,
                                         Config::WRITE_SINGLE_FUNCTION) && result;
             deceleration_set_ = true;
+        }
+        if (vel_value != cached_velocity_reg_)
+        {
+            result = writeSingleRegister(Config::SLAVE_ID, Config::VELOCITY_REG, vel_value,
+                                        Config::WRITE_SINGLE_FUNCTION) && result;
+            cached_velocity_reg_ = vel_value;
+        }
+        if (trq_value != cached_torque_reg_)
+        {
+            result = writeSingleRegister(Config::SLAVE_ID, Config::TORQUE_REG, trq_value,
+                                        Config::WRITE_SINGLE_FUNCTION) && result;
+            cached_torque_reg_ = trq_value;
         }
         // Trigger movement
         result = writeSingleRegister(Config::SLAVE_ID, Config::TRIGGER_REG_ADDR, Config::TRIGGER_VALUE,
@@ -172,7 +171,7 @@ namespace marvin_ros2_control
         position = PositionConverter::Changingtek90::modbusToNormalized(modbus_pos);
         velocity = 0;
         torque = 0;
-        RCLCPP_INFO(logger_, "Changingtek processReadResponse: regs [0x%04X 0x%04X] -> modbus_pos=%u -> normalized=%.4f",
+        RCLCPP_DEBUG(logger_, "Changingtek processReadResponse: regs [0x%04X 0x%04X] -> modbus_pos=%u -> normalized=%.4f",
                      registers[0], registers[1], modbus_pos, position);
         return true;
     }
@@ -182,6 +181,8 @@ namespace marvin_ros2_control
     {
         acceleration_set_ = false;
         deceleration_set_ = false;
+        cached_velocity_reg_ = 0xFFFF;
+        cached_torque_reg_ = 0xFFFF;
         RCLCPP_INFO(logger_, "Changingtek Gripper deinitialized");
     }
 
@@ -190,6 +191,8 @@ namespace marvin_ros2_control
     {
         acceleration_set_ = false;
         deceleration_set_ = false;
+        cached_velocity_reg_ = 0xFFFF;
+        cached_torque_reg_ = 0xFFFF;
     }
 } // namespace marvin_ros2_control
 
