@@ -50,19 +50,17 @@ namespace marvin_ros2_control
             return true;
         }
 
-        bool move_gripper(int torque, int velocity, double normalized_pos) override
+        bool move_gripper(double normalized_torque, double normalized_velocity, double normalized_pos) override
         {
-            (void)torque;
-            (void)velocity;
-            std::vector<int> torques(JOINT_COUNT, torque);
-            std::vector<int> velocities(JOINT_COUNT, velocity);
+            std::vector<double> torques(JOINT_COUNT, std::clamp(normalized_torque, 0.0, 1.0));
+            std::vector<double> velocities(JOINT_COUNT, std::clamp(normalized_velocity, 0.0, 1.0));
             std::vector<double> positions(JOINT_COUNT, normalized_pos);
             return move_hand(torques, velocities, positions);
         }
 
         bool move_hand(
-            const std::vector<int>& torques,
-            const std::vector<int>& velocities,
+            const std::vector<double>& torques,
+            const std::vector<double>& velocities,
             const std::vector<double>& positions) override
         {
             (void)torques;
