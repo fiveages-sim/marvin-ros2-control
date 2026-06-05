@@ -46,7 +46,7 @@ namespace marvin_ros2_control
 
         bool initialize() override
         {
-            RCLCPP_INFO(logger_, "Initializing Freedom-V1 hand (6-DOF, slave: 0x%02X)", slave_id_);
+            RCLCPP_INFO(logger_, "Initializing freedom_v1 hand (6-DOF, slave: 0x%02X)", slave_id_);
             return true;
         }
 
@@ -67,7 +67,7 @@ namespace marvin_ros2_control
             (void)velocities;
             if (positions.size() != JOINT_COUNT)
             {
-                RCLCPP_ERROR(logger_, "Freedom-V1: Invalid position size. Expected %zu, got %zu",
+                RCLCPP_ERROR(logger_, "freedom_v1: Invalid position size. Expected %zu, got %zu",
                              JOINT_COUNT, positions.size());
                 return false;
             }
@@ -209,7 +209,7 @@ namespace marvin_ros2_control
 
         void deinitialize() override
         {
-            RCLCPP_INFO(logger_, "Freedom-V1 hand deinitialized");
+            RCLCPP_INFO(logger_, "freedom_v1 hand deinitialized");
         }
 
         void resetState() override

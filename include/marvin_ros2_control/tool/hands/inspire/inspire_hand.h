@@ -46,22 +46,22 @@ namespace marvin_ros2_control
 
         bool initialize() override
         {
-            RCLCPP_INFO(logger_, "Initializing Inspire-E2 hand (6-DOF, slave: 0x%02X)", slave_id_);
+            RCLCPP_INFO(logger_, "Initializing inspire_e2 hand (6-DOF, slave: 0x%02X)", slave_id_);
             std::vector<uint16_t> modes(ACTUATOR_COUNT, 0);
             std::vector<uint16_t> speeds(ACTUATOR_COUNT, kDefaultSpeed);
             std::vector<uint16_t> forces(ACTUATOR_COUNT, kDefaultForce);
 
             if (!writeMultipleRegisters(slave_id_, kModeRegister, modes, kWriteFunction))
             {
-                RCLCPP_WARN(logger_, "Inspire-E2: Failed to set mode register; continuing");
+                RCLCPP_WARN(logger_, "inspire_e2: Failed to set mode register; continuing");
             }
             if (!writeMultipleRegisters(slave_id_, kSpeedSetRegister, speeds, kWriteFunction))
             {
-                RCLCPP_WARN(logger_, "Inspire-E2: Failed to set speed register; continuing");
+                RCLCPP_WARN(logger_, "inspire_e2: Failed to set speed register; continuing");
             }
             if (!writeMultipleRegisters(slave_id_, kForceSetRegister, forces, kWriteFunction))
             {
-                RCLCPP_WARN(logger_, "Inspire-E2: Failed to set force register; continuing");
+                RCLCPP_WARN(logger_, "inspire_e2: Failed to set force register; continuing");
             }
             return true;
         }
@@ -83,7 +83,7 @@ namespace marvin_ros2_control
             (void)velocities;
             if (positions.size() != JOINT_COUNT)
             {
-                RCLCPP_ERROR(logger_, "Inspire-E2: Invalid position size. Expected %zu, got %zu",
+                RCLCPP_ERROR(logger_, "inspire_e2: Invalid position size. Expected %zu, got %zu",
                              JOINT_COUNT, positions.size());
                 return false;
             }
@@ -139,7 +139,7 @@ namespace marvin_ros2_control
 
         void deinitialize() override
         {
-            RCLCPP_INFO(logger_, "Inspire-E2 hand deinitialized");
+            RCLCPP_INFO(logger_, "inspire_e2 hand deinitialized");
         }
 
         void resetState() override

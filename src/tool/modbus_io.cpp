@@ -291,17 +291,17 @@ namespace marvin_ros2_control
 
     bool ModbusIO::sendRequest(const std::vector<uint8_t>& request)
     {
-        if (isDebugEnabled() || channel_ == CAN_CHANNEL)
+        if (isDebugEnabled())
         {
             char debug_str[512];
             hex_to_str(request.data(), request.size(), debug_str, sizeof(debug_str));
-            RCLCPP_INFO(logger_, "Sending channel=%ld size=%zu: %s", channel_, request.size(), debug_str);
+            RCLCPP_DEBUG(logger_, "Sending channel=%ld size=%zu: %s", channel_, request.size(), debug_str);
         }
 
         const bool ok = send_485_((uint8_t*)request.data(), static_cast<long>(request.size()), channel_);
-        if (channel_ == CAN_CHANNEL)
+        if (isDebugEnabled())
         {
-            RCLCPP_INFO(logger_, "Sent channel=%ld result=%s", channel_, ok ? "true" : "false");
+            RCLCPP_DEBUG(logger_, "Sent channel=%ld result=%s", channel_, ok ? "true" : "false");
         }
         return ok;
     }
