@@ -1186,7 +1186,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         static const std::set<std::string> hand_types = {
             "LINKERHAND_O7", "LINKERHAND_O6", "LINKERHAND_L6",
             "O7", "O6", "L6",
-            "FREEDOM_V1", "FREEDOM",
+            "FREEDOM_V1", "FREEDOM_V2", "FREEDOM",
             "INSPIRE_E2", "INSPIRE", "RH56E2"
         };
         
@@ -1216,6 +1216,16 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                            is_left_hand ? 0x00 : 0x01,
                            channel);
                 return std::make_unique<marvin_ros2_control::FreedomHandV1>(
+                    clear_485, send_485, get_ch_data, is_left_hand, channel);
+            }
+            else if (normalized_ee_type == "FREEDOM_V2")
+            {
+                hand_model = "FREEDOM_V2";
+                RCLCPP_INFO(get_logger(), "Creating freedom_v2 hand (9-DOF, %s hand, slave: 0x%02X, channel: %ld)",
+                           is_left_hand ? "left" : "right",
+                           is_left_hand ? 0x00 : 0x01,
+                           channel);
+                return std::make_unique<marvin_ros2_control::FreedomHandV2>(
                     clear_485, send_485, get_ch_data, is_left_hand, channel);
             }
             else if (normalized_ee_type == "INSPIRE_E2" ||
@@ -1351,7 +1361,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
     {
         return ee_type == "LINKERHAND_O7" || ee_type == "LINKERHAND_O6" || ee_type == "LINKERHAND_L6" ||
                ee_type == "O7" || ee_type == "O6" || ee_type == "L6" ||
-               ee_type == "FREEDOM_V1" || ee_type == "FREEDOM" ||
+               ee_type == "FREEDOM_V1" || ee_type == "FREEDOM_V2" || ee_type == "FREEDOM" ||
                ee_type == "INSPIRE_E2" || ee_type == "INSPIRE" ||
                ee_type == "RH56E2" ||
                ee_type.find("LINKERHAND") != std::string::npos;
@@ -1401,7 +1411,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         static const std::set<std::string> hand_types = {
             "LINKERHAND_O7", "LINKERHAND_O6", "LINKERHAND_L6",
             "O7", "O6", "L6",
-            "FREEDOM_V1", "FREEDOM",
+            "FREEDOM_V1", "FREEDOM_V2", "FREEDOM",
             "INSPIRE_E2", "INSPIRE", "RH56E2"
         };
         // Gripper types: JD, Changingtek variants
