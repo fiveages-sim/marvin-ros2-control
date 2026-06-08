@@ -173,15 +173,18 @@ target_link_libraries(${PROJECT_NAME} PUBLIC
 pluginlib_export_plugin_description_file(hardware_interface marvin_ros2_control.xml)
 
 if(BUILD_TESTING)
-    add_executable(test_freedom_hand_v2 test/test_freedom_hand_v2.cpp)
-    target_include_directories(test_freedom_hand_v2 PRIVATE
-        "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
-    )
-    target_link_libraries(test_freedom_hand_v2 PRIVATE
-        ${rclcpp_TARGETS}
-        gripper_hardware_common::gripper_hardware_common
-    )
-    add_test(NAME test_freedom_hand_v2 COMMAND test_freedom_hand_v2)
+    set(TEST_FREEDOM_HAND_V2_SRC "${CMAKE_CURRENT_SOURCE_DIR}/test/test_freedom_hand_v2.cpp")
+    if(EXISTS "${TEST_FREEDOM_HAND_V2_SRC}")
+        add_executable(test_freedom_hand_v2 "${TEST_FREEDOM_HAND_V2_SRC}")
+        target_include_directories(test_freedom_hand_v2 PRIVATE
+            "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+        )
+        target_link_libraries(test_freedom_hand_v2 PRIVATE
+            ${rclcpp_TARGETS}
+            gripper_hardware_common::gripper_hardware_common
+        )
+        add_test(NAME test_freedom_hand_v2 COMMAND test_freedom_hand_v2)
+    endif()
 endif()
 
 # Minimal example: connect to robot and initialize dual Changingtek 90D gripper (always build if source exists)
