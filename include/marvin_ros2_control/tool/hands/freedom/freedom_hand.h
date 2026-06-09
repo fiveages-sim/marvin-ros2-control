@@ -291,7 +291,8 @@ namespace marvin_ros2_control
     class FreedomHandV2 : public ModbusHand
     {
     public:
-        static constexpr size_t JOINT_COUNT = 9;
+        static constexpr size_t JOINT_COUNT = 7;
+        static constexpr size_t PROTOCOL_JOINT_COUNT = 9;
 
         FreedomHandV2(Clear485Func clear_485, Send485Func send_485,
                       GetChDataFunc on_get_ch_data = nullptr,
@@ -306,9 +307,11 @@ namespace marvin_ros2_control
         static constexpr uint8_t kFrameHead = 0x5A;
         static constexpr uint8_t kFrameTail = 0x5D;
         static constexpr uint8_t kMoveCommand = 0x06;
+        static constexpr uint8_t kMoveAckCommand = 0x30;
         static constexpr uint8_t kAngleQueryCommand = 0xF1;
         static constexpr uint8_t kMoveFrameLength = 0x22;
         static constexpr uint8_t kQueryFrameLength = 0x08;
+        static constexpr uint8_t kAckFrameLength = 0x08;
         static constexpr uint8_t kAngleResponseLength = 0x10;
         static constexpr uint8_t kLeftSlaveId = 0x00;
         static constexpr uint8_t kRightSlaveId = 0x01;
@@ -317,12 +320,12 @@ namespace marvin_ros2_control
         static constexpr uint8_t kDefaultCurrentLimit = 100;
 
         uint8_t slave_id_;
-        std::array<double, JOINT_COUNT> lower_limits_{-0.4363, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
-        std::array<double, JOINT_COUNT> upper_limits_{0.43663, 1.3786, 0.4537, 1.396, 1.204, 1.396, 1.204, 1.396, 1.396};
+        std::array<double, JOINT_COUNT> lower_limits_{-0.4363, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+        std::array<double, JOINT_COUNT> upper_limits_{0.43663, 1.3786, 0.4537, 1.396, 1.396, 1.396, 1.396};
 
         bool initialize() override
         {
-            RCLCPP_INFO(logger_, "Initializing freedom_v2 hand (9-DOF, slave: 0x%02X, channel: %ld)",
+            RCLCPP_INFO(logger_, "Initializing freedom_v2 hand (7-DOF, 9-slot protocol, slave: 0x%02X, channel: %ld)",
                         slave_id_, channel_);
             return true;
         }
@@ -360,9 +363,14 @@ namespace marvin_ros2_control
                 kMoveCommand,
                 0x00,
                 kMoveFrameLength};
+            std::array<uint8_t, PROTOCOL_JOINT_COUNT> protocol_angles{};
             for (size_t i = 0; i < JOINT_COUNT; ++i)
             {
-                frame.push_back(radiansToProtocolAngle(positions[i], i));
+                protocol_angles[controlToProtocolIndex(i)] = radiansToProtocolAngle(positions[i], i);
+            }
+            for (size_t i = 0; i < PROTOCOL_JOINT_COUNT; ++i)
+            {
+                frame.push_back(protocol_angles[i]);
                 frame.push_back(kDefaultCommandSpeed);
                 frame.push_back(kDefaultCurrentLimit);
             }
@@ -397,6 +405,11 @@ namespace marvin_ros2_control
                                  std::vector<double>& positions) override
         {
             positions.clear();
+            if (isStatusAckFrame(data, data_size))
+            {
+                return true;
+            }
+
             if (data_size != kAngleResponseLength ||
                 data[0] != kFrameHead ||
                 data[1] != slave_id_ ||
@@ -412,7 +425,7 @@ namespace marvin_ros2_control
             positions.reserve(JOINT_COUNT);
             for (size_t i = 0; i < JOINT_COUNT; ++i)
             {
-                positions.push_back(protocolAngleToRadians(data[5 + i], i));
+                positions.push_back(protocolAngleToRadians(data[5 + controlToProtocolIndex(i)], i));
             }
             return true;
         }
@@ -429,12 +442,10 @@ namespace marvin_ros2_control
             if (name_lower.find("thumb_joint1") != std::string::npos) return 0;
             if (name_lower.find("thumb_joint2") != std::string::npos) return 1;
             if (name_lower.find("thumb_joint3") != std::string::npos) return 2;
-            if (name_lower.find("index_dip") != std::string::npos) return 4;
             if (name_lower.find("index_joint") != std::string::npos) return 3;
-            if (name_lower.find("middle_dip") != std::string::npos) return 6;
-            if (name_lower.find("middle_joint") != std::string::npos) return 5;
-            if (name_lower.find("ring_joint") != std::string::npos) return 7;
-            if (name_lower.find("pinky_joint") != std::string::npos) return 8;
+            if (name_lower.find("middle_joint") != std::string::npos) return 4;
+            if (name_lower.find("ring_joint") != std::string::npos) return 5;
+            if (name_lower.find("pinky_joint") != std::string::npos) return 6;
             return -1;
         }
 
@@ -486,6 +497,42 @@ namespace marvin_ros2_control
                 sum += frame[i];
             }
             return static_cast<uint8_t>(sum & 0xFF);
+        }
+
+        static size_t controlToProtocolIndex(size_t control_index)
+        {
+            static constexpr std::array<size_t, JOINT_COUNT> kControlToProtocol{0, 1, 2, 4, 6, 7, 8};
+            return kControlToProtocol[control_index];
+        }
+
+        bool isStatusAckFrame(const uint8_t* data, size_t data_size) const
+        {
+            if (data_size == kAckFrameLength &&
+                data[0] == kFrameHead &&
+                data[1] == slave_id_ &&
+                (data[2] == kMoveCommand || data[2] == kMoveAckCommand) &&
+                data[3] == 0x00 &&
+                data[4] == kAckFrameLength &&
+                data[data_size - 1] == kFrameTail &&
+                checksum(std::vector<uint8_t>(data, data + data_size)) == data[data_size - 2])
+            {
+                return true;
+            }
+
+            // Marvin sometimes returns this frame with the leading 5A/ID already consumed:
+            // full frame: 5A ID 06 00 08 status checksum 5D
+            if (data_size == 6 &&
+                (data[0] == kMoveCommand || data[0] == kMoveAckCommand) &&
+                data[1] == 0x00 &&
+                data[2] == kAckFrameLength &&
+                data[data_size - 1] == kFrameTail)
+            {
+                std::vector<uint8_t> reconstructed{
+                    kFrameHead, slave_id_, data[0], data[1], data[2], data[3], data[4], data[5]};
+                return checksum(reconstructed) == data[4];
+            }
+
+            return false;
         }
     };
 } // namespace marvin_ros2_control

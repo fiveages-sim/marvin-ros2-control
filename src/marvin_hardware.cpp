@@ -1221,7 +1221,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             else if (normalized_ee_type == "FREEDOM_V2")
             {
                 hand_model = "FREEDOM_V2";
-                RCLCPP_INFO(get_logger(), "Creating freedom_v2 hand (9-DOF, %s hand, slave: 0x%02X, channel: %ld)",
+                RCLCPP_INFO(get_logger(), "Creating freedom_v2 hand (7-DOF, 9-slot protocol, %s hand, slave: 0x%02X, channel: %ld)",
                            is_left_hand ? "left" : "right",
                            is_left_hand ? 0x00 : 0x01,
                            channel);
@@ -2218,7 +2218,11 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         unsigned char data_buf[256] = {0};
         long received = receiveToolResponse(data_buf, sizeof(data_buf), get_ch, toolChannel(tool_idx));
         if (received <= 0)
+        {
+            RCLCPP_WARN(get_logger(), "readToolStatusSync(tool_idx=%zu, channel=%ld) received no bytes",
+                        tool_idx, toolChannel(tool_idx));
             return false;
+        }
         std::string hex_log = "readToolStatusSync(tool_idx=" + std::to_string(tool_idx) + ") received (" + std::to_string(received) + " bytes):";
         for (long i = 0; i < received && i < 256; ++i)
         {
@@ -3091,6 +3095,18 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                             }
                         }
                     }
+                }
+                else
+                {
+                    std::string hex_log = "Invalid hand status frame for tool_idx=" + std::to_string(gripper_idx) +
+                                          " (" + std::to_string(size) + " bytes):";
+                    for (size_t i = 0; i < size && i < 256; ++i)
+                    {
+                        char buf[8];
+                        snprintf(buf, sizeof(buf), " %02X", static_cast<unsigned char>(data_buf[i]));
+                        hex_log += buf;
+                    }
+                    RCLCPP_WARN(get_logger(), "%s", hex_log.c_str());
                 }
             }
         }
