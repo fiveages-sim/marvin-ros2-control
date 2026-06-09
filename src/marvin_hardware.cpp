@@ -3096,18 +3096,6 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                         }
                     }
                 }
-                else
-                {
-                    std::string hex_log = "Invalid hand status frame for tool_idx=" + std::to_string(gripper_idx) +
-                                          " (" + std::to_string(size) + " bytes):";
-                    for (size_t i = 0; i < size && i < 256; ++i)
-                    {
-                        char buf[8];
-                        snprintf(buf, sizeof(buf), " %02X", static_cast<unsigned char>(data_buf[i]));
-                        hex_log += buf;
-                    }
-                    RCLCPP_WARN(get_logger(), "%s", hex_log.c_str());
-                }
             }
         }
     }
