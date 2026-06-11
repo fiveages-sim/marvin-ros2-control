@@ -185,6 +185,19 @@ if(BUILD_TESTING)
         )
         add_test(NAME test_freedom_hand_v2 COMMAND test_freedom_hand_v2)
     endif()
+
+    set(TEST_INSPIRE_CANFD_HAND_SRC "${CMAKE_CURRENT_SOURCE_DIR}/test/test_inspire_canfd_hand.cpp")
+    if(EXISTS "${TEST_INSPIRE_CANFD_HAND_SRC}")
+        add_executable(test_inspire_canfd_hand "${TEST_INSPIRE_CANFD_HAND_SRC}")
+        target_include_directories(test_inspire_canfd_hand PRIVATE
+            "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+        )
+        target_link_libraries(test_inspire_canfd_hand PRIVATE
+            ${rclcpp_TARGETS}
+            gripper_hardware_common::gripper_hardware_common
+        )
+        add_test(NAME test_inspire_canfd_hand COMMAND test_inspire_canfd_hand)
+    endif()
 endif()
 
 # Minimal example: connect to robot and initialize dual Changingtek 90D gripper (always build if source exists)

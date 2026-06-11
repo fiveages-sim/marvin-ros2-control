@@ -1233,6 +1233,15 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                      normalized_ee_type == "RH56E2")
             {
                 hand_model = "INSPIRE_E2";
+                if (channel == CAN_CHANNEL)
+                {
+                    RCLCPP_INFO(get_logger(), "Creating inspire_e2 CANFD hand (6-DOF, %s hand, hand_id: 0x%02X, channel: %ld)",
+                               is_left_hand ? "left" : "right",
+                               is_left_hand ? 0x02 : 0x01,
+                               channel);
+                    return std::make_unique<marvin_ros2_control::InspireHandE2Canfd>(
+                        clear_485, send_485, get_ch_data, is_left_hand, channel);
+                }
                 RCLCPP_INFO(get_logger(), "Creating inspire_e2 hand (6-DOF, %s hand, slave: 0x%02X)",
                            is_left_hand ? "left" : "right",
                            is_left_hand ? 0x02 : 0x01);
