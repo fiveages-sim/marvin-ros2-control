@@ -2131,20 +2131,56 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                 if (ti < tool_has_valid_state_.size() && tool_has_valid_state_[ti].load())
                     ok = true;
                 else
-                    RCLCPP_INFO(get_logger(), "Initial tool read got non-status/unsupported frame for tool_idx=%zu; waiting for valid status", ti);
+                    if (debug_tool_logs_)
+                    {
+                        RCLCPP_DEBUG(get_logger(), "Initial tool read got non-status/unsupported frame for tool_idx=%zu; waiting for valid status", ti);
+                    }
             }
             if (!ok)
             {
                 RCLCPP_WARN(get_logger(), "Initial tool read failed for tool_idx=%zu after %d attempts (no valid status); continuing to poll this side", ti, kMaxRetries);
                 if (ti < tool_initial_read_done_.size())
-                    tool_initial_read_done_[ti] = true;
-                size_t gi = gripperJointIndexForTool(ti);
-                if (gi < gripper_position_command_.size() && gi < last_gripper_command_.size() && gi < gripper_stopped_.size())
+                    tool_initial_read_done_[ti] = false;
+                if (toolIsHand(ti))
                 {
-                    double pos = (gi < gripper_position_.size()) ? gripper_position_[gi] : 0.0;
-                    gripper_position_command_[gi] = pos;
-                    last_gripper_command_[gi] = pos;
-                    gripper_stopped_[gi] = true;
+                    const size_t tool_n = toolCount();
+                    const size_t n_j = std::min(gripper_joint_name_.size(),
+                                                std::min(gripper_position_.size(),
+                                                         std::min(gripper_position_command_.size(), last_gripper_command_.size())));
+                    std::vector<double> current;
+                    current.reserve(8);
+                    for (size_t gi = 0; gi < n_j; ++gi)
+                    {
+                        std::string name_lower = gripper_joint_name_[gi];
+                        std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
+                        const size_t mapped_tool = (tool_n >= 2 && name_lower.find("right_hand_") != std::string::npos) ? 1 : 0;
+                        if (mapped_tool != ti)
+                            continue;
+                        const double pos = gripper_position_[gi];
+                        gripper_position_command_[gi] = pos;
+                        last_gripper_command_[gi] = pos;
+                        if (gi < gripper_stopped_.size())
+                            gripper_stopped_[gi] = true;
+                        current.push_back(pos);
+                    }
+                    if (ti < hand_previous_position_.size() && ti < hand_stable_count_.size() && ti < hand_stabilized_.size())
+                    {
+                        hand_previous_position_[ti] = current;
+                        hand_stable_count_[ti] = kHandStableFrameCount;
+                        hand_stabilized_[ti] = true;
+                    }
+                    syncHandDynamicsAckToCommand(ti);
+                }
+                else
+                {
+                    size_t gi = gripperJointIndexForTool(ti);
+                    if (gi < gripper_position_command_.size() && gi < last_gripper_command_.size() && gi < gripper_stopped_.size())
+                    {
+                        double pos = (gi < gripper_position_.size()) ? gripper_position_[gi] : 0.0;
+                        gripper_position_command_[gi] = pos;
+                        last_gripper_command_[gi] = pos;
+                        gripper_stopped_[gi] = true;
+                    }
                 }
                 continue;
             }
@@ -2189,6 +2225,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                     hand_stable_count_[ti] = kHandStableFrameCount;
                     hand_stabilized_[ti] = true;
                 }
+                syncHandDynamicsAckToCommand(ti);
             }
             else
             {
@@ -2220,9 +2257,15 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             return false;
         GetChDataFunc get_ch = toolUsesLeftChannel(tool_idx)
             ? OnGetChDataA : OnGetChDataB;
-        RCLCPP_INFO(get_logger(), "Reading tool data");
+        if (debug_tool_logs_)
+        {
+            RCLCPP_DEBUG(get_logger(), "Reading tool data");
+        }
         tool->getStatus();
-        RCLCPP_INFO(get_logger(), "Sleeping tool %d ms", elapsed_time_for_poll);
+        if (debug_tool_logs_)
+        {
+            RCLCPP_DEBUG(get_logger(), "Sleeping tool %d ms", elapsed_time_for_poll);
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(elapsed_time_for_poll));
         unsigned char data_buf[256] = {0};
         long received = receiveToolResponse(data_buf, sizeof(data_buf), get_ch, toolChannel(tool_idx));
@@ -2239,7 +2282,10 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             snprintf(buf, sizeof(buf), " %02X", static_cast<unsigned char>(data_buf[i]));
             hex_log += buf;
         }
-        RCLCPP_INFO(get_logger(), "%s", hex_log.c_str());
+        if (debug_tool_logs_)
+        {
+            RCLCPP_DEBUG(get_logger(), "%s", hex_log.c_str());
+        }
         if (isModbusWriteAck(data_buf, static_cast<size_t>(received)))
         {
             applyGripperWriteAckFromInFlight(tool_idx);
@@ -2249,6 +2295,46 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         if (tool_idx < tool_initial_read_done_.size())
             tool_initial_read_done_[tool_idx] = true;
         return true;
+    }
+
+    void MarvinHardware::syncHandDynamicsAckToCommand(size_t tool_idx)
+    {
+        if (tool_idx >= toolCount())
+            return;
+        auto* hand = dynamic_cast<marvin_ros2_control::ModbusHand*>(toolAt(tool_idx));
+        if (!hand)
+            return;
+
+        const size_t tool_n = toolCount();
+        const size_t n = std::min(gripper_joint_name_.size(),
+                                  std::min(gripper_effort_command_.size(),
+                                           gripper_velocity_command_.size()));
+        const size_t dof = hand->getJointCount();
+        size_t synced = 0;
+        for (size_t gi = 0; gi < n; ++gi)
+        {
+            std::string name_lower = gripper_joint_name_[gi];
+            std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
+            const size_t mapped_tool = (tool_n >= 2 && name_lower.find("right_hand_") != std::string::npos) ? 1 : 0;
+            if (mapped_tool != tool_idx)
+                continue;
+
+            const int li = hand->mapJointNameToIndex(gripper_joint_name_[gi]);
+            if (li < 0 || static_cast<size_t>(li) >= dof)
+                continue;
+
+            if (gi < last_gripper_velocity_ack_.size())
+                last_gripper_velocity_ack_[gi] = gripper_velocity_command_[gi];
+            if (gi < last_gripper_effort_ack_.size())
+                last_gripper_effort_ack_[gi] = gripper_effort_command_[gi];
+            ++synced;
+        }
+
+        if (debug_tool_logs_)
+        {
+            RCLCPP_DEBUG(get_logger(), "Initial hand dynamics ack synced for tool_idx=%zu joints=%zu",
+                         tool_idx, synced);
+        }
     }
 
     bool MarvinHardware::writeToolStatusSync(size_t tool_idx, const std::vector<double>& write_cmd, int wait_ms)
@@ -3054,6 +3140,8 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                     const size_t tool_n = toolCount();
                     const size_t n = std::min(gripper_joint_name_.size(), gripper_position_.size());
                     const size_t hand_dof = hand->getJointCount();
+                    const bool was_initializing =
+                        (gripper_idx < tool_initial_read_done_.size() && !tool_initial_read_done_[gripper_idx]);
                     if (positions.size() == hand_dof)
                     {
                         for (size_t gi = 0; gi < n; ++gi)
@@ -3065,6 +3153,36 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                             int local_index = hand->mapJointNameToIndex(gripper_joint_name_[gi]);
                             if (local_index >= 0 && static_cast<size_t>(local_index) < hand_dof)
                                 updateGripperState(gi, positions[local_index], 0, 0);
+                        }
+                        if (was_initializing)
+                        {
+                            const size_t n_j = std::min(gripper_joint_name_.size(),
+                                                        std::min(gripper_position_.size(),
+                                                                 std::min(gripper_position_command_.size(), last_gripper_command_.size())));
+                            std::vector<double> current;
+                            current.reserve(hand_dof);
+                            for (size_t gi = 0; gi < n_j; ++gi)
+                            {
+                                std::string name_lower = gripper_joint_name_[gi];
+                                std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
+                                size_t mapped_tool = (tool_n >= 2 && name_lower.find("right_hand_") != std::string::npos) ? 1 : 0;
+                                if (mapped_tool != gripper_idx) continue;
+                                const double pos = gripper_position_[gi];
+                                gripper_position_command_[gi] = pos;
+                                last_gripper_command_[gi] = pos;
+                                if (gi < gripper_stopped_.size())
+                                    gripper_stopped_[gi] = true;
+                                current.push_back(pos);
+                            }
+                            if (gripper_idx < hand_previous_position_.size() &&
+                                gripper_idx < hand_stable_count_.size() &&
+                                gripper_idx < hand_stabilized_.size())
+                            {
+                                hand_previous_position_[gripper_idx] = current;
+                                hand_stable_count_[gripper_idx] = kHandStableFrameCount;
+                                hand_stabilized_[gripper_idx] = true;
+                            }
+                            syncHandDynamicsAckToCommand(gripper_idx);
                         }
 
                         // Steady state: current frame same as previous for N consecutive reads -> stop read polling

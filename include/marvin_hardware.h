@@ -261,6 +261,8 @@ private:
         bool isToolStopped(size_t tool_idx);
         /** Sync read: one getStatus(), wait elapsed_time_for_poll ms, then read and parse. */
         bool readToolStatusSync(size_t tool_idx, int elapsed_time_for_poll);
+        /** Hand init: accept current speed/force commands as acknowledged to avoid a startup write. */
+        void syncHandDynamicsAckToCommand(size_t tool_idx);
         /** Sync write: send write_cmd, wait wait_ms, read ack and update state. */
         bool writeToolStatusSync(size_t tool_idx, const std::vector<double>& write_cmd, int wait_ms = 5);
         /** True if a new write command should be sent for this tool (position changed); fills write_cmd_out. */
