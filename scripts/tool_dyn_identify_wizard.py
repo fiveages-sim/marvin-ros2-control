@@ -106,6 +106,18 @@ def _resolve_ccs_paths(arm: str):
     return work_base, pvt_file, load_csv, noload_csv
 
 
+def _power_off_robot(robot: Marvin_Robot, logger: logging.Logger) -> None:
+    """断开连接前将左右臂切换到下电模式（ARM_STATE_IDLE / 下伺服）。"""
+    logger.info("[步骤] 切换机器人到下电模式（左右臂下伺服）")
+    for arm in ("A", "B"):
+        robot.clear_set()
+        robot.set_state(arm=arm, state=0)
+        robot.send_cmd()
+        time.sleep(0.1)
+    time.sleep(0.5)
+    logger.info("[步骤] 下电完成")
+
+
 def _go_to_joint_zero(
     robot: Marvin_Robot,
     dcss: DCSS,
@@ -465,8 +477,10 @@ def run_wizard():
     print(tool_dynamic_parameters)
     print(f"\n日志已保存到: {log_path}")
 
-    _prompt("\n按回车释放机器人连接。")
+    _prompt("\n按回车切换到下电模式并释放机器人连接。")
+    _power_off_robot(robot, logger)
     robot.release_robot()
+    logger.info("[步骤] 已释放机器人连接")
 
 
 if __name__ == "__main__":
