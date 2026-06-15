@@ -106,6 +106,18 @@ def _resolve_ccs_paths(arm: str):
     return work_base, pvt_file, load_csv, noload_csv
 
 
+def _power_off_robot(robot: Marvin_Robot, logger: logging.Logger) -> None:
+    """断开连接前将左右臂切换到下电模式（ARM_STATE_IDLE / 下伺服）。"""
+    logger.info("[步骤] 切换机器人到下电模式（左右臂下伺服）")
+    for arm in ("A", "B"):
+        robot.clear_set()
+        robot.set_state(arm=arm, state=0)
+        robot.send_cmd()
+        time.sleep(0.1)
+    time.sleep(0.5)
+    logger.info("[步骤] 下电完成")
+
+
 def _go_to_joint_zero(
     robot: Marvin_Robot,
     dcss: DCSS,
@@ -424,18 +436,31 @@ def run_wizard():
     robot.log_switch("1")
     robot.local_log_switch("1")
 
-    _prompt(
-        f"\n[确认] 即将让手臂 {arm} 运动到关节零位 (0,0,0,0,0,0,0)（单位：度）。\n"
-        f"确认无误请按回车继续（Ctrl+C 退出）。"
-    )
-    _go_to_joint_zero(robot, dcss, arm, logger)
-
-    _prompt(
-        "\n[确认] 请确认当前为【空载】状态（无工具/无负载）。\n"
-        "确认无误请按回车开始【空载】采集。"
-    )
-    collect_identy_data(robot, dcss, logger, arm=arm, pvt_file=pvt_file, pvt_id=3, save_path=noload_csv)
-    logger.info("[步骤] 空载采集完成")
+    reuse_noload = os.environ.get("TOOL_DYN_REUSE_NOLOAD", "").strip().lower() in ("1", "true", "yes")
+    if reuse_noload and os.path.isfile(noload_csv):
+        logger.info(f"[步骤] 复用上次空载数据，跳过空载采集: {noload_csv}")
+        print(f"\n[跳过空载] 复用上次空载数据: {noload_csv}")
+        # 跳过空载采集时，带载采集前同样需要先让手臂回到关节零位。
+        _prompt(
+            f"\n[确认] 即将让手臂 {arm} 运动到关节零位 (0,0,0,0,0,0,0)（单位：度）。\n"
+            f"确认无误请按回车继续（Ctrl+C 退出）。"
+        )
+        _go_to_joint_zero(robot, dcss, arm, logger)
+    else:
+        if reuse_noload:
+            logger.warning(f"[步骤] 未找到可复用的空载数据 {noload_csv}，将照常进行空载采集")
+            print(f"\n[提示] 未找到可复用的空载数据 {noload_csv}，将照常进行空载采集。")
+        _prompt(
+            f"\n[确认] 即将让手臂 {arm} 运动到关节零位 (0,0,0,0,0,0,0)（单位：度）。\n"
+            f"确认无误请按回车继续（Ctrl+C 退出）。"
+        )
+        _go_to_joint_zero(robot, dcss, arm, logger)
+        _prompt(
+            "\n[确认] 请确认当前为【空载】状态（无工具/无负载）。\n"
+            "确认无误请按回车开始【空载】采集。"
+        )
+        collect_identy_data(robot, dcss, logger, arm=arm, pvt_file=pvt_file, pvt_id=3, save_path=noload_csv)
+        logger.info("[步骤] 空载采集完成")
 
     _prompt(
         "\n[确认] 请现在安装工具/负载，切换到【带载】状态。\n"
@@ -452,8 +477,10 @@ def run_wizard():
     print(tool_dynamic_parameters)
     print(f"\n日志已保存到: {log_path}")
 
-    _prompt("\n按回车释放机器人连接。")
+    _prompt("\n按回车切换到下电模式并释放机器人连接。")
+    _power_off_robot(robot, logger)
     robot.release_robot()
+    logger.info("[步骤] 已释放机器人连接")
 
 
 if __name__ == "__main__":

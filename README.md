@@ -56,8 +56,16 @@ colcon build --packages-up-to marvin_ros2_control --symlink-install
   - `max_joint_speed`（double）
   - `max_joint_acceleration`（double）
 - **抱闸 / 松闸（急停后手动调整姿态，左右臂独立）**
-  - `left_brake_release`（bool）：左臂 `true` 松闸（BRAK0=2），`false` 抱闸（BRAK0=1）；期间暂停 A 臂关节指令，恢复需 `ros2 param set ... ctrl_mode POSITION`
-  - `right_brake_release`（bool）：右臂 `true` 松闸（BRAK1=2），`false` 抱闸（BRAK1=1）；恢复方式同上
+  - **前提（进入 POWER_OFF）**：须先停止控制器写入，再将机械臂 **hardware component** 切到 `inactive`（会触发 `MarvinHardware::on_deactivate`，左右臂下使能并进入 `POWER_OFF`）。仅 `ros2 param set ... ctrl_mode POWER_OFF` 不够——硬件仍为 `active` 时控制器可能继续下发关节指令。
+    ```bash
+    # 硬件组件名可用 ros2 control list_hardware_components 查看（m6_ccs / fa-w2 双臂一般为 M6_CCS_System）
+    ros2 control switch_controllers --deactivate ocs2_wbc_controller
+    ros2 control set_hardware_component_state M6_CCS_System inactive
+    ```
+  - **松/抱闸前提**：仅在 `ctrl_mode == POWER_OFF` 下允许设置 `*_brake_release`；其他模式下会被拒绝（`ctrl_mode must be POWER_OFF before brake operation`）。
+  - `left_brake_release`（bool）：左臂 `true` 松闸（BRAK0=2，同时下使能 A 臂并暂停其关节指令），`false` 抱闸（BRAK0=1）
+  - `right_brake_release`（bool）：右臂 `true` 松闸（BRAK1=2，同时下使能 B 臂并暂停其关节指令），`false` 抱闸（BRAK1=1）
+  - **恢复约束**：只要任一臂处于松闸状态，就只允许 `POWER_OFF`，切到其他 `ctrl_mode` 会被拒绝（`brake released on ... arm(s), only POWER_OFF is allowed`）。必须先把对应臂抱闸（`*_brake_release false`），再将 hardware component 切回 `active`，最后切回 `POSITION` 并 activate 控制器。
 - **工具/夹爪负载参数**
   - `left_kine_param`（double array，长度 6）
   - `left_dyn_param`（double array，长度 10）
@@ -88,16 +96,27 @@ ros2 param set /m6_ccs_system joint_d_gains "[0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4]
 抱闸松闸示例（飞车/撞机急停后手动摆正关节，再恢复控制；左右臂分别设置）：
 
 ```bash
-# 左臂松闸（OnSetIntPara BRAK0=2）
+# 1) 先 deactivate 控制器，再将硬件组件切 inactive（自动下使能 → POWER_OFF）
+ros2 control switch_controllers --deactivate ocs2_wbc_controller
+ros2 control set_hardware_component_state M6_CCS_System inactive
+
+# 2) 左臂松闸（OnSetIntPara BRAK0=2，同时下使能 A 臂、暂停其关节指令）
 ros2 param set /m6_ccs_system left_brake_release true
-# 左臂手动调整完毕后抱闸（BRAK0=1），再恢复控制：
+#    手动摆正左臂关节……
+# 3) 左臂抱闸（BRAK0=1）
 ros2 param set /m6_ccs_system left_brake_release false
-ros2 param set /m6_ccs_system ctrl_mode POSITION
 
 # 右臂同理（OnSetIntPara BRAK1）
 ros2 param set /m6_ccs_system right_brake_release true
 ros2 param set /m6_ccs_system right_brake_release false
+
+# 4) 恢复控制：先抱闸完毕，再 active 硬件组件、上使能、activate 控制器
+ros2 control set_hardware_component_state M6_CCS_System active
+ros2 param set /m6_ccs_system ctrl_mode POSITION
+ros2 control switch_controllers --activate ocs2_wbc_controller
 ```
+
+> 松闸期间若直接 `ros2 param set ... ctrl_mode POSITION` 会被拒绝（仅允许 `POWER_OFF`）。务必先抱闸（`*_brake_release false`），再 `set_hardware_component_state active`，最后切回 `POSITION`。
 
 > `ros2_control` 退出（硬件 `on_deactivate`）时会 `OnGetIntPara` 检查 `BRAK0/BRAK1`，未抱闸（`!=1`）则强制 `=1`，再下使能并断开连接。
 
@@ -106,13 +125,15 @@ ros2 param set /m6_ccs_system right_brake_release false
 ```bash
 # 1. 先 deactivate 控制器（FSM 冻结，update() 停止）
 ros2 control switch_controllers --deactivate ocs2_wbc_controller
-# 2. 再下使能硬件
-ros2 param set /m6_ccs_system ctrl_mode POWER_OFF
+# 2. 再将机械臂硬件组件切 inactive（on_deactivate → 左右臂下使能 / POWER_OFF）
+ros2 control set_hardware_component_state M6_CCS_System inactive
 
 # 恢复：
-# 1. 先上使能硬件
+# 1. 先 active 硬件组件
+ros2 control set_hardware_component_state M6_CCS_System active
+# 2. 再上使能
 ros2 param set /m6_ccs_system ctrl_mode POSITION
-# 2. 再 activate 控制器
+# 3. 再 activate 控制器
 ros2 control switch_controllers --activate ocs2_wbc_controller
 ```
 
