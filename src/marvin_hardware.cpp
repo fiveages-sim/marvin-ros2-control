@@ -1215,7 +1215,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         else
         {
             // Create gripper
-            enum class GripperKind { JD, Changingtek90C, Changingtek90D };
+            enum class GripperKind { JD, Changingtek90C, Changingtek90D, Changingtek120S };
 
             static const std::unordered_map<std::string, GripperKind> kGripperTypeMap = {
                 // JD / RG75
@@ -1232,7 +1232,10 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                 {"CHANGINGTEK90D", GripperKind::Changingtek90D},
                 {"AG2F90D", GripperKind::Changingtek90D},
                 {"AG2F90_D", GripperKind::Changingtek90D},
-            };
+
+                // Changingtek 120S (CTAG2F120s)
+                {"CTAG2F120S", GripperKind::Changingtek120S},
+                                            };
 
             const auto it = kGripperTypeMap.find(normalized_ee_type);
             const GripperKind kind = (it == kGripperTypeMap.end()) ? GripperKind::JD : it->second;
@@ -1256,6 +1259,10 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                 case GripperKind::Changingtek90D:
                     RCLCPP_INFO(get_logger(), "Creating CHANGINGTEK90D Gripper");
                     return std::make_unique<marvin_ros2_control::ChangingtekGripper90D>(clear_485, send_485, get_ch_data);
+
+                case GripperKind::Changingtek120S:
+                    RCLCPP_INFO(get_logger(), "Creating CHANGINGTEK120S Gripper");
+                    return std::make_unique<marvin_ros2_control::ChangingtekGripper120S>(clear_485, send_485, get_ch_data);
             }
 
             // Defensive fallback
@@ -1337,7 +1344,8 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         static const std::set<std::string> gripper_types = {
             "RG75", "JDGRIPPER",
             "CHANGINGTEK90C", "AG2F90", "AG2F90C", "AG2F90_C",
-            "CHANGINGTEK90D", "AG2F90D", "AG2F90_D"
+            "CHANGINGTEK90D", "AG2F90D", "AG2F90_D",
+            "CTAG2F120S"
         };
         
         // Check if type is hand or gripper
