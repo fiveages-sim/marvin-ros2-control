@@ -1205,7 +1205,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         else
         {
             // Create gripper
-            enum class GripperKind { JD, Changingtek90C, Changingtek90D, Changingtek120S };
+            enum class GripperKind { JD, Changingtek90C, Changingtek90D, Changingtek120S, Changingtek120S_D };
 
             static const std::unordered_map<std::string, GripperKind> kGripperTypeMap = {
                 // JD / RG75
@@ -1223,9 +1223,9 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                 {"AG2F90D", GripperKind::Changingtek90D},
                 {"AG2F90_D", GripperKind::Changingtek90D},
 
-                // Changingtek 120S (AG2F120S / AG2F120S_D — same servo-step protocol & ranges)
+                // Changingtek 120S (AG2F120S / AG2F120S_D)
                 {"AG2F120S", GripperKind::Changingtek120S},
-                {"AG2F120S_D", GripperKind::Changingtek120S},
+                {"AG2F120S_D", GripperKind::Changingtek120S_D},
                                             };
 
             const auto it = kGripperTypeMap.find(normalized_ee_type);
@@ -1254,6 +1254,10 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                 case GripperKind::Changingtek120S:
                     RCLCPP_INFO(get_logger(), "Creating CHANGINGTEK120S Gripper");
                     return std::make_unique<marvin_ros2_control::ChangingtekGripper120S>(clear_485, send_485, get_ch_data);
+
+                case GripperKind::Changingtek120S_D:
+                    RCLCPP_INFO(get_logger(), "Creating CHANGINGTEK120S_D Gripper");
+                    return std::make_unique<marvin_ros2_control::ChangingtekGripper120S_D>(clear_485, send_485, get_ch_data);
             }
 
             // Defensive fallback
