@@ -1223,8 +1223,9 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                 {"AG2F90D", GripperKind::Changingtek90D},
                 {"AG2F90_D", GripperKind::Changingtek90D},
 
-                // Changingtek 120S (AG2F120S)
+                // Changingtek 120S (AG2F120S / AG2F120S_D — same servo-step protocol & ranges)
                 {"AG2F120S", GripperKind::Changingtek120S},
+                {"AG2F120S_D", GripperKind::Changingtek120S},
                                             };
 
             const auto it = kGripperTypeMap.find(normalized_ee_type);
@@ -1335,7 +1336,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             "RG75", "JDGRIPPER",
             "CHANGINGTEK90C", "AG2F90", "AG2F90C", "AG2F90_C",
             "CHANGINGTEK90D", "AG2F90D", "AG2F90_D",
-            "AG2F120S"
+            "AG2F120S", "AG2F120S_D"
         };
         
         // Check if type is hand or gripper
