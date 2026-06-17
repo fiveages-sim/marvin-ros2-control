@@ -42,7 +42,7 @@ namespace marvin_ros2_control
         int vel_byte;
         if constexpr (Config::USE_120S_CONVERTER)
         {
-            modbus_pos = PositionConverter::Changingtek120S::normalizedToModbus(normalized_pos);
+            modbus_pos = PositionConverter::Changingtek120S::normalizedToModbus(normalized_pos, Config::MAX_POSITION_MM);
             modbus_torque = TorqueConverter::Changingtek120S::normalizedToModbus(normalized_torque);
             vel_byte = VelocityConverter::Changingtek120S::normalizedToVelocityRegister(normalized_velocity);
         }
@@ -120,7 +120,8 @@ namespace marvin_ros2_control
             uint32_t modbus_pos = (static_cast<uint32_t>(registers[0]) << 16) | registers[1];
             if constexpr (Config::USE_120S_CONVERTER)
             {
-                cached_position_ = gripper_hardware_common::PositionConverter::Changingtek120S::modbusToNormalized(modbus_pos);
+                cached_position_ = gripper_hardware_common::PositionConverter::Changingtek120S::modbusToNormalized(
+                    modbus_pos, Config::MAX_POSITION_MM);
             }
             else
             {
@@ -184,7 +185,8 @@ namespace marvin_ros2_control
 
         if constexpr (Config::USE_120S_CONVERTER)
         {
-            position = gripper_hardware_common::PositionConverter::Changingtek120S::modbusToNormalized(modbus_pos);
+            position = gripper_hardware_common::PositionConverter::Changingtek120S::modbusToNormalized(
+                modbus_pos, Config::MAX_POSITION_MM);
         }
         else
         {
