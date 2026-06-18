@@ -40,6 +40,7 @@ namespace marvin_ros2_control
     // Type aliases for specific variants
     using ChangingtekGripper90C = ChangingtekGripper<gripper_hardware_common::ModbusConfig::Changingtek90C>;
     using ChangingtekGripper90D = ChangingtekGripper<gripper_hardware_common::ModbusConfig::Changingtek90D>;
+    using ChangingtekGripper120S = ChangingtekGripper<gripper_hardware_common::ModbusConfig::Changingtek120S>;
 } // namespace marvin_ros2_control
 
 // Include template implementation

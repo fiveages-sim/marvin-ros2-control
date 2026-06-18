@@ -36,13 +36,14 @@ namespace marvin_ros2_control
     bool ChangingtekGripper<Config>::move_gripper(double normalized_torque, double normalized_velocity, double normalized_pos)
     {
         using namespace gripper_hardware_common;
-        
-        // Convert normalized position to Modbus format (0-9000)
-        uint16_t modbus_pos = PositionConverter::Changingtek90::normalizedToModbus(normalized_pos);
+
+        const uint16_t modbus_pos = PositionConverter::Changingtek::normalizedToModbus(
+            normalized_pos, Config::MAX_POSITION_MM);
+        const int modbus_torque = TorqueConverter::Changingtek::normalizedToModbus(
+            normalized_torque, Config::MAX_TORQUE_VALUE);
+        const int vel_byte = VelocityConverter::Changingtek::normalizedToVelocityRegister(
+            normalized_velocity, Config::MAX_VELOCITY_VALUE);
         int position = static_cast<int>(modbus_pos);
-        
-        int modbus_torque = TorqueConverter::Changingtek90::normalizedToModbus(normalized_torque);
-        const int vel_byte = VelocityConverter::Changingtek90::normalizedToVelocityRegister(normalized_velocity);
         uint16_t vel_value = static_cast<uint16_t>(vel_byte);
         
         RCLCPP_INFO(logger_, "Changingtek Gripper - pos: %.3f->%d, vel_norm: %.3f->%u, trq_norm: %.3f->%d",
@@ -108,9 +109,8 @@ namespace marvin_ros2_control
         {
             // Parse position: (high << 16) + low
             uint32_t modbus_pos = (static_cast<uint32_t>(registers[0]) << 16) | registers[1];
-            // Convert Modbus position to normalized (0.0=closed, 1.0=open)
-            using namespace gripper_hardware_common;
-            cached_position_ = PositionConverter::Changingtek90::modbusToNormalized(modbus_pos);
+            cached_position_ = gripper_hardware_common::PositionConverter::Changingtek::modbusToNormalized(
+                modbus_pos, Config::MAX_POSITION_MM);
             cached_velocity_ = 0;
             cached_torque_ = 0;
             status_valid_ = true;
@@ -121,17 +121,6 @@ namespace marvin_ros2_control
     bool ChangingtekGripper<Config>::processReadResponse(const uint8_t* data, size_t data_size,
                                                          int& torque, int& velocity, double& position)
     {
-        // if (data_size < 3)
-        // {
-        //     return false;
-        // }
-        
-        // Verify slave_id and function_code match expected values
-        // if (data[0] != Config::SLAVE_ID || data[1] != Config::READ_FUNCTION)
-        // {
-        //     return false;
-        // }
-        
         // Parse Modbus response
         std::vector<uint16_t> registers = ModbusIO::parseModbusResponse(data, data_size, Config::SLAVE_ID, Config::READ_FUNCTION);
         if (registers.size() < 2)
@@ -155,7 +144,7 @@ namespace marvin_ros2_control
             raw -= 0x100000000u;  // 32-bit signed per manufacturer
         int32_t modbus_pos_signed = static_cast<int32_t>(raw);
         uint32_t modbus_pos = static_cast<uint32_t>(modbus_pos_signed < 0 ? 0 : modbus_pos_signed);
-        // If value exceeds 0-9000 range, try opposite word order (some devices send [low, high])
+        // If value exceeds range, try opposite word order (some devices send [low, high])
         if (modbus_pos > Config::MAX_POSITION_MM && registers.size() >= 2)
         {
             raw = (static_cast<uint32_t>(registers[1]) << 16) | registers[0];
@@ -167,8 +156,8 @@ namespace marvin_ros2_control
         if (modbus_pos > Config::MAX_POSITION_MM)
             modbus_pos = Config::MAX_POSITION_MM;
 
-        using namespace gripper_hardware_common;
-        position = PositionConverter::Changingtek90::modbusToNormalized(modbus_pos);
+        position = gripper_hardware_common::PositionConverter::Changingtek::modbusToNormalized(
+            modbus_pos, Config::MAX_POSITION_MM);
         velocity = 0;
         torque = 0;
         RCLCPP_DEBUG(logger_, "Changingtek processReadResponse: regs [0x%04X 0x%04X] -> modbus_pos=%u -> normalized=%.4f",
@@ -195,4 +184,3 @@ namespace marvin_ros2_control
         cached_torque_reg_ = 0xFFFF;
     }
 } // namespace marvin_ros2_control
-
