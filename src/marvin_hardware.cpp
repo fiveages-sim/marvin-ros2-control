@@ -1205,7 +1205,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         else
         {
             // Create gripper
-            enum class GripperKind { JD, Changingtek90C, Changingtek90D, Changingtek120S, Changingtek120S_D };
+            enum class GripperKind { JD, Changingtek90C, Changingtek90D, Changingtek120S };
 
             static const std::unordered_map<std::string, GripperKind> kGripperTypeMap = {
                 // JD / RG75
@@ -1225,7 +1225,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
 
                 // Changingtek 120S (AG2F120S / AG2F120S_D)
                 {"AG2F120S", GripperKind::Changingtek120S},
-                {"AG2F120S_D", GripperKind::Changingtek120S_D},
+                {"AG2F120S_D", GripperKind::Changingtek120S},
                                             };
 
             const auto it = kGripperTypeMap.find(normalized_ee_type);
@@ -1252,12 +1252,15 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                     return std::make_unique<marvin_ros2_control::ChangingtekGripper90D>(clear_485, send_485, get_ch_data);
 
                 case GripperKind::Changingtek120S:
+                    if (normalized_ee_type == "AG2F120S_D")
+                    {
+                        RCLCPP_INFO(get_logger(), "Creating CHANGINGTEK120S_D Gripper");
+                        return std::make_unique<marvin_ros2_control::ChangingtekGripper<
+                            gripper_hardware_common::ModbusConfig::Changingtek120S_D>>(
+                            clear_485, send_485, get_ch_data);
+                    }
                     RCLCPP_INFO(get_logger(), "Creating CHANGINGTEK120S Gripper");
                     return std::make_unique<marvin_ros2_control::ChangingtekGripper120S>(clear_485, send_485, get_ch_data);
-
-                case GripperKind::Changingtek120S_D:
-                    RCLCPP_INFO(get_logger(), "Creating CHANGINGTEK120S_D Gripper");
-                    return std::make_unique<marvin_ros2_control::ChangingtekGripper120S_D>(clear_485, send_485, get_ch_data);
             }
 
             // Defensive fallback
