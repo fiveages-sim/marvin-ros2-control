@@ -424,7 +424,7 @@ namespace marvin_ros2_control
             gripper_stable_count_.assign(array_size, 0);
 
             // Create tool objects (hand or gripper) using unified createTool method
-            tool_ptr_.resize(expected_end_effectors);
+            tool_ptr_.assign(expected_end_effectors, nullptr);
             tool_is_left_side_.assign(expected_end_effectors, false);
             tool_ee_types_.assign(expected_end_effectors, "");
             if (robot_arm_index_ == ARM_LEFT)
@@ -446,11 +446,13 @@ namespace marvin_ros2_control
                 tool_is_left_side_[0] = true;
                 tool_is_left_side_[1] = false;
                 // Dual arm: [0]=A(left), [1]=B(right); unconfigured sides remain nullptr.
-                if (has_left_ee) {
+                if (has_left_ee)
+                {
                     tool_ptr_[0] = createTool(OnClearChDataA, OnSetChDataA, OnGetChDataA, 0, left_ee_type_, left_ee_channel_);
                     tool_ee_types_[0] = left_ee_type_;
                 }
-                if (has_right_ee) {
+                if (has_right_ee)
+                {
                     tool_ptr_[1] = createTool(OnClearChDataB, OnSetChDataB, OnGetChDataB, 1, right_ee_type_, right_ee_channel_);
                     tool_ee_types_[1] = right_ee_type_;
                 }
@@ -1282,7 +1284,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         else
         {
             // Create gripper
-            enum class GripperKind { JD, Changingtek90C, Changingtek90D };
+            enum class GripperKind { JD, Changingtek90C, Changingtek90D, Changingtek120S };
 
             static const std::unordered_map<std::string, GripperKind> kGripperTypeMap = {
                 // JD / RG75
@@ -1299,7 +1301,11 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                 {"CHANGINGTEK90D", GripperKind::Changingtek90D},
                 {"AG2F90D", GripperKind::Changingtek90D},
                 {"AG2F90_D", GripperKind::Changingtek90D},
-            };
+
+                // Changingtek 120S (AG2F120S / AG2F120S_D)
+                {"AG2F120S", GripperKind::Changingtek120S},
+                {"AG2F120S_D", GripperKind::Changingtek120S},
+                                            };
 
             const auto it = kGripperTypeMap.find(normalized_ee_type);
             const GripperKind kind = (it == kGripperTypeMap.end()) ? GripperKind::JD : it->second;
@@ -1323,6 +1329,17 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                 case GripperKind::Changingtek90D:
                     RCLCPP_INFO(get_logger(), "Creating CHANGINGTEK90D Gripper");
                     return std::make_unique<marvin_ros2_control::ChangingtekGripper90D>(clear_485, send_485, get_ch_data);
+
+                case GripperKind::Changingtek120S:
+                    if (normalized_ee_type == "AG2F120S_D")
+                    {
+                        RCLCPP_INFO(get_logger(), "Creating CHANGINGTEK120S_D Gripper");
+                        return std::make_unique<marvin_ros2_control::ChangingtekGripper<
+                            gripper_hardware_common::ModbusConfig::Changingtek120S_D>>(
+                            clear_485, send_485, get_ch_data);
+                    }
+                    RCLCPP_INFO(get_logger(), "Creating CHANGINGTEK120S Gripper");
+                    return std::make_unique<marvin_ros2_control::ChangingtekGripper120S>(clear_485, send_485, get_ch_data);
             }
 
             // Defensive fallback
@@ -1427,7 +1444,8 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         static const std::set<std::string> gripper_types = {
             "RG75", "JDGRIPPER",
             "CHANGINGTEK90C", "AG2F90", "AG2F90C", "AG2F90_C",
-            "CHANGINGTEK90D", "AG2F90D", "AG2F90_D"
+            "CHANGINGTEK90D", "AG2F90D", "AG2F90_D",
+            "AG2F120S", "AG2F120S_D"
         };
         
         // Check if type is hand or gripper
@@ -1774,6 +1792,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                 tool_recv_threads_.resize(toolCount());
                 for (size_t ti = 0; ti < toolCount(); ++ti)
                 {
+                    if (!toolAt(ti)) continue;
                     tool_recv_threads_[ti] = std::thread(&MarvinHardware::tool_recv_thread_func, this, ti);
                     tool_recv_threads_[ti].detach();
                 }
@@ -1781,6 +1800,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                 gripper_ctrl_threads_.resize(toolCount());
                 for (size_t ti = 0; ti < toolCount(); ++ti)
                 {
+                    if (!toolAt(ti)) continue;
                     gripper_ctrl_threads_[ti] = std::thread(&MarvinHardware::tool_callback_for_tool_async, this, ti);
                     gripper_ctrl_threads_[ti].detach();
                 }
@@ -1791,6 +1811,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                 gripper_ctrl_threads_.resize(toolCount());
                 for (size_t ti = 0; ti < toolCount(); ++ti)
                 {
+                    if (!toolAt(ti)) continue;
                     gripper_ctrl_threads_[ti] = std::thread(&MarvinHardware::tool_callback_for_tool, this, ti);
                     gripper_ctrl_threads_[ti].detach();
                 }
@@ -2087,20 +2108,25 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         {
             if (auto* tool = toolAt(i))
             {
-                const bool tool_ok = tool->initialize();
-                result = tool_ok && result;
-                if (tool_ok)
-                {
-                    // Clear this tool's channel receive buffer once at init
-                    if (i == 0)
-                        OnClearChDataA();
-                    else if (i == 1)
-                        OnClearChDataB();
-                }
-                else
+                // Don't short-circuit: even if one side fails, still try init the other side.
+                const bool ok = tool->initialize();
+                if (!ok)
                 {
                     RCLCPP_WARN(get_logger(), "%s initialization failed for tool_idx=%zu",
                                 toolTypeLogName(), i);
+                }
+                result = result && ok;
+                if (ok)
+                {
+                    // Clear this tool's channel receive buffer once at init
+                    if (robot_arm_index_ == ARM_RIGHT)
+                        OnClearChDataB();
+                    else if (robot_arm_index_ == ARM_LEFT)
+                        OnClearChDataA();
+                    else if (i == 0)
+                        OnClearChDataA();      // ARM_DUAL: 0->A(left)
+                    else if (i == 1)
+                        OnClearChDataB();      // ARM_DUAL: 1->B(right)
                 }
             }
         }
@@ -2808,13 +2834,11 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         {
             std::string name_lower = gripper_joint_name_[k];
             std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
-            size_t mapped = (name_lower.find("right") != std::string::npos) ? 1u : 0u;
+            const size_t mapped = (name_lower.find("right") != std::string::npos) ? 1u : 0u;
             if (mapped == tool_idx)
                 return k;
         }
-        if (gripper_joint_name_.size() == 1)
-            return 0;
-        return tool_idx;
+        return tool_idx < gripper_joint_name_.size() ? tool_idx : 0;
     }
 
     bool MarvinHardware::shouldSendToolCommand(size_t tool_idx, std::vector<double>& write_cmd_out)
