@@ -222,6 +222,39 @@ def _go_to_joint_zero(
             raise TimeoutError("等待手臂到达关节零位超时")
 
 
+def _convert_sdk_raw_to_csv(raw_path: str, save_path: str, logger: logging.Logger) -> None:
+    """将 SDK 原始采集文件转为辨识用 CSV；仅成功后替换 save_path，失败时保留原文件。"""
+    processed_data = []
+    with open(raw_path, "r", encoding="utf-8") as file:
+        lines = file.readlines()[1:]
+    for line in lines:
+        parts = line.strip().split("$")
+        numbers = []
+        for part in parts:
+            if part:
+                num_str = part.split()[-1]
+                numbers.append(num_str)
+        if len(numbers) >= 2:
+            numbers = numbers[2:]
+        processed_data.append(numbers)
+
+    tmp_path = save_path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as out_file:
+            for row in processed_data:
+                out_file.write(",".join(row) + "\n")
+        os.replace(tmp_path, save_path)
+    except Exception:
+        if os.path.isfile(tmp_path):
+            os.remove(tmp_path)
+        raise
+    finally:
+        if os.path.isfile(raw_path):
+            os.remove(raw_path)
+
+    logger.info(f"数据已保存为: {save_path}")
+
+
 def collect_identy_data(
     robot: Marvin_Robot,
     dcss: DCSS,
@@ -348,31 +381,11 @@ def collect_identy_data(
     robot.send_cmd()
     time.sleep(0.5)
 
-    robot.save_collected_data_to_path(save_path)
+    raw_path = save_path + ".raw"
+    robot.save_collected_data_to_path(raw_path)
     time.sleep(1)
 
-    processed_data = []
-    with open(save_path, "r") as file:
-        lines = file.readlines()
-    lines = lines[1:]
-    for line in lines:
-        parts = line.strip().split("$")
-        numbers = []
-        for part in parts:
-            if part:
-                num_str = part.split()[-1]
-                numbers.append(num_str)
-        if len(numbers) >= 2:
-            numbers = numbers[2:]
-        processed_data.append(numbers)
-    time.sleep(0.5)
-    os.remove(save_path)
-    time.sleep(0.5)
-    with open(save_path, "w") as out_file:
-        for row in processed_data:
-            out_file.write(",".join(row) + "\n")
-
-    logger.info(f"数据已保存为: {save_path}")
+    _convert_sdk_raw_to_csv(raw_path, save_path, logger)
 
 
 def _prompt(msg: str) -> str:
