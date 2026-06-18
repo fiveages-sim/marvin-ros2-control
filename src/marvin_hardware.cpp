@@ -424,7 +424,8 @@ namespace marvin_ros2_control
             gripper_stable_count_.assign(array_size, 0);
 
             // Create tool objects (hand or gripper) using unified createTool method
-            tool_ptr_.assign(expected_end_effectors, nullptr);
+            tool_ptr_.clear();
+            tool_ptr_.resize(expected_end_effectors);
             tool_is_left_side_.assign(expected_end_effectors, false);
             tool_ee_types_.assign(expected_end_effectors, "");
             if (robot_arm_index_ == ARM_LEFT)
