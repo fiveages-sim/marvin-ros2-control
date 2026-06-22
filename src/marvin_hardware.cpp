@@ -397,18 +397,9 @@ namespace marvin_ros2_control
 
         if (has_gripper_ && has_any_ee)
         {
-            const size_t expected_end_effectors =
-                (robot_arm_index_ == ARM_LEFT || robot_arm_index_ == ARM_RIGHT || robot_arm_index_ == ARM_DUAL)
-                    ? 2u
-                    : 1u;
-            const bool has_hand_ee =
-                (has_left_ee && eeTypeIsHand(left_ee_type_)) ||
-                (has_right_ee && eeTypeIsHand(right_ee_type_));
-            
-            // 对于gripper：每个末端执行器只有1个关节，数组大小 = expected_end_effectors
-            // 对于hand：每个末端执行器有多个关节（O7=7, O6/L6=6），数组大小 = gripper_joint_name_.size()
-            // gripper_joint_name_.size() 对于gripper是1，对于hand是关节数量
-            const size_t array_size = has_hand_ee ? gripper_joint_name_.size() : expected_end_effectors;
+            // Keep tool indices stable in DUAL: [0]=left(A), [1]=right(B).
+            // 数组大小与 URDF 导出的关节数一致（避免单侧时 command[0] 与 tool_idx 错位）
+            const size_t array_size = gripper_joint_name_.size();
 
             gripper_position_command_.assign(array_size, -1.0);
             gripper_effort_command_.assign(array_size, 1.0);
@@ -424,10 +415,6 @@ namespace marvin_ros2_control
             gripper_stable_count_.assign(array_size, 0);
 
             // Create tool objects (hand or gripper) using unified createTool method
-            tool_ptr_.clear();
-            tool_ptr_.resize(expected_end_effectors);
-            tool_is_left_side_.assign(expected_end_effectors, false);
-            tool_ee_types_.assign(expected_end_effectors, "");
             if (robot_arm_index_ == ARM_LEFT)
             {
                 // tool_idx=0 is always left/A.
@@ -444,19 +431,12 @@ namespace marvin_ros2_control
             }
             else if (robot_arm_index_ == ARM_DUAL)
             {
-                tool_is_left_side_[0] = true;
-                tool_is_left_side_[1] = false;
-                // Dual arm: [0]=A(left), [1]=B(right); unconfigured sides remain nullptr.
+                // Dual arm: fixed indices [0]=A(left), [1]=B(right); keep nullptr for disabled sides.
+                tool_ptr_.resize(2);
                 if (has_left_ee)
-                {
-                    tool_ptr_[0] = createTool(OnClearChDataA, OnSetChDataA, OnGetChDataA, 0, left_ee_type_, left_ee_channel_);
-                    tool_ee_types_[0] = left_ee_type_;
-                }
+                    tool_ptr_[0] = createTool(OnClearChDataA, OnSetChDataA, OnGetChDataA, 0, left_ee_type_);
                 if (has_right_ee)
-                {
-                    tool_ptr_[1] = createTool(OnClearChDataB, OnSetChDataB, OnGetChDataB, 1, right_ee_type_, right_ee_channel_);
-                    tool_ee_types_[1] = right_ee_type_;
-                }
+                    tool_ptr_[1] = createTool(OnClearChDataB, OnSetChDataB, OnGetChDataB, 1, right_ee_type_);
             }
 
             const size_t created_tool_count =
@@ -2111,23 +2091,14 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             {
                 // Don't short-circuit: even if one side fails, still try init the other side.
                 const bool ok = tool->initialize();
-                if (!ok)
-                {
-                    RCLCPP_WARN(get_logger(), "%s initialization failed for tool_idx=%zu",
-                                toolTypeLogName(), i);
-                }
                 result = result && ok;
                 if (ok)
                 {
                     // Clear this tool's channel receive buffer once at init
-                    if (robot_arm_index_ == ARM_RIGHT)
-                        OnClearChDataB();
-                    else if (robot_arm_index_ == ARM_LEFT)
-                        OnClearChDataA();
-                    else if (i == 0)
-                        OnClearChDataA();      // ARM_DUAL: 0->A(left)
-                    else if (i == 1)
-                        OnClearChDataB();      // ARM_DUAL: 1->B(right)
+                    if (robot_arm_index_ == ARM_RIGHT) OnClearChDataB();
+                    else if (robot_arm_index_ == ARM_LEFT) OnClearChDataA();
+                    else if (i == 0) OnClearChDataA();      // ARM_DUAL: 0->A(left)
+                    else if (i == 1) OnClearChDataB();      // ARM_DUAL: 1->B(right)
                 }
             }
         }
