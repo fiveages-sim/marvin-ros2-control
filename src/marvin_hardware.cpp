@@ -428,7 +428,7 @@ namespace marvin_ros2_control
                         toolTypeLogName(),
                         robot_arm_config_.c_str(), gripper_type_.c_str(), gripper_joint_name_.size(), tool_ptr_.size());
         }
-        
+
         // Initialize hardware connection status
         hardware_connected_ = false;
         
@@ -494,27 +494,24 @@ namespace marvin_ros2_control
         return hardware_interface::CallbackReturn::SUCCESS;
     }
 
-    size_t MarvinHardware::sideForGripperIndex(size_t k) const
+    size_t MarvinHardware::mappedToolIndexForJoint(size_t k) const
     {
-        if (tool_type_ != ToolType::Hand)
-        {
-            if (toolCount() >= 2)
-            {
-                return k;
-            }
-            return (robot_arm_index_ == ARM_RIGHT) ? 1u : 0u;
-        }
         if (k >= gripper_joint_name_.size())
         {
             return 0;
         }
         std::string name_lower = gripper_joint_name_[k];
         std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
-        if (toolCount() >= 2 && name_lower.find("right") != std::string::npos)
+        if (tool_type_ == ToolType::Hand)
         {
-            return 1;
+            return (toolCount() >= 2 && name_lower.find("right_hand_") != std::string::npos) ? 1u : 0u;
         }
-        return 0;
+        return (name_lower.find("right") != std::string::npos) ? 1u : 0u;
+    }
+
+    bool MarvinHardware::gripperJointBelongsToTool(size_t k, size_t tool_idx) const
+    {
+        return mappedToolIndexForJoint(k) == tool_idx;
     }
 
     static bool isToolDynamicsParamName(const std::string& name)
@@ -546,7 +543,7 @@ namespace marvin_ros2_control
                                    gripper_velocity_command_.size()});
         for (size_t k = 0; k < n; ++k)
         {
-            const size_t side = sideForGripperIndex(k);
+            const size_t side = mappedToolIndexForJoint(k);
             const double torque = (side == 0) ? left_torque : right_torque;
             const double velocity = (side == 0) ? left_velocity : right_velocity;
             if (k < gripper_effort_command_.size())
@@ -1919,10 +1916,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                         std::vector<double> velocities(dof, 1.0);
                         for (size_t k = 0; k < gripper_joint_name_.size() && k < gripper_effort_command_.size() && k < gripper_velocity_command_.size(); ++k)
                         {
-                            std::string name_lower = gripper_joint_name_[k];
-                            std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
-                            size_t mapped = (toolCount() >= 2 && name_lower.find("right_hand_") != std::string::npos) ? 1 : 0;
-                            if (mapped != tool_idx) continue;
+                            if (!gripperJointBelongsToTool(k, tool_idx)) continue;
                             int li = hand->mapJointNameToIndex(gripper_joint_name_[k]);
                             if (li >= 0 && static_cast<size_t>(li) < dof)
                             {
@@ -1934,10 +1928,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                         hand->move_hand(torques, velocities, pos);
                         for (size_t k = 0; k < gripper_joint_name_.size() && k < last_gripper_command_.size() && k < gripper_stopped_.size(); ++k)
                         {
-                            std::string name_lower = gripper_joint_name_[k];
-                            std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
-                            size_t mapped = (toolCount() >= 2 && name_lower.find("right_hand_") != std::string::npos) ? 1 : 0;
-                            if (mapped != tool_idx) continue;
+                            if (!gripperJointBelongsToTool(k, tool_idx)) continue;
                             int li = hand->mapJointNameToIndex(gripper_joint_name_[k]);
                             if (li >= 0 && static_cast<size_t>(li) < dof)
                             {
@@ -2080,7 +2071,6 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             // For Hand: sync all mapped joints for this tool; for Gripper: sync the single joint for this tool.
             if (toolIsHand(ti))
             {
-                const size_t tool_n = toolCount();
                 const size_t n_j = std::min(gripper_joint_name_.size(),
                                             std::min(gripper_position_.size(),
                                                      std::min(gripper_position_command_.size(), last_gripper_command_.size())));
@@ -2088,10 +2078,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                 current.reserve(8);
                 for (size_t gi = 0; gi < n_j; ++gi)
                 {
-                    std::string name_lower = gripper_joint_name_[gi];
-                    std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
-                    const size_t mapped_tool = (tool_n >= 2 && name_lower.find("right_hand_") != std::string::npos) ? 1 : 0;
-                    if (mapped_tool != ti)
+                    if (!gripperJointBelongsToTool(gi, ti))
                         continue;
                     const double pos = gripper_position_[gi];
                     gripper_position_command_[gi] = pos;
@@ -2183,10 +2170,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             std::vector<double> velocities(dof, 1.0);
             for (size_t k = 0; k < gripper_joint_name_.size() && k < gripper_effort_command_.size() && k < gripper_velocity_command_.size(); ++k)
             {
-                std::string name_lower = gripper_joint_name_[k];
-                std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
-                size_t mapped = (toolCount() >= 2 && name_lower.find("right_hand_") != std::string::npos) ? 1 : 0;
-                if (mapped != tool_idx) continue;
+                if (!gripperJointBelongsToTool(k, tool_idx)) continue;
                 int li = hand->mapJointNameToIndex(gripper_joint_name_[k]);
                 if (li >= 0 && static_cast<size_t>(li) < dof)
                 {
@@ -2236,10 +2220,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                 const size_t dof = hand->getJointCount();
                 for (size_t k = 0; k < gripper_joint_name_.size() && k < last_gripper_command_.size() && k < gripper_stopped_.size(); ++k)
                 {
-                    std::string name_lower = gripper_joint_name_[k];
-                    std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
-                    size_t mapped = (toolCount() >= 2 && name_lower.find("right_hand_") != std::string::npos) ? 1 : 0;
-                    if (mapped != tool_idx) continue;
+                    if (!gripperJointBelongsToTool(k, tool_idx)) continue;
                     int li = hand->mapJointNameToIndex(gripper_joint_name_[k]);
                     if (li >= 0 && static_cast<size_t>(li) < dof)
                     {
@@ -2609,15 +2590,11 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             return true;
         if (toolIsHand(tool_idx))
         {
-            const size_t tool_n = toolCount();
             const size_t n = std::min(gripper_joint_name_.size(),
                                      std::min(gripper_position_.size(), gripper_position_command_.size()));
             for (size_t gi = 0; gi < n; ++gi)
             {
-                std::string name_lower = gripper_joint_name_[gi];
-                std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
-                size_t mapped = (tool_n >= 2 && name_lower.find("right_hand_") != std::string::npos) ? 1 : 0;
-                if (mapped != tool_idx) continue;
+                if (!gripperJointBelongsToTool(gi, tool_idx)) continue;
                 if (std::abs(gripper_position_[gi] - gripper_position_command_[gi]) > threshold)
                     return false;
             }
@@ -2633,11 +2610,10 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
     {
         for (size_t k = 0; k < gripper_joint_name_.size(); ++k)
         {
-            std::string name_lower = gripper_joint_name_[k];
-            std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
-            const size_t mapped = (name_lower.find("right") != std::string::npos) ? 1u : 0u;
-            if (mapped == tool_idx)
+            if (mappedToolIndexForJoint(k) == tool_idx)
+            {
                 return k;
+            }
         }
         return tool_idx < gripper_joint_name_.size() ? tool_idx : 0;
     }
@@ -2655,17 +2631,13 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             auto* hand = dynamic_cast<marvin_ros2_control::ModbusHand*>(tool);
             if (!hand)
                 return false;
-            const size_t tool_n = toolCount();
             const size_t n = std::min(gripper_joint_name_.size(), gripper_position_command_.size());
             const size_t dof = hand->getJointCount();
             write_cmd_out.resize(dof, 0.0);
             bool any_changed = false;
             for (size_t gi = 0; gi < n; ++gi)
             {
-                std::string name_lower = gripper_joint_name_[gi];
-                std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
-                size_t mapped = (tool_n >= 2 && name_lower.find("right_hand_") != std::string::npos) ? 1 : 0;
-                if (mapped != tool_idx)
+                if (!gripperJointBelongsToTool(gi, tool_idx))
                     continue;
                 int li = hand->mapJointNameToIndex(gripper_joint_name_[gi]);
                 if (li >= 0 && static_cast<size_t>(li) < dof)
@@ -2731,10 +2703,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                 const size_t dof = hand->getJointCount();
                 for (size_t k = 0; k < gripper_joint_name_.size() && k < last_gripper_command_.size() && k < gripper_stopped_.size(); ++k)
                 {
-                    std::string name_lower = gripper_joint_name_[k];
-                    std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
-                    size_t mapped = (toolCount() >= 2 && name_lower.find("right_hand_") != std::string::npos) ? 1 : 0;
-                    if (mapped != tool_idx) continue;
+                    if (!gripperJointBelongsToTool(k, tool_idx)) continue;
                     int li = hand->mapJointNameToIndex(gripper_joint_name_[k]);
                     if (li >= 0 && static_cast<size_t>(li) < dof)
                     {
@@ -2803,7 +2772,6 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             stopped = stabilized;
 
             // Debug: print why Hand is moving/stopped (mapped joints pos/cmd/diff, stability counters)
-            const size_t tool_n = toolCount();
             const size_t n = std::min(gripper_joint_name_.size(),
                                       std::min(gripper_position_.size(), gripper_position_command_.size()));
             double max_abs_diff = 0.0;
@@ -2816,10 +2784,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
 
             for (size_t gi = 0; gi < n; ++gi)
             {
-                std::string name_lower = gripper_joint_name_[gi];
-                std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
-                const size_t mapped = (tool_n >= 2 && name_lower.find("right_hand_") != std::string::npos) ? 1 : 0;
-                if (mapped != tool_idx)
+                if (!gripperJointBelongsToTool(gi, tool_idx))
                     continue;
                 mapped_joint_count++;
 
@@ -2962,17 +2927,13 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                     }
                     if (gripper_idx < tool_hb_offline_reported_.size())
                         tool_hb_offline_reported_[gripper_idx].store(false);
-                    const size_t tool_n = toolCount();
                     const size_t n = std::min(gripper_joint_name_.size(), gripper_position_.size());
                     const size_t hand_dof = hand->getJointCount();
                     if (positions.size() == hand_dof)
                     {
                         for (size_t gi = 0; gi < n; ++gi)
                         {
-                            std::string name_lower = gripper_joint_name_[gi];
-                            std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
-                            size_t mapped_tool = (tool_n >= 2 && name_lower.find("right_hand_") != std::string::npos) ? 1 : 0;
-                            if (mapped_tool != gripper_idx) continue;
+                            if (!gripperJointBelongsToTool(gi, gripper_idx)) continue;
                             int local_index = hand->mapJointNameToIndex(gripper_joint_name_[gi]);
                             if (local_index >= 0 && static_cast<size_t>(local_index) < hand_dof)
                                 updateGripperState(gi, positions[local_index], 0, 0);
@@ -2985,10 +2946,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                             current.reserve(hand_dof);
                             for (size_t gi = 0; gi < n; ++gi)
                             {
-                                std::string name_lower = gripper_joint_name_[gi];
-                                std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
-                                size_t mapped_tool = (tool_n >= 2 && name_lower.find("right_hand_") != std::string::npos) ? 1 : 0;
-                                if (mapped_tool != gripper_idx) continue;
+                                if (!gripperJointBelongsToTool(gi, gripper_idx)) continue;
                                 if (gi < gripper_position_.size())
                                     current.push_back(gripper_position_[gi]);
                             }
