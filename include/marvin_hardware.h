@@ -179,8 +179,9 @@ private:
         void declare_node_parameters();
         void syncToolDynamicsFromNodeParams();
         void applyAllToolDynamics(const std::unordered_map<std::string, double>* pending = nullptr);
-        /** 0=left, 1=right; maps gripper/hand command index to arm side. */
-        size_t sideForGripperIndex(size_t k) const;
+        /** 0=left, 1=right tool slot; same rule as position-control joint mapping. */
+        size_t mappedToolIndexForJoint(size_t k) const;
+        bool gripperJointBelongsToTool(size_t k, size_t tool_idx) const;
 
         
         // Gripper / hand: normalized torque/velocity from ROS params (not HW command interfaces).
