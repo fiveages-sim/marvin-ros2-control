@@ -1,187 +1,148 @@
 # Marvin ROS2 Control
 
-## 1. Interfaces
+Marvin 机械臂（M6 等）的 ROS2 Control 硬件接口。通过 **Marvin SDK** 连接控制器，在臂体 **RS485 / 场总线 CAN** 上驱动末端工具。插件：`marvin_ros2_control/MarvinHardware`。
 
-Required hardware interfaces:
+独立 USB 转接的末端请用 [modbus_ros2_control](https://github.com/fiveages-sim/modbus-ros2-control) 或 [can_ros2_control](https://github.com/fiveages-sim/can-ros2-control)，不走本包。
 
-* command:
-    * joint position
-* state:
-    * joint effort
-    * joint position
-    * joint velocity
+## 1. 支持的末端执行器
 
-## 2. Build
+`MarvinHardware::createTool` 按 `left_ee_type` / `right_ee_type`（大写归一化）创建工具。双臂：左 → A 通道，右 → B 通道。
 
-* Submodule
-```bash
-git submodule update --init
+| 类型键（常用） | 产品 | 实现 | 默认总线 |
+|----------------|------|------|----------|
+| `RG75`, `JDGRIPPER` | Jodell RG75 | `JDGripper` | RS485（COM1） |
+| `AG2F90_C`, `AG2F90C`, `CHANGINGTEK90C` | ChangingTek AG2F90-C | `ChangingtekGripper90C` | RS485 |
+| `AG2F90_D`, `AG2F90D`, `CHANGINGTEK90D` | ChangingTek AG2F90-D | `ChangingtekGripper90D` | RS485 |
+| `AG2F120S` | ChangingTek AG2F120S | `ChangingtekGripper120S` | RS485 |
+| `AG2F120S_D` | ChangingTek AG2F120S-D | `ChangingtekGripper120S_D` | RS485 |
+| `linkerhand_o7`, `O7` | LinkerHand O7 | `DexterousHandO7` | RS485 |
+| `linkerhand_o6`, `O6` | LinkerHand O6 | `DexterousHandO6` | RS485 |
+| `linkerhand_l6`, `L6` | LinkerHand L6 | `DexterousHandL6` | RS485 |
+| `freedom_v1`, `FREEDOM` | Freedom V1 | `FreedomHandV1` | RS485；`ee_channel=1` 时 CAN |
+| `freedom_v2` | Freedom V2 | `FreedomHandV2` | RS485；`ee_channel=1` 时 CAN |
+| `inspire_e2`, `RH56E2`, `INSPIRE` | Inspire RH56E2 | `InspireHandE2` / `InspireHandE2Canfd` | RS485；`ee_channel=1` 时 CAN FD |
+| `inspire_f2`, `RH56F2` | Inspire RH56F2 | 同上（F2 类型） | 同上 |
+
+未知夹爪类型回退为 `JDGripper`；未知灵巧手类型回退为 O7。
+
+**不在本包：** `xhand1` 等仅支持独立 `ros2_control` 系统的末端。
+
+## 2. 代码结构
+
+```
+marvin_ros2_control/
+├── src/marvin_hardware.cpp          # MarvinHardware 入口
+├── include/marvin_ros2_control/tool/
+│   ├── modbus_io.h                  # SDK 485/CAN 帧收发
+│   ├── grippers/                    # RG75、Changingtek
+│   └── hands/                       # LinkerHand、Freedom、Inspire
+└── external/TJ_FX_ROBOT_CONTRL_SDK/ # Marvin SDK（子模块）
 ```
 
-* Build
+夹爪实现复用 `gripper_hardware_common`；灵巧手协议在包内实现（Inspire 与 modbus/can 栈并行，见 [§8 TODO](#8-todo)）。
+
+## 3. 配置参考
+
+在机器人 `*_description` 的 `ros2_control` 中配置 `hardware_parameters`（示例）：
+
+```xml
+<ros2_control name="M6_CCS_System" type="system">
+  <hardware>
+    <plugin>marvin_ros2_control/MarvinHardware</plugin>
+    <param name="arm_type">dual</param>
+    <param name="device_ip">192.168.1.190</param>
+    <param name="left_ee_type">inspire_f2</param>
+    <param name="right_ee_type">linkerhand_o7</param>
+    <!-- 可选：场总线 CAN（tianji_can） -->
+  <!-- <param name="left_ee_channel">1</param> -->
+  <!-- <param name="right_ee_channel">1</param> -->
+    <param name="ctrl_mode">position</param>
+    <param name="max_joint_speed">50</param>
+    <param name="max_joint_acceleration">30</param>
+  </hardware>
+  <!-- 臂 + 末端关节接口由 description xacro 注入 -->
+</ros2_control>
+```
+
+### 3.1 常用 `hardware_parameters`
+
+| 参数 | 说明 |
+|------|------|
+| `arm_type` | `left` / `right` / `dual` |
+| `device_ip` | 控制器 IP |
+| `device_port` | 端口（可选） |
+| `left_ee_type` / `right_ee_type` | 末端类型键（见 §1） |
+| `left_ee_channel` / `right_ee_channel` | `1` = CAN/CAN FD；`2` = COM1 RS485（默认） |
+| `ctrl_mode` | 初始控制模式 |
+| `max_joint_speed` / `max_joint_acceleration` | 关节限速 |
+| `left_dyn_param` / `right_dyn_param` | 工具动力学（10 维） |
+| `left_kine_param` / `right_kine_param` | 工具运动学（6 维） |
+
+### 3.2 硬件接口
+
+- **命令：** 关节 `position`
+- **状态：** 关节 `position`、`velocity`、`effort`
+
+## 4. 运行期 ROS2 参数
+
+启动时 `hardware_parameters` 会同步声明为节点参数，可用 `ros2 param set` 动态修改（节点名因 launch 而异，用 `ros2 param list` 查找）。
+
+| 参数 | 说明 |
+|------|------|
+| `ctrl_mode` | `POSITION` / `JOINT_IMPEDANCE` / `CART_IMPEDANCE` / `POWER_OFF` |
+| `joint_k_gains` / `joint_d_gains` | 7 维关节阻抗 |
+| `cart_k_gains` / `cart_d_gains` | 7 维笛卡尔阻抗 |
+| `max_joint_speed` / `max_joint_acceleration` | 限速 |
+| `left_brake_release` / `right_brake_release` | 抱闸/松闸（仅 `POWER_OFF`） |
+| `left_tool_torque` / `left_tool_velocity` | 左末端归一化力矩/速度 |
+| `right_tool_torque` / `right_tool_velocity` | 右末端 |
 
 ```bash
+ros2 param set /<hardware_node> ctrl_mode JOINT_IMPEDANCE
+ros2 param set /<hardware_node> joint_k_gains "[2.0, 2.0, 2.0, 1.6, 1.0, 1.0, 1.0]"
+ros2 param set /<hardware_node> left_tool_torque 0.8
+```
+
+**抱闸 / 下使能：** 先 `deactivate` 控制器，再将硬件组件设为 `inactive`（触发 `POWER_OFF` 与下使能），方可 `left_brake_release` / `right_brake_release`。松闸期间仅允许 `POWER_OFF`；恢复前先抱闸，再 `active` 硬件并重新 `activate` 控制器。
+
+```bash
+ros2 control switch_controllers --deactivate ocs2_wbc_controller
+ros2 control set_hardware_component_state <SystemName> inactive
+ros2 param set /<hardware_node> left_brake_release true
+# … 手动调整 …
+ros2 param set /<hardware_node> left_brake_release false
+ros2 control set_hardware_component_state <SystemName> active
+ros2 param set /<hardware_node> ctrl_mode POSITION
+ros2 control switch_controllers --activate ocs2_wbc_controller
+```
+
+数组参数长度须匹配（阻抗 7 维，`*_dyn_param` 10 维，`*_kine_param` 6 维）。
+
+## 5. 编译
+
+```bash
+cd ~/ros2_ws/src/arms_ros2_control/hardwares/marvin_ros2_control
+git submodule update --init external/TJ_FX_ROBOT_CONTRL_SDK
+
 cd ~/ros2_ws
 colcon build --packages-up-to marvin_ros2_control --symlink-install
 ```
 
-## 3. 机制说明（参数加载/动态修改/夹爪）
+`full` deb 构建会在 CI 中按目标架构重编 SDK（见父仓 `README.deb.md`）。
 
-本包的 `MarvinHardware`（`src/marvin-ros2-control/src/marvin_hardware.cpp`）采用“**hardware 参数作为初始配置来源 + 同步声明为 ROS2 参数以支持运行期动态修改**”的机制。
+## 6. 示例
 
-### 3.1 参数加载优先级与规则
+`examples/` 目录含夹爪/灵巧手 SDK 层调试程序（不经过 `ros2_control`）：
 
-- **初始值来源**：优先从 `ros2_control` 的 `hardware_parameters`（URDF/Xacro 或 YAML 中的 `hardware_parameters` 字段）读取。
-- **同步为 ROS2 参数**：启动时会把这些初始值声明为节点参数（`declare_node_parameters()`），方便后续使用 `ros2 param set` 动态修改。
-- **不重复/不覆盖规则**：
-  - **如果 ROS2 参数已存在且类型正确且（对数组参数）长度也正确**：尊重现有值（通常来自 launch/YAML 覆盖），不会被 `hardware_parameters` 覆盖。
-  - **如果参数已存在但类型不对，或数组长度不符合预期**：会 `undeclare` 后重新以正确类型/长度 `declare`，避免运行时类型冲突或越界风险。
+- `marvin_gripper_init_example.cpp`
+- `marvin_hand_init_example.cpp`
 
-### 3.2 支持动态修改的 ROS2 参数
+## 7. 依赖
 
-以下参数在运行时可通过 `ros2 param set` 修改，并由参数回调应用到硬件：
+- Marvin SDK 子模块：`external/TJ_FX_ROBOT_CONTRL_SDK`
+- `gripper_hardware_common`
+- ROS2：`hardware_interface`、`pluginlib`、`rclcpp`、`rclcpp_lifecycle`
 
-- **控制模式**
-  - `ctrl_mode`：`POSITION` / `JOINT_IMPEDANCE` / `CART_IMPEDANCE` / `POWER_OFF`
-    - `POWER_OFF`：发布 `/fsm_command=2`（HOLD），SDK 下使能（保持连接）；控制器 lifecycle 由外部管理（见下方操作流程）
-    - `POSITION` / `JOINT_IMPEDANCE` / `CART_IMPEDANCE`：发布 `/fsm_command=3`（OCS2），SDK 上使能
-- **阻抗与拖动相关**
-  - `joint_k_gains`（double array，长度 7）
-  - `joint_d_gains`（double array，长度 7）
-  - `cart_k_gains`（double array，长度 7）
-  - `cart_d_gains`（double array，长度 7）
-  - `cart_type`（int）
-  - `drag_mode`（int）
-- **限速**
-  - `max_joint_speed`（double）
-  - `max_joint_acceleration`（double）
-- **抱闸 / 松闸（急停后手动调整姿态，左右臂独立）**
-  - **前提（进入 POWER_OFF）**：须先停止控制器写入，再将机械臂 **hardware component** 切到 `inactive`（会触发 `MarvinHardware::on_deactivate`，左右臂下使能并进入 `POWER_OFF`）。仅 `ros2 param set ... ctrl_mode POWER_OFF` 不够——硬件仍为 `active` 时控制器可能继续下发关节指令。
-    ```bash
-    # 硬件组件名可用 ros2 control list_hardware_components 查看（m6_ccs / fa-w2 双臂一般为 M6_CCS_System）
-    ros2 control switch_controllers --deactivate ocs2_wbc_controller
-    ros2 control set_hardware_component_state M6_CCS_System inactive
-    ```
-  - **松/抱闸前提**：仅在 `ctrl_mode == POWER_OFF` 下允许设置 `*_brake_release`；其他模式下会被拒绝（`ctrl_mode must be POWER_OFF before brake operation`）。
-  - `left_brake_release`（bool）：左臂 `true` 松闸（BRAK0=2，同时下使能 A 臂并暂停其关节指令），`false` 抱闸（BRAK0=1）
-  - `right_brake_release`（bool）：右臂 `true` 松闸（BRAK1=2，同时下使能 B 臂并暂停其关节指令），`false` 抱闸（BRAK1=1）
-  - **恢复约束**：只要任一臂处于松闸状态，就只允许 `POWER_OFF`，切到其他 `ctrl_mode` 会被拒绝（`brake released on ... arm(s), only POWER_OFF is allowed`）。必须先把对应臂抱闸（`*_brake_release false`），再将 hardware component 切回 `active`，最后切回 `POSITION` 并 activate 控制器。
-- **工具/夹爪负载参数**
-  - `left_kine_param`（double array，长度 6）
-  - `left_dyn_param`（double array，长度 10）
-  - `right_kine_param`（double array，长度 6）
-  - `right_dyn_param`（double array，长度 10）
-- **末端力矩/速度（归一化 0~1）**
-  - `left_tool_torque`、`left_tool_velocity`：左臂末端（A 通道）
-  - `right_tool_torque`、`right_tool_velocity`：右臂末端（B 通道）
+## 8. TODO
 
-```bash
-ros2 param set /<hardware_node> left_tool_torque 0.8
-ros2 param set /<hardware_node> left_tool_velocity 1.0
-ros2 param set /<hardware_node> right_tool_torque 0.5
-ros2 param set /<hardware_node> right_tool_velocity 0.8
-```
-
-示例（动态切换控制模式/阻抗参数）：
-
-```bash
-# 切换控制模式
-ros2 param set /m6_ccs_system ctrl_mode JOINT_IMPEDANCE
-
-# 设置关节阻抗 K/D（7 维）
-ros2 param set /m6_ccs_system joint_k_gains "[2.0, 2.0, 2.0, 1.6, 1.0, 1.0, 1.0]"
-ros2 param set /m6_ccs_system joint_d_gains "[0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4]"
-```
-
-抱闸松闸示例（飞车/撞机急停后手动摆正关节，再恢复控制；左右臂分别设置）：
-
-```bash
-# 1) 先 deactivate 控制器，再将硬件组件切 inactive（自动下使能 → POWER_OFF）
-ros2 control switch_controllers --deactivate ocs2_wbc_controller
-ros2 control set_hardware_component_state M6_CCS_System inactive
-
-# 2) 左臂松闸（OnSetIntPara BRAK0=2，同时下使能 A 臂、暂停其关节指令）
-ros2 param set /m6_ccs_system left_brake_release true
-#    手动摆正左臂关节……
-# 3) 左臂抱闸（BRAK0=1）
-ros2 param set /m6_ccs_system left_brake_release false
-
-# 右臂同理（OnSetIntPara BRAK1）
-ros2 param set /m6_ccs_system right_brake_release true
-ros2 param set /m6_ccs_system right_brake_release false
-
-# 4) 恢复控制：先抱闸完毕，再 active 硬件组件、上使能、activate 控制器
-ros2 control set_hardware_component_state M6_CCS_System active
-ros2 param set /m6_ccs_system ctrl_mode POSITION
-ros2 control switch_controllers --activate ocs2_wbc_controller
-```
-
-> 松闸期间若直接 `ros2 param set ... ctrl_mode POSITION` 会被拒绝（仅允许 `POWER_OFF`）。务必先抱闸（`*_brake_release false`），再 `set_hardware_component_state active`，最后切回 `POSITION`。
-
-> `ros2_control` 退出（硬件 `on_deactivate`）时会 `OnGetIntPara` 检查 `BRAK0/BRAK1`，未抱闸（`!=1`）则强制 `=1`，再下使能并断开连接。
-
-统一下使能 / 上使能示例（左右臂都生效）：
-
-```bash
-# 1. 先 deactivate 控制器（FSM 冻结，update() 停止）
-ros2 control switch_controllers --deactivate ocs2_wbc_controller
-# 2. 再将机械臂硬件组件切 inactive（on_deactivate → 左右臂下使能 / POWER_OFF）
-ros2 control set_hardware_component_state M6_CCS_System inactive
-
-# 恢复：
-# 1. 先 active 硬件组件
-ros2 control set_hardware_component_state M6_CCS_System active
-# 2. 再上使能
-ros2 param set /m6_ccs_system ctrl_mode POSITION
-# 3. 再 activate 控制器
-ros2 control switch_controllers --activate ocs2_wbc_controller
-```
-
-> 注：以上示例中的节点名 `/m6_ccs_system` 对应 m6_ccs 描述包默认配置；其他描述包请根据 `ros2_control` 启动方式确认 controller_manager 所在节点名，可用 `ros2 param list` 查找包含上述参数的节点。
-
-### 3.3 hardware_parameters 中常用参数（初始配置）
-
-以下参数一般在 `hardware_parameters` 中配置，启动时会作为初始值并同步声明为 ROS2 参数：
-
-- `arm_type`：`LEFT` / `RIGHT` / `DUAL`
-- `device_ip`：设备 IP（string）
-- `device_port`：设备端口（int）
-- `gripper_type`：夹爪类型（见下节）
-
-### 3.4 夹爪类型（gripper_type）选项与映射
-
-`gripper_type` 会先做标准化（转大写、去空格）。当前支持的值如下（大小写不敏感）：
-
-- **JD / RG75**：`RG75`、`JDGRIPPER`
-- **Changingtek 90C**：`CHANGINGTEK90C`、`AG2F90`、`AG2F90C`、`AG2F90_C`
-- **Changingtek 90D**：`CHANGINGTEK90D`、`AG2F90D`、`AG2F90_D`
-
-双臂时夹爪通道映射规则：
-
-- 左夹爪：A 通道（索引 0）
-- 右夹爪：B 通道（索引 1）
-
-### 3.4.1 m6_ccs 中的“动态解析 gripper_type”机制
-
-在 `m6_ccs_description` 中，夹爪类型并不是手写死在某一个 URDF 里，而是通过 **xacro 参数 `type` 动态解析**得到：
-
-- 解析逻辑位于：`src/robot-descriptions-tianji/m6_ccs_description/xacro/robot.xacro`
-  - 它会根据 `type`（例如 `dual_ag2f90_c` / `dual_ag2f90_d` / `dual_rg75` / `rg75` / `usb-90c` 等）设置：
-    - `selected_arm_config`（left/right/dual）
-    - `selected_gripper_type`（none/rg75/ag2f90_c/ag2f90_d 等）
-- ros2_control 硬件参数注入位于：`src/robot-descriptions-tianji/m6_ccs_description/xacro/ros2_control/robot.xacro`
-  - 在 `ros2_control_hardware_type=real` 时，会把解析结果作为 `hardware_parameters` 传给 `MarvinHardware`：
-    - `<param name="arm_type">${selected_arm_config}</param>`
-    - `<param name="gripper_type">${selected_gripper_type}</param>`
-  - 同时它会按 `selected_gripper_type` 动态 `include` 对应夹爪的 ros2_control 接口描述（例如 Changingtek AG2F90-C 或 Jodell RG75）。
-
-因此在 m6_ccs 场景下，**你只需要在生成机器人描述时选对 `type`**，`gripper_type` 会自动跟随并传入 `marvin_ros2_control/MarvinHardware`，再由本包完成：
-
-- `hardware_parameters` 初始值加载
-- 声明为 ROS2 参数
-- 运行时 `ros2 param set` 动态修改
-
-### 3.5 常见注意事项
-
-- **数组参数长度必须匹配**：例如 `joint_k_gains/joint_d_gains/cart_k_gains/cart_d_gains` 必须为 7；工具参数必须为 6/10。长度不匹配会被重置为默认值。
-- **动态修改的时机**：某些参数修改会触发重新下发配置/模式切换，建议在控制器稳定运行时修改，并观察日志确认生效。
+- [ ] **抽取 Inspire 协议公共层** — `InspireHandE2` / `InspireHandE2Canfd` 与 [modbus_ros2_control](https://github.com/fiveages-sim/modbus-ros2-control)、[can_ros2_control](https://github.com/fiveages-sim/can-ros2-control) 去重。

@@ -1167,7 +1167,8 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             "LINKERHAND_O7", "LINKERHAND_O6", "LINKERHAND_L6",
             "O7", "O6", "L6",
             "FREEDOM_V1", "FREEDOM_V2", "FREEDOM",
-            "INSPIRE_E2", "INSPIRE", "RH56E2"
+            "INSPIRE_E2", "INSPIRE", "RH56E2",
+            "INSPIRE_F2", "RH56F2"
         };
         
         // Check if type contains hand indicators
@@ -1223,6 +1224,24 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                         clear_485, send_485, get_ch_data, is_left_hand, channel);
                 }
                 RCLCPP_INFO(get_logger(), "Creating inspire_e2 hand (6-DOF, %s hand, slave: 0x%02X)",
+                           is_left_hand ? "left" : "right",
+                           is_left_hand ? 0x02 : 0x01);
+                return std::make_unique<marvin_ros2_control::InspireHandE2>(clear_485, send_485, get_ch_data, is_left_hand);
+            }
+            else if (normalized_ee_type == "INSPIRE_F2" ||
+                     normalized_ee_type == "RH56F2")
+            {
+                hand_model = "INSPIRE_F2";
+                if (channel == CAN_CHANNEL)
+                {
+                    RCLCPP_INFO(get_logger(), "Creating inspire_f2 CANFD hand (6-DOF, %s hand, hand_id: 0x%02X, channel: %ld)",
+                               is_left_hand ? "left" : "right",
+                               is_left_hand ? 0x02 : 0x01,
+                               channel);
+                    return std::make_unique<marvin_ros2_control::InspireHandE2Canfd>(
+                        clear_485, send_485, get_ch_data, is_left_hand, channel);
+                }
+                RCLCPP_INFO(get_logger(), "Creating inspire_f2 hand (6-DOF, %s hand, slave: 0x%02X)",
                            is_left_hand ? "left" : "right",
                            is_left_hand ? 0x02 : 0x01);
                 return std::make_unique<marvin_ros2_control::InspireHandE2>(clear_485, send_485, get_ch_data, is_left_hand);
@@ -1368,6 +1387,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                ee_type == "FREEDOM_V1" || ee_type == "FREEDOM_V2" || ee_type == "FREEDOM" ||
                ee_type == "INSPIRE_E2" || ee_type == "INSPIRE" ||
                ee_type == "RH56E2" ||
+               ee_type == "INSPIRE_F2" || ee_type == "RH56F2" ||
                ee_type.find("LINKERHAND") != std::string::npos;
     }
 
@@ -1416,7 +1436,8 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             "LINKERHAND_O7", "LINKERHAND_O6", "LINKERHAND_L6",
             "O7", "O6", "L6",
             "FREEDOM_V1", "FREEDOM_V2", "FREEDOM",
-            "INSPIRE_E2", "INSPIRE", "RH56E2"
+            "INSPIRE_E2", "INSPIRE", "RH56E2",
+            "INSPIRE_F2", "RH56F2"
         };
         // Gripper types: JD, Changingtek variants
         static const std::set<std::string> gripper_types = {
