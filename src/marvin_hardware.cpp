@@ -24,6 +24,7 @@
 #include "marvin_ros2_control/tool/hands/freedom/freedom_hand.h"
 #include "marvin_ros2_control/tool/hands/inspire/inspire_hand.h"
 #include "marvin_ros2_control/tool/hands/linkerhand/dexterous_hand.h"
+#include "marvin_ros2_control/tool/hands/jodell/erg32_hand.h"
 
 using namespace gripper_hardware_common;
 
@@ -1168,7 +1169,8 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             "O7", "O6", "L6",
             "FREEDOM_V1", "FREEDOM_V2", "FREEDOM",
             "INSPIRE_E2", "INSPIRE", "RH56E2",
-            "INSPIRE_F2", "RH56F2"
+            "INSPIRE_F2", "RH56F2",
+            "ERG32"
         };
         
         // Check if type contains hand indicators
@@ -1188,6 +1190,12 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         
         if (is_hand_type)
         {
+            if (normalized_ee_type == "ERG32" || normalized_ee_type.find("ERG32") != std::string::npos)
+            {
+                RCLCPP_INFO(get_logger(), "Creating ERG32 hand (2-DOF rotate+grip, slave: 0x%02X)",
+                            gripper_hardware_common::ModbusConfig::ERG32::SLAVE_ID);
+                return std::make_unique<marvin_ros2_control::ERG32Hand>(clear_485, send_485, get_ch_data);
+            }
             // Extract hand model from type string and create corresponding hand object
             if (normalized_ee_type == "FREEDOM_V1" || normalized_ee_type == "FREEDOM")
             {
@@ -1382,7 +1390,8 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
 
     bool MarvinHardware::eeTypeIsHand(const std::string& ee_type) const
     {
-        return ee_type == "LINKERHAND_O7" || ee_type == "LINKERHAND_O6" || ee_type == "LINKERHAND_L6" ||
+        return ee_type == "ERG32" || ee_type.find("ERG32") != std::string::npos ||
+               ee_type == "LINKERHAND_O7" || ee_type == "LINKERHAND_O6" || ee_type == "LINKERHAND_L6" ||
                ee_type == "O7" || ee_type == "O6" || ee_type == "L6" ||
                ee_type == "FREEDOM_V1" || ee_type == "FREEDOM_V2" || ee_type == "FREEDOM" ||
                ee_type == "INSPIRE_E2" || ee_type == "INSPIRE" ||
@@ -1437,7 +1446,8 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             "O7", "O6", "L6",
             "FREEDOM_V1", "FREEDOM_V2", "FREEDOM",
             "INSPIRE_E2", "INSPIRE", "RH56E2",
-            "INSPIRE_F2", "RH56F2"
+            "INSPIRE_F2", "RH56F2",
+            "ERG32"
         };
         // Gripper types: JD, Changingtek variants
         static const std::set<std::string> gripper_types = {
