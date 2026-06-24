@@ -3141,10 +3141,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                             current.reserve(hand_dof);
                             for (size_t gi = 0; gi < n_j; ++gi)
                             {
-                                std::string name_lower = gripper_joint_name_[gi];
-                                std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
-                                size_t mapped_tool = (tool_n >= 2 && name_lower.find("right_hand_") != std::string::npos) ? 1 : 0;
-                                if (mapped_tool != gripper_idx) continue;
+                                if (!gripperJointBelongsToTool(gi, gripper_idx)) continue;
                                 const double pos = gripper_position_[gi];
                                 gripper_position_command_[gi] = pos;
                                 last_gripper_command_[gi] = pos;
