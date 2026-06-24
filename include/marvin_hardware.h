@@ -144,7 +144,8 @@ private:
             Send485Func send_485,
             GetChDataFunc get_ch_data,
             size_t tool_index = 0,
-            const std::string& ee_type = "");
+            const std::string& ee_type = "",
+            long channel = COM1_CHANNEL);
         void set_tool_parameters();
 
         static double degreeToRad(const double degree)
@@ -187,6 +188,10 @@ private:
         std::string gripper_type_;
         std::string left_ee_type_;
         std::string right_ee_type_;
+        long left_ee_channel_ = COM1_CHANNEL;
+        long right_ee_channel_ = COM1_CHANNEL;
+        double gripper_torque_scale_ = 1.0;  // Torque scaling factor (0.0-1.0, default: 1.0)
+        /** If true, enable high-frequency INFO logs for tool (hand/gripper) and Modbus hex dumps. */
         std::vector<double> gripper_effort_command_;   // HW_IF_EFFORT command → normalized torque to tool
         std::vector<double> gripper_velocity_command_; // HW_IF_VELOCITY command → normalized velocity to tool
         bool debug_tool_logs_ = false;
@@ -211,6 +216,10 @@ private:
         std::string eeTypeForTool(size_t tool_idx) const;
         bool toolIsHand(size_t tool_idx) const;
         std::vector<std::unique_ptr<gripper_hardware_common::GripperBase>> tool_ptr_;  // Unified container for hand/gripper
+        std::vector<bool> tool_is_left_side_;
+        std::vector<std::string> tool_ee_types_;
+        bool toolUsesLeftChannel(size_t tool_idx) const;
+        long toolChannel(size_t tool_idx) const;
         ToolType tool_type_ = ToolType::None;  // Hand, Gripper, Others, or None - determines move_hand vs move_gripper
         const char* toolTypeLogName() const;
         // Single in-flight task per tool: 0=None, 1=Read (waiting response), 2=Write (waiting response)
@@ -246,13 +255,15 @@ private:
         /** Async: same loop as tool_callback_for_tool but only sends (getStatus/move); no blocking receive. */
         void tool_callback_for_tool_async(size_t tool_idx);
         /** Read once from channel, copy to data_buf, return byte count or 0. */
-        long receiveToolResponse(unsigned char* data_buf, size_t buf_size, GetChDataFunc get_ch_data);
+        long receiveToolResponse(unsigned char* data_buf, size_t buf_size, GetChDataFunc get_ch_data, long channel);
         void processToolResponse(const unsigned char* data_buf, size_t size, size_t gripper_idx);
         bool isToolStateCloseToCommand(size_t tool_idx, double threshold);
         /** True if tool is stopped (hand: at command and stabilized; gripper: at target and stopped). */
         bool isToolStopped(size_t tool_idx);
         /** Sync read: one getStatus(), wait elapsed_time_for_poll ms, then read and parse. */
         bool readToolStatusSync(size_t tool_idx, int elapsed_time_for_poll);
+        /** Hand init: accept current speed/force commands as acknowledged to avoid a startup write. */
+        void syncHandDynamicsAckToCommand(size_t tool_idx);
         /** Sync write: send write_cmd, wait wait_ms, read ack and update state. */
         bool writeToolStatusSync(size_t tool_idx, const std::vector<double>& write_cmd, int wait_ms = 5);
         /** True if a new write command should be sent for this tool (position changed); fills write_cmd_out. */
@@ -268,7 +279,7 @@ private:
         void disconnect_gripper();
         /** One-time initial read per tool during on_activate; updates state and sets tool_initial_read_done_. Returns false if any tool fails to respond. */
         bool doInitialToolReads();
-        /** Map tool_idx (0=left, 1=right) to gripper joint index by name; returns tool_idx if single tool or no match. */
+        /** Map tool_idx (0=left/A, 1=right/B) to gripper joint array index. */
         size_t gripperJointIndexForTool(size_t tool_idx) const;
 
         // Unified tool access helpers

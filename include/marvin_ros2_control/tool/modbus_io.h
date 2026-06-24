@@ -19,6 +19,7 @@ namespace marvin_ros2_control
     using GetChDataFunc = long(*)(unsigned char*, long*);
 
     // Constants
+    constexpr long CAN_CHANNEL = 1;
     constexpr long COM1_CHANNEL = 2;
     constexpr size_t MAX_MODBUS_REGISTERS = 125;
     constexpr size_t MAX_BUFFER_SIZE = 256;
@@ -33,7 +34,8 @@ namespace marvin_ros2_control
     {
     public:
         ModbusIO(Clear485Func clear_485, Send485Func send_485,
-                 GetChDataFunc on_get_ch_data = nullptr);
+                 GetChDataFunc on_get_ch_data = nullptr,
+                 long channel = COM1_CHANNEL);
         
         virtual ~ModbusIO() = default;
 
@@ -71,10 +73,10 @@ namespace marvin_ros2_control
         Clear485Func clear_485_;
         Send485Func send_485_;
         GetChDataFunc on_get_ch_data_;
+        long channel_ = COM1_CHANNEL;
         
         // Static logger (initialized in .cpp)
         static rclcpp::Logger logger_;
         static std::atomic<bool> debug_enabled_;
     };
 } // namespace marvin_ros2_control
-
