@@ -118,6 +118,14 @@ def _power_off_robot(robot: Marvin_Robot, logger: logging.Logger) -> None:
     logger.info("[步骤] 下电完成")
 
 
+def _power_off_arm(robot: Marvin_Robot, arm: str, logger: logging.Logger) -> None:
+    robot.clear_set()
+    robot.set_state(arm=arm, state=0)
+    robot.send_cmd()
+    time.sleep(0.5)
+    logger.info(f"[步骤] 手臂 {arm} 已下电")
+
+
 def _go_to_joint_zero(
     robot: Marvin_Robot,
     dcss: DCSS,
@@ -143,7 +151,6 @@ def _go_to_joint_zero(
 
     logger.info(f"[步骤] 手臂 {arm} 运动到关节零位 {target}（单位：度）")
     t0 = time.time()
-    last_log_t = 0.0
     last_clear_t = 0.0
     clear_attempts = 0
     last_pos_state_req_t = 0.0
@@ -203,14 +210,6 @@ def _go_to_joint_zero(
                 except Exception as e:
                     logger.warning(f"[步骤] arm={arm} 重新请求位置模式时异常: {e}")
 
-        # Periodic diagnostics (avoid spamming)
-        if now - last_log_t > 0.5:
-            last_log_t = now
-            logger.info(
-                f"[步骤] 零位等待中 arm={arm} cur_state={cur_state} cmd_state={cmd_state} err_code={err_code} "
-                f"low_speed_flag={low_spd} max_err_deg={max_err:.3f} fb_joint_pos={fb}"
-            )
-
         if _check_joints_reached(fb, target, tol_deg=0.05):
             logger.info(f"[步骤] 手臂 {arm} 已到达关节零位。max_err_deg={max_err:.3f} fb_joint_pos={fb}")
             return
@@ -255,6 +254,24 @@ def _convert_sdk_raw_to_csv(raw_path: str, save_path: str, logger: logging.Logge
     logger.info(f"数据已保存为: {save_path}")
 
 
+def _ensure_pvt_mode(robot, dcss, arm, logger, max_attempts=2):
+    idx = _arm_index(arm)
+    last_cur_state, last_err_code = None, None
+    for _ in range(max_attempts):
+        robot.check_error_and_clear(dcss)
+        robot.clear_set()
+        robot.set_state(arm=arm, state=2)
+        robot.send_cmd()
+        time.sleep(0.5)
+        st = robot.subscribe(dcss)["states"][idx]
+        last_cur_state = st.get("cur_state")
+        last_err_code = st.get("err_code")
+        if last_cur_state == 2 and last_err_code in (None, 0):
+            return
+    logger.error(f"手臂 {arm} 进入 PVT 失败: cur_state={last_cur_state}, err_code={last_err_code}")
+    raise RuntimeError(f"手臂 {arm} 进入 PVT 模式失败")
+
+
 def collect_identy_data(
     robot: Marvin_Robot,
     dcss: DCSS,
@@ -264,17 +281,7 @@ def collect_identy_data(
     pvt_id: int,
     save_path: str,
 ):
-    idx = _arm_index(arm)
-
-    robot.clear_set()
-    robot.set_state(arm=arm, state=2)  # PVT
-    robot.send_cmd()
-    time.sleep(0.5)
-
-    sub_data = robot.subscribe(dcss)
-    logger.info(f'当前状态 cur_state={sub_data["states"][idx]["cur_state"]}')
-    logger.info(f'指令状态 cmd_state={sub_data["states"][idx]["cmd_state"]}')
-    logger.info(f'错误码 err_code={sub_data["states"][idx]["err_code"]}')
+    _ensure_pvt_mode(robot, dcss, arm, logger)
 
     robot.send_pvt_file(arm, pvt_file, pvt_id)
     logger.info(f"设置 PVT 轨迹文件: {pvt_file}, PVT id: {pvt_id}")
@@ -386,6 +393,7 @@ def collect_identy_data(
     time.sleep(1)
 
     _convert_sdk_raw_to_csv(raw_path, save_path, logger)
+    _power_off_arm(robot, arm, logger)
 
 
 def _prompt(msg: str) -> str:
@@ -399,6 +407,7 @@ def run_wizard():
     logger.handlers.clear()
     fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
     sh = logging.StreamHandler()
+    sh.setLevel(logging.WARNING)
     sh.setFormatter(fmt)
     fh = logging.FileHandler(log_path, encoding="utf-8")
     fh.setFormatter(fmt)
@@ -426,10 +435,12 @@ def run_wizard():
     if init == 0:
         logger.error("连接机器人失败：端口可能被占用")
         raise RuntimeError("连接失败")
-
+    
+    robot.log_switch("0")
+    robot.local_log_switch("0")
     logger.info("[步骤] 检查并清除错误")
     robot.check_error_and_clear(dcss)
-
+    
     logger.info("[步骤] 验证 UDP 订阅通道（frame_serial 是否刷新）")
     motion_tag = 0
     frame_update = None
@@ -446,10 +457,9 @@ def run_wizard():
         raise RuntimeError("订阅数据未刷新")
     logger.info("[步骤] 连接成功（frame_serial 正常刷新）")
 
-    robot.log_switch("1")
-    robot.local_log_switch("1")
 
     reuse_noload = os.environ.get("TOOL_DYN_REUSE_NOLOAD", "").strip().lower() in ("1", "true", "yes")
+    did_noload_collect = False
     if reuse_noload and os.path.isfile(noload_csv):
         logger.info(f"[步骤] 复用上次空载数据，跳过空载采集: {noload_csv}")
         print(f"\n[跳过空载] 复用上次空载数据: {noload_csv}")
@@ -474,11 +484,18 @@ def run_wizard():
         )
         collect_identy_data(robot, dcss, logger, arm=arm, pvt_file=pvt_file, pvt_id=3, save_path=noload_csv)
         logger.info("[步骤] 空载采集完成")
+        did_noload_collect = True
 
-    _prompt(
-        "\n[确认] 请现在安装工具/负载，切换到【带载】状态。\n"
-        "准备好后请按回车开始【带载】采集。"
-    )
+    if did_noload_collect:
+        _prompt(
+            f"\n[确认] 空载采集已完成，手臂 {arm} 已下电。\n"
+            "请安装末端工具，完成后按回车开始【带载】采集。"
+        )
+    else:
+        _prompt(
+            "\n[确认] 请现在安装工具/负载，切换到【带载】状态。\n"
+            "准备好后请按回车开始【带载】采集。"
+        )
     collect_identy_data(robot, dcss, logger, arm=arm, pvt_file=pvt_file, pvt_id=3, save_path=load_csv)
     logger.info("[步骤] 带载采集完成")
 
@@ -490,8 +507,7 @@ def run_wizard():
     print(tool_dynamic_parameters)
     print(f"\n日志已保存到: {log_path}")
 
-    _prompt("\n按回车切换到下电模式并释放机器人连接。")
-    _power_off_robot(robot, logger)
+    _prompt("\n按回车释放机器人连接。")
     robot.release_robot()
     logger.info("[步骤] 已释放机器人连接")
 
