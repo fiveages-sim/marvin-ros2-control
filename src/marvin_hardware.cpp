@@ -413,6 +413,9 @@ namespace marvin_ros2_control
             gripper_stopped_.assign(array_size, true);
             gripper_previous_position_.assign(array_size, std::numeric_limits<double>::quiet_NaN());
             gripper_stable_count_.assign(array_size, 0);
+            tool_ptr_.resize(2);
+            tool_is_left_side_.assign(2, false);
+            tool_ee_types_.assign(2, "");
 
             // Create tool objects (hand or gripper) using unified createTool method
             if (robot_arm_index_ == ARM_LEFT)
@@ -432,11 +435,18 @@ namespace marvin_ros2_control
             else if (robot_arm_index_ == ARM_DUAL)
             {
                 // Dual arm: fixed indices [0]=A(left), [1]=B(right); keep nullptr for disabled sides.
-                tool_ptr_.resize(2);
                 if (has_left_ee)
-                    tool_ptr_[0] = createTool(OnClearChDataA, OnSetChDataA, OnGetChDataA, 0, left_ee_type_);
+                {
+                    tool_ptr_[0] = createTool(OnClearChDataA, OnSetChDataA, OnGetChDataA, 0, left_ee_type_, left_ee_channel_);
+                    tool_is_left_side_[0] = true;
+                    tool_ee_types_[0] = left_ee_type_;
+                }
                 if (has_right_ee)
-                    tool_ptr_[1] = createTool(OnClearChDataB, OnSetChDataB, OnGetChDataB, 1, right_ee_type_);
+                {
+                    tool_ptr_[1] = createTool(OnClearChDataB, OnSetChDataB, OnGetChDataB, 1, right_ee_type_, right_ee_channel_);
+                    tool_is_left_side_[1] = false;
+                    tool_ee_types_[1] = right_ee_type_;
+                }
             }
 
             const size_t created_tool_count =
