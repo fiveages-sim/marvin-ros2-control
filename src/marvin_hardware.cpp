@@ -1934,7 +1934,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             long received = get_ch(data_buf, &ch);
             if (received <= 0)
             {
-                // std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
                 continue;
             }
             if (received >= 2 && isModbusWriteAck(data_buf, static_cast<size_t>(received)))
