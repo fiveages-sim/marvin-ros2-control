@@ -21,6 +21,7 @@
 #include "gripper_hardware_common/JodellGripper.h"
 #include "marvin_ros2_control/tool/grippers/changingtek/changingtek_gripper.h"
 #include "marvin_ros2_control/tool/grippers/jodell/jd_gripper.h"
+#include "marvin_ros2_control/tool/grippers/eincinx/eincinx_gripper.h"
 #include "marvin_ros2_control/tool/hands/freedom/freedom_hand.h"
 #include "marvin_ros2_control/tool/hands/inspire/inspire_hand.h"
 #include "marvin_ros2_control/tool/hands/linkerhand/dexterous_hand.h"
@@ -1299,12 +1300,16 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         else
         {
             // Create gripper
-            enum class GripperKind { JD, Changingtek90C, Changingtek90D, Changingtek120S };
+            enum class GripperKind { JD, Changingtek90C, Changingtek90D, Changingtek120S, EincinX };
 
             static const std::unordered_map<std::string, GripperKind> kGripperTypeMap = {
                 // JD / RG75
                 {"RG75", GripperKind::JD},
                 {"JDGRIPPER", GripperKind::JD},
+
+                // EincinX electric gripper (grip axis Modbus slave 2)
+                {"EINCINX", GripperKind::EincinX},
+                {"EPGI180", GripperKind::EincinX},
 
                 // Changingtek 90C variants (AG2F90_C is the common实际入参)
                 {"CHANGINGTEK90C", GripperKind::Changingtek90C},
@@ -1355,6 +1360,10 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                     }
                     RCLCPP_INFO(get_logger(), "Creating CHANGINGTEK120S Gripper");
                     return std::make_unique<marvin_ros2_control::ChangingtekGripper120S>(clear_485, send_485, get_ch_data);
+
+                case GripperKind::EincinX:
+                    RCLCPP_INFO(get_logger(), "Creating EincinX Gripper");
+                    return std::make_unique<marvin_ros2_control::EincinXGripper>(clear_485, send_485, get_ch_data);
             }
 
             // Defensive fallback
@@ -1464,7 +1473,8 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             "RG75", "JDGRIPPER",
             "CHANGINGTEK90C", "AG2F90", "AG2F90C", "AG2F90_C",
             "CHANGINGTEK90D", "AG2F90D", "AG2F90_D",
-            "AG2F120S", "AG2F120S_D"
+            "AG2F120S", "AG2F120S_D",
+            "EINCINX", "EPGI180"
         };
         
         // Check if type is hand or gripper

@@ -123,6 +123,7 @@ add_library(${PROJECT_NAME} SHARED
         src/marvin_hardware.cpp
         src/tool/modbus_io.cpp
         src/tool/grippers/jodell/jd_gripper.cpp
+        src/tool/grippers/eincinx/eincinx_gripper.cpp
         src/tool/hands/jodell/erg32_hand.cpp
 )
 
