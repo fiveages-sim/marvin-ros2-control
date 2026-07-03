@@ -11,6 +11,7 @@ Marvin 机械臂（M6 等）的 ROS2 Control 硬件接口。通过 **Marvin SDK*
 | 类型键（常用） | 产品 | 实现 | 默认总线 |
 |----------------|------|------|----------|
 | `RG75`, `JDGRIPPER` | Jodell RG75 | `JDGripper` | RS485（COM1） |
+| `ERG32`, `erg32` | Jodell ERG32-150（旋转 + 夹爪，2-DOF） | `ERG32Hand` | RS485（COM1） |
 | `AG2F90_C`, `AG2F90C`, `CHANGINGTEK90C` | ChangingTek AG2F90-C | `ChangingtekGripper90C` | RS485 |
 | `AG2F90_D`, `AG2F90D`, `CHANGINGTEK90D` | ChangingTek AG2F90-D | `ChangingtekGripper90D` | RS485 |
 | `AG2F120S` | ChangingTek AG2F120S | `ChangingtekGripper120S` | RS485 |
@@ -25,17 +26,16 @@ Marvin 机械臂（M6 等）的 ROS2 Control 硬件接口。通过 **Marvin SDK*
 
 未知夹爪类型回退为 `JDGripper`；未知灵巧手类型回退为 O7。
 
-**不在本包：** `xhand1` 等仅支持独立 `ros2_control` 系统的末端。
-
 ## 2. 代码结构
 
 ```
 marvin_ros2_control/
 ├── src/marvin_hardware.cpp          # MarvinHardware 入口
+├── src/tool/                        # 部分末端 .cpp 实现（如 jd_gripper、erg32_hand）
 ├── include/marvin_ros2_control/tool/
 │   ├── modbus_io.h                  # SDK 485/CAN 帧收发
-│   ├── grippers/                    # RG75、Changingtek
-│   └── hands/                       # LinkerHand、Freedom、Inspire
+│   ├── grippers/                    # RG75（jodell/）、Changingtek
+│   └── hands/                       # LinkerHand、Freedom、Inspire、ERG32（jodell/）
 └── external/TJ_FX_ROBOT_CONTRL_SDK/ # Marvin SDK（子模块）
 ```
 
@@ -51,7 +51,7 @@ marvin_ros2_control/
     <plugin>marvin_ros2_control/MarvinHardware</plugin>
     <param name="arm_type">dual</param>
     <param name="device_ip">192.168.1.190</param>
-    <param name="left_ee_type">inspire_f2</param>
+    <param name="left_ee_type">erg32</param>
     <param name="right_ee_type">linkerhand_o7</param>
     <!-- 可选：场总线 CAN（tianji_can） -->
   <!-- <param name="left_ee_channel">1</param> -->
