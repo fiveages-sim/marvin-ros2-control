@@ -46,7 +46,7 @@ namespace marvin_ros2_control
         // Process Modbus read response for hand status
         // Parses Modbus response and extracts all joint positions
         // Returns true if successful, false otherwise
-        // positions: output vector containing normalized positions [0.0-1.0] for all joints
+        // positions: output vector containing joint positions in radians
         virtual bool processReadResponse(const uint8_t* data, size_t data_size,
                                         std::vector<double>& positions) = 0;
 

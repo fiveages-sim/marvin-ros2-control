@@ -40,6 +40,7 @@ namespace marvin_ros2_control
     {
         static constexpr size_t JOINT_COUNT = 7;
         static constexpr const char* PRODUCT_NAME = "O7";
+        using Converter = PositionConverter::LinkerHandO7;
     };
 
     template<>
@@ -47,6 +48,7 @@ namespace marvin_ros2_control
     {
         static constexpr size_t JOINT_COUNT = 6;
         static constexpr const char* PRODUCT_NAME = "O6";
+        using Converter = PositionConverter::LinkerHandO6;
     };
 
     template<>
@@ -54,6 +56,7 @@ namespace marvin_ros2_control
     {
         static constexpr size_t JOINT_COUNT = 6;
         static constexpr const char* PRODUCT_NAME = "L6";
+        using Converter = PositionConverter::LinkerHandL6;
     };
 
     /**
@@ -69,6 +72,7 @@ namespace marvin_ros2_control
     {
     public:
         using Traits = LinkerHandProductTraits<Product>;
+        using Converter = typename Traits::Converter;
         static constexpr size_t JOINT_COUNT = Traits::JOINT_COUNT;
 
         DexterousHandTemplate(Clear485Func clear_485, Send485Func send_485,
@@ -78,55 +82,8 @@ namespace marvin_ros2_control
               slave_id_(is_left_hand ? ModbusConfig::LinkerHand::LEFT_HAND_SLAVE_ID 
                                      : ModbusConfig::LinkerHand::RIGHT_HAND_SLAVE_ID)
         {
-            // Set PositionConverter function pointers based on hand type (polymorphic behavior)
-            if constexpr (JOINT_COUNT == 7)  // O7
-            {
-                get_limits_func_ = PositionConverter::LinkerHandO7::getLimits;
-                get_joint_name_func_ = PositionConverter::LinkerHandO7::getJointNameByIndex;
-                clamp_to_limits_func_ = PositionConverter::LinkerHandO7::clampToLimits;
-            }
-            else if constexpr (Product == LinkerHandProduct::O6)  // O6
-            {
-                get_limits_func_ = PositionConverter::LinkerHandO6::getLimits;
-                get_joint_name_func_ = PositionConverter::LinkerHandO6::getJointNameByIndex;
-                clamp_to_limits_func_ = PositionConverter::LinkerHandO6::clampToLimits;
-            }
-            else  // L6
-            {
-                get_limits_func_ = PositionConverter::LinkerHandL6::getLimits;
-                get_joint_name_func_ = PositionConverter::LinkerHandL6::getJointNameByIndex;
-                clamp_to_limits_func_ = PositionConverter::LinkerHandL6::clampToLimits;
-            }
             last_applied_torques_.assign(JOINT_COUNT, std::numeric_limits<double>::quiet_NaN());
             last_applied_velocities_.assign(JOINT_COUNT, std::numeric_limits<double>::quiet_NaN());
-        }
-        
-        /**
-         * @brief Get joint limits using PositionConverter (uses function pointer for polymorphism)
-         * @param joint_name Joint name
-         * @param lower Output lower limit
-         * @param upper Output upper limit
-         * @return true if joint found, false otherwise
-         */
-        bool getJointLimits(const std::string& joint_name, double& lower, double& upper) const
-        {
-            if (get_limits_func_)
-            {
-                return get_limits_func_(joint_name, lower, upper);
-            }
-            return false;
-        }
-        
-        /**
-         * @brief Get joint name by index (uses function pointer for polymorphism)
-         */
-        std::string getJointNameByIndex(size_t index) const
-        {
-            if (get_joint_name_func_)
-            {
-                return get_joint_name_func_(index);
-            }
-            return "";
         }
 
     protected:
@@ -170,15 +127,6 @@ namespace marvin_ros2_control
             }
             return false;
         }
-        
-        // Function pointers for PositionConverter operations (polymorphic behavior)
-        using GetLimitsFunction = bool(*)(const std::string&, double&, double&);
-        using GetJointNameFunction = std::string(*)(size_t);
-        using ClampFunction = double(*)(double, const std::string&);
-        
-        GetLimitsFunction get_limits_func_;
-        GetJointNameFunction get_joint_name_func_;
-        ClampFunction clamp_to_limits_func_;
 
         bool initialize() override
         {
@@ -217,32 +165,10 @@ namespace marvin_ros2_control
 
             for (size_t i = 0; i < JOINT_COUNT; ++i)
             {
-                // Get joint name using helper method
-                std::string joint_name = getJointNameByIndex(i);
-                
-                // Get joint limits using PositionConverter
-                double lower = 0.0, upper = 0.0;
-                if (!getJointLimits(joint_name, lower, upper))
-                {
-                    RCLCPP_WARN(logger_, "LinkerHand %s: Unknown joint name '%s' at index %zu",
-                               Traits::PRODUCT_NAME, joint_name.c_str(), i);
-                    continue;
-                }
-                
-                // Clamp position to joint limits (positions[i] is in radians)
-                double clamped_rad = std::max(lower, std::min(upper, positions[i]));
-                
-                // Normalize position: map from [lower, upper] radians to [0.0, 1.0]
-                double range = upper - lower;
-                double normalized = (range > 1e-6) ? (clamped_rad - lower) / range : 0.0;
-                normalized = std::clamp(normalized, 0.0, 1.0);
-                
-                // Convert normalized position (0.0-1.0) to raw Modbus value (0-255)
-                // Protocol: 0 = bend/close, 255 = straight/open
-                // Formula: raw = 255 - (normalized * 255)
-                uint16_t raw_value = static_cast<uint16_t>(255 - std::round(normalized * 255.0));
-                raw_positions[i] = raw_value;
-                
+                const std::string joint_name = Converter::getJointNameByIndex(i);
+                const double clamped_rad = Converter::clampToLimits(positions[i], joint_name);
+                raw_positions[i] = Converter::rad_to_modbus_raw(positions[i], joint_name);
+
                 RCLCPP_DEBUG(logger_,
                           "  Register[%zu] (%s): rad=%.4f -> raw=%u, torque=%.2f, velocity=%.2f",
                           i, joint_name.c_str(), clamped_rad, raw_positions[i], torques[i], velocities[i]);
@@ -376,18 +302,13 @@ namespace marvin_ros2_control
                 return false;
             }
             
-            // Convert register values to normalized positions [0.0, 1.0]
-            // Protocol: 0 = bend/close, 255 = straight/open
-            // So normalized = (255 - raw) / 255.0
+            // Convert register values to radians via PositionConverter
             positions.reserve(JOINT_COUNT);
             for (size_t i = 0; i < JOINT_COUNT; ++i)
             {
-                // Each register contains one byte (0-255) in the low byte
-                uint8_t raw_pos = static_cast<uint8_t>(registers[i] & 0xFF);
-                // Convert to normalized [0.0, 1.0]: 0 (bend) -> 1.0, 255 (straight) -> 0.0
-                double normalized = (255.0 - static_cast<double>(raw_pos)) / 255.0;
-                normalized = std::clamp(normalized, 0.0, 1.0);
-                positions.push_back(normalized);
+                const uint8_t raw_pos = static_cast<uint8_t>(registers[i] & 0xFF);
+                const std::string joint_name = Converter::getJointNameByIndex(i);
+                positions.push_back(Converter::modbus_raw_to_rad(raw_pos, joint_name));
             }
 
             if (pending_full_register_io_ && registers.size() >= expected_regs)
