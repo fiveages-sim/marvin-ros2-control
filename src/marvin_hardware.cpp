@@ -3349,6 +3349,8 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                 RCLCPP_ERROR(get_logger(),
                              "Tianji robot error on %s arm: raw_err=%d, encoded_err=0x%X",
                              arm_name, err_code, encoded);
+                if (robot_ctrl_mode_ != "POWER_OFF")
+                    on_deactivate(rclcpp_lifecycle::State{});
             };
 
             if (robot_arm_index_ == ARM_LEFT || robot_arm_index_ == ARM_RIGHT)
@@ -3421,14 +3423,18 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         }
         previous_message_frame_ = frame_data_.m_Out[robot_arm_index_].m_OutFrameSerial;
 
+        const bool arm_ok = (robot_arm_index_ == ARM_DUAL)
+            ? (frame_data_.m_State[ARM_LEFT].m_ERRCode == 0 &&
+               frame_data_.m_State[ARM_RIGHT].m_ERRCode == 0)
+            : (frame_data_.m_State[robot_arm_index_].m_ERRCode == 0);
         if (previous_message_frame_ - frame_data_.m_Out[robot_arm_index_].m_OutFrameSerial < 2)
         {
-            return true;
+            return arm_ok;
         }
         else
         {
             RCLCPP_INFO(get_logger(), "Missing more than 2 frames");
-            return true;
+            return arm_ok;
         }
     }
 
