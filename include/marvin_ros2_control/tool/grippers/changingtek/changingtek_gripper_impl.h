@@ -33,21 +33,21 @@ namespace marvin_ros2_control
     }
 
     template<typename Config>
-    bool ChangingtekGripper<Config>::move_gripper(double normalized_torque, double normalized_velocity, double normalized_pos)
+    bool ChangingtekGripper<Config>::move_gripper(double torque, double velocity, double position_rad)
     {
         using namespace gripper_hardware_common;
 
-        const uint16_t modbus_pos = PositionConverter::Changingtek::normalizedToModbus(
-            normalized_pos, Config::MAX_POSITION_MM);
+        const uint16_t modbus_pos = PositionConverter::Changingtek::physicalToModbus(
+            position_rad, Config::JOINT_LOWER_RAD, Config::JOINT_UPPER_RAD, Config::MAX_POSITION_MM);
         const int modbus_torque = TorqueConverter::Changingtek::normalizedToModbus(
-            normalized_torque, Config::MAX_TORQUE_VALUE);
+            torque, Config::MAX_TORQUE_VALUE);
         const int vel_byte = VelocityConverter::Changingtek::normalizedToVelocityRegister(
-            normalized_velocity, Config::MAX_VELOCITY_VALUE);
+            velocity, Config::MAX_VELOCITY_VALUE);
         int position = static_cast<int>(modbus_pos);
         uint16_t vel_value = static_cast<uint16_t>(vel_byte);
         
-        RCLCPP_INFO(logger_, "Changingtek Gripper - pos: %.3f->%d, vel_norm: %.3f->%u, trq_norm: %.3f->%d",
-                   normalized_pos, position, normalized_velocity, vel_value, normalized_torque, modbus_torque);
+        RCLCPP_INFO(logger_, "Changingtek Gripper - pos_rad: %.4f->%d, vel: %.3f->%u, trq: %.3f->%d",
+                   position_rad, position, velocity, vel_value, torque, modbus_torque);
         
         // Prepare values
         uint16_t trq_value = static_cast<uint16_t>(modbus_torque & 0xFFFF);
@@ -109,8 +109,8 @@ namespace marvin_ros2_control
         {
             // Parse position: (high << 16) + low
             uint32_t modbus_pos = (static_cast<uint32_t>(registers[0]) << 16) | registers[1];
-            cached_position_ = gripper_hardware_common::PositionConverter::Changingtek::modbusToNormalized(
-                modbus_pos, Config::MAX_POSITION_MM);
+            cached_position_ = gripper_hardware_common::PositionConverter::Changingtek::modbusToPhysical(
+                modbus_pos, Config::JOINT_LOWER_RAD, Config::JOINT_UPPER_RAD, Config::MAX_POSITION_MM);
             cached_velocity_ = 0;
             cached_torque_ = 0;
             status_valid_ = true;
@@ -156,11 +156,11 @@ namespace marvin_ros2_control
         if (modbus_pos > Config::MAX_POSITION_MM)
             modbus_pos = Config::MAX_POSITION_MM;
 
-        position = gripper_hardware_common::PositionConverter::Changingtek::modbusToNormalized(
-            modbus_pos, Config::MAX_POSITION_MM);
+        position = gripper_hardware_common::PositionConverter::Changingtek::modbusToPhysical(
+            modbus_pos, Config::JOINT_LOWER_RAD, Config::JOINT_UPPER_RAD, Config::MAX_POSITION_MM);
         velocity = 0;
         torque = 0;
-        RCLCPP_DEBUG(logger_, "Changingtek processReadResponse: regs [0x%04X 0x%04X] -> modbus_pos=%u -> normalized=%.4f",
+        RCLCPP_DEBUG(logger_, "Changingtek processReadResponse: regs [0x%04X 0x%04X] -> modbus_pos=%u -> rad=%.4f",
                      registers[0], registers[1], modbus_pos, position);
         return true;
     }

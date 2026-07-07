@@ -21,7 +21,7 @@ namespace marvin_ros2_control
         ChangingtekGripper(Clear485Func clear_485, Send485Func send_485,
                            GetChDataFunc on_get_ch_data = nullptr);
         bool initialize() override;
-        bool move_gripper(double normalized_torque, double normalized_velocity, double position) override;
+        bool move_gripper(double torque, double velocity, double position) override;
         bool getStatus() override;
         void updateStatusFromResponse(const std::vector<uint16_t>& registers) override;
         bool processReadResponse(const uint8_t* data, size_t data_size,

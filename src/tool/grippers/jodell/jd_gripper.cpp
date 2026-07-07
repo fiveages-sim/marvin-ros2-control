@@ -25,25 +25,24 @@ namespace marvin_ros2_control
     {
         RCLCPP_INFO(logger_, "Initializing JD Gripper (slave: 0x%02X)", Jodell::SLAVE_ADDRESS);
         std::vector<uint16_t> init_value_vector = {Jodell::INIT_VALUE};
-        return writeMultipleRegisters(Jodell::SLAVE_ADDRESS, Jodell::INIT_REGISTER, init_value_vector,
+        return writeMultipleRegisters(Jodell::SLAVE_ADDRESS, Jodell::INIT_REG_ADDR, init_value_vector,
                                       Jodell::WRITE_FUNCTION);
     }
 
-    /// Normalized torque and velocity [0,1]; position normalized (0.0=closed, 1.0=open).
-    /// Velocity maps linearly to Modbus low byte 0–255.
-    bool JDGripper::move_gripper(double normalized_torque, double normalized_velocity, double normalized_pos)
+    /// Torque/velocity normalized [0,1]; position in meters (URDF prismatic joint range).
+    bool JDGripper::move_gripper(double torque, double velocity, double position_m)
     {
         using namespace gripper_hardware_common;
         using namespace gripper_hardware_common::ModbusConfig;
         
-        // Convert normalized position to Jodell position (0-255)
-        int pos_set = PositionConverter::Jodell::normalizedToJodell(normalized_pos);
+        const double clamped_m = std::clamp(position_m, Jodell::JOINT_LOWER_M, Jodell::MAX_OPENING_DISTANCE);
+        int pos_set = PositionConverter::Jodell::physicalToJodell(clamped_m);
         
-        int jodell_torque = TorqueConverter::Jodell::normalizedToJodell(normalized_torque);
-        const int vel_set = VelocityConverter::Jodell::normalizedToLowByte(normalized_velocity);
+        int jodell_torque = TorqueConverter::Jodell::normalizedToJodell(torque);
+        const int vel_set = VelocityConverter::Jodell::normalizedToLowByte(velocity);
         
-        RCLCPP_INFO(logger_, "JD Gripper - pos: %.3f->%d, vel_norm: %.3f->%d, trq_norm: %.3f->%d",
-                    normalized_pos, pos_set, normalized_velocity, vel_set, normalized_torque, jodell_torque);
+        RCLCPP_INFO(logger_, "JD Gripper - pos_m: %.6f->%d, vel: %.3f->%d, trq: %.3f->%d",
+                    clamped_m, pos_set, velocity, vel_set, torque, jodell_torque);
         
         // Use JodellCommandBuilder to build the command with converted torque
         auto position_values = JodellCommandBuilder::buildCommand(pos_set, jodell_torque, vel_set);
@@ -76,7 +75,7 @@ namespace marvin_ros2_control
             // Extract position from status register (high byte of register 1)
             int status_reg_high = static_cast<int>(registers[1] >> 8);
             // Convert Jodell position to normalized (0.0=closed, 1.0=open)
-            cached_position_ = PositionConverter::Jodell::jodellToNormalized(status_reg_high);
+            cached_position_ = PositionConverter::Jodell::jodellToPhysical(status_reg_high);
             // Extract velocity from status register (low byte of register 2)
             cached_velocity_ = static_cast<int>(registers[2] & 0xFF);
             // Extract torque from status register (high byte of register 2)
@@ -134,7 +133,7 @@ namespace marvin_ros2_control
         
         // Extract and update torque, velocity, position
         int status_reg_high = static_cast<int>(registers[1] >> 8);
-        position = PositionConverter::Jodell::jodellToNormalized(status_reg_high);
+        position = PositionConverter::Jodell::jodellToPhysical(status_reg_high);
         velocity = static_cast<int>(registers[2] & 0xFF);
         torque = static_cast<int>(registers[2] >> 8);
         
