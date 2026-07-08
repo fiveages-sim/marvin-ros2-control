@@ -1,5 +1,7 @@
 #include "marvin_hardware.h"
 
+#include "marvin_ros2_control/sensors/kwr75_marvin485_client.h"
+
 #include <chrono>
 #include <cmath>
 #include <limits>
@@ -247,6 +249,33 @@ namespace marvin_ros2_control
                      [](const std::string& s, double def) { try { return std::stod(s); } catch (...) { return def; } });
         ensure_param("right_tool_velocity", 1.0, hw_find("right_tool_velocity"),
                      [](const std::string& s, double def) { try { return std::stod(s); } catch (...) { return def; } });
+
+        // KWR75 force/torque sensor on Marvin internal RS485 (COM2 / channel 3)
+        const auto kwr75_defaults = Kwr75FtConfig::defaults();
+        ensure_param("kwr75_ft_enabled", kwr75_defaults.enabled, hw_find("kwr75_ft_enabled"),
+                     [](const std::string& s, bool def) { return parseBoolLoose(s, def); });
+        ensure_param("left_ft_channel", static_cast<int>(kwr75_defaults.left_channel), hw_find("left_ft_channel"),
+                     [](const std::string& s, int def) { try { return std::stoi(s); } catch (...) { return def; } });
+        ensure_param("right_ft_channel", static_cast<int>(kwr75_defaults.right_channel), hw_find("right_ft_channel"),
+                     [](const std::string& s, int def) { try { return std::stoi(s); } catch (...) { return def; } });
+        ensure_param("ft_poll_interval_ms", kwr75_defaults.poll_interval_ms, hw_find("ft_poll_interval_ms"),
+                     [](const std::string& s, int def) { try { return std::stoi(s); } catch (...) { return def; } });
+        ensure_param("ft_command_code", static_cast<int>(kwr75_defaults.command_code), hw_find("ft_command_code"),
+                     [](const std::string& s, int def) { try { return std::stoi(s); } catch (...) { return def; } });
+        ensure_param("ft_convert_to_si", kwr75_defaults.convert_to_si, hw_find("ft_convert_to_si"),
+                     [](const std::string& s, bool def) { return parseBoolLoose(s, def); });
+        ensure_param("ft_gravity", kwr75_defaults.gravity, hw_find("ft_gravity"),
+                     [](const std::string& s, double def) { try { return std::stod(s); } catch (...) { return def; } });
+        ensure_param("ft_response_timeout_ms", kwr75_defaults.response_timeout_ms, hw_find("ft_response_timeout_ms"),
+                     [](const std::string& s, int def) { try { return std::stoi(s); } catch (...) { return def; } });
+        ensure_param("left_ft_frame_id", kwr75_defaults.left_frame_id, hw_find("left_ft_frame_id"),
+                     [](const std::string& s, const std::string& def) { (void)def; return s; });
+        ensure_param("right_ft_frame_id", kwr75_defaults.right_frame_id, hw_find("right_ft_frame_id"),
+                     [](const std::string& s, const std::string& def) { (void)def; return s; });
+        ensure_param("left_wrench_topic", kwr75_defaults.left_wrench_topic, hw_find("left_wrench_topic"),
+                     [](const std::string& s, const std::string& def) { (void)def; return s; });
+        ensure_param("right_wrench_topic", kwr75_defaults.right_wrench_topic, hw_find("right_wrench_topic"),
+                     [](const std::string& s, const std::string& def) { (void)def; return s; });
     }
     
     hardware_interface::CallbackReturn MarvinHardware::on_init(
@@ -272,32 +301,45 @@ namespace marvin_ros2_control
 
         // Virtual FT sensor inputs (wrench estimated elsewhere, published as WrenchStamped)
         // These topics are optional; when not available, the FT state will stay at zeros.
-        left_wrench_topic_ = get_node_param<std::string>("left_wrench_topic", "/left_arm_external_wrench");
-        right_wrench_topic_ = get_node_param<std::string>("right_wrench_topic", "/right_arm_external_wrench");
+        loadKwr75FtConfig();
 
-        const auto cb_left = [this](geometry_msgs::msg::WrenchStamped::SharedPtr msg) {
-            std::lock_guard<std::mutex> lock(wrench_mutex_);
-            left_ft_state_[0] = msg->wrench.force.x;
-            left_ft_state_[1] = msg->wrench.force.y;
-            left_ft_state_[2] = msg->wrench.force.z;
-            left_ft_state_[3] = msg->wrench.torque.x;
-            left_ft_state_[4] = msg->wrench.torque.y;
-            left_ft_state_[5] = msg->wrench.torque.z;
-        };
-        const auto cb_right = [this](geometry_msgs::msg::WrenchStamped::SharedPtr msg) {
-            std::lock_guard<std::mutex> lock(wrench_mutex_);
-            right_ft_state_[0] = msg->wrench.force.x;
-            right_ft_state_[1] = msg->wrench.force.y;
-            right_ft_state_[2] = msg->wrench.force.z;
-            right_ft_state_[3] = msg->wrench.torque.x;
-            right_ft_state_[4] = msg->wrench.torque.y;
-            right_ft_state_[5] = msg->wrench.torque.z;
-        };
+        if (kwr75_ft_config_.enabled)
+        {
+            left_wrench_pub_ = node_->create_publisher<geometry_msgs::msg::WrenchStamped>(
+                kwr75_ft_config_.left_wrench_topic, rclcpp::SystemDefaultsQoS());
+            right_wrench_pub_ = node_->create_publisher<geometry_msgs::msg::WrenchStamped>(
+                kwr75_ft_config_.right_wrench_topic, rclcpp::SystemDefaultsQoS());
+            RCLCPP_INFO(get_logger(),
+                        "KWR75 FT enabled: left/right channel=%ld/%ld, poll=%dms",
+                        kwr75_ft_config_.left_channel, kwr75_ft_config_.right_channel,
+                        kwr75_ft_config_.poll_interval_ms);
+        }
+        else
+        {
+            const auto cb_left = [this](geometry_msgs::msg::WrenchStamped::SharedPtr msg) {
+                std::lock_guard<std::mutex> lock(wrench_mutex_);
+                left_ft_state_[0] = msg->wrench.force.x;
+                left_ft_state_[1] = msg->wrench.force.y;
+                left_ft_state_[2] = msg->wrench.force.z;
+                left_ft_state_[3] = msg->wrench.torque.x;
+                left_ft_state_[4] = msg->wrench.torque.y;
+                left_ft_state_[5] = msg->wrench.torque.z;
+            };
+            const auto cb_right = [this](geometry_msgs::msg::WrenchStamped::SharedPtr msg) {
+                std::lock_guard<std::mutex> lock(wrench_mutex_);
+                right_ft_state_[0] = msg->wrench.force.x;
+                right_ft_state_[1] = msg->wrench.force.y;
+                right_ft_state_[2] = msg->wrench.force.z;
+                right_ft_state_[3] = msg->wrench.torque.x;
+                right_ft_state_[4] = msg->wrench.torque.y;
+                right_ft_state_[5] = msg->wrench.torque.z;
+            };
 
-        left_wrench_sub_ = node_->create_subscription<geometry_msgs::msg::WrenchStamped>(
-            left_wrench_topic_, rclcpp::SystemDefaultsQoS(), cb_left);
-        right_wrench_sub_ = node_->create_subscription<geometry_msgs::msg::WrenchStamped>(
-            right_wrench_topic_, rclcpp::SystemDefaultsQoS(), cb_right);
+            left_wrench_sub_ = node_->create_subscription<geometry_msgs::msg::WrenchStamped>(
+                kwr75_ft_config_.left_wrench_topic, rclcpp::SystemDefaultsQoS(), cb_left);
+            right_wrench_sub_ = node_->create_subscription<geometry_msgs::msg::WrenchStamped>(
+                kwr75_ft_config_.right_wrench_topic, rclcpp::SystemDefaultsQoS(), cb_right);
+        }
         
         // Get the number of joints from the hardware info
         size_t num_joints = params.hardware_info.joints.size();
@@ -1812,6 +1854,11 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         }
 
         // Start tool callback threads only after initial end-effector data has been updated above
+        if (kwr75_ft_config_.enabled)
+        {
+            startKwr75FtThreads();
+        }
+
         if (init_tool_on_startup_ && has_gripper_ && !gripper_type_.empty() && gripper_type_ != "NONE" && toolCount() > 0)
         {
             if (use_async_tool_comm_)
@@ -1847,7 +1894,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                 RCLCPP_INFO(get_logger(), "%s Connected (independent scheduler per tool)", toolTypeLogName());
             }
         }
-        else
+        else if (!kwr75_ft_config_.enabled)
         {
             // 没有配置末端执行器是正常情况，不应该返回错误
             if (!init_tool_on_startup_ && !gripper_type_.empty() && gripper_type_ != "NONE")
@@ -2475,6 +2522,8 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
     {
         RCLCPP_INFO(get_logger(), "Deactivating Marvin Hardware Interface (power off, keep connection)...");
 
+        stopKwr75FtThreads();
+
         if (robot_arm_index_ == ARM_LEFT)
         {
             OnClearSet();
@@ -2511,6 +2560,8 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         const rclcpp_lifecycle::State& /*previous_state*/)
     {
         RCLCPP_INFO(get_logger(), "Shutting down Marvin Hardware Interface...");
+
+        stopKwr75FtThreads();
 
         if (hardware_connected_) {
             const bool update_left = (robot_arm_index_ == ARM_LEFT || robot_arm_index_ == ARM_DUAL);
@@ -3465,6 +3516,125 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         }
         OnSetSend();
         return result;
+    }
+
+    void MarvinHardware::loadKwr75FtConfig()
+    {
+        kwr75_ft_config_ = Kwr75FtConfig::defaults();
+        kwr75_ft_config_.enabled = get_node_param("kwr75_ft_enabled", kwr75_ft_config_.enabled);
+        kwr75_ft_config_.left_channel = get_node_param("left_ft_channel", kwr75_ft_config_.left_channel);
+        kwr75_ft_config_.right_channel = get_node_param("right_ft_channel", kwr75_ft_config_.right_channel);
+        kwr75_ft_config_.poll_interval_ms = get_node_param("ft_poll_interval_ms", kwr75_ft_config_.poll_interval_ms);
+        kwr75_ft_config_.command_code = static_cast<uint8_t>(
+            get_node_param("ft_command_code", static_cast<int>(kwr75_ft_config_.command_code)));
+        kwr75_ft_config_.convert_to_si = get_node_param("ft_convert_to_si", kwr75_ft_config_.convert_to_si);
+        kwr75_ft_config_.gravity = get_node_param("ft_gravity", kwr75_ft_config_.gravity);
+        kwr75_ft_config_.response_timeout_ms =
+            get_node_param("ft_response_timeout_ms", kwr75_ft_config_.response_timeout_ms);
+        kwr75_ft_config_.left_frame_id =
+            get_node_param<std::string>("left_ft_frame_id", kwr75_ft_config_.left_frame_id);
+        kwr75_ft_config_.right_frame_id =
+            get_node_param<std::string>("right_ft_frame_id", kwr75_ft_config_.right_frame_id);
+        kwr75_ft_config_.left_wrench_topic =
+            get_node_param<std::string>("left_wrench_topic", kwr75_ft_config_.left_wrench_topic);
+        kwr75_ft_config_.right_wrench_topic =
+            get_node_param<std::string>("right_wrench_topic", kwr75_ft_config_.right_wrench_topic);
+    }
+
+    void MarvinHardware::startKwr75FtThreads()
+    {
+        if (kwr75_ft_running_.exchange(true))
+        {
+            return;
+        }
+
+        const bool poll_left = (robot_arm_index_ == ARM_LEFT || robot_arm_index_ == ARM_DUAL);
+        const bool poll_right = (robot_arm_index_ == ARM_RIGHT || robot_arm_index_ == ARM_DUAL);
+
+        if (poll_left)
+        {
+            kwr75_ft_thread_left_ = std::thread(&MarvinHardware::kwr75FtThread, this, ARM_LEFT);
+            kwr75_ft_thread_left_.detach();
+        }
+        if (poll_right)
+        {
+            kwr75_ft_thread_right_ = std::thread(&MarvinHardware::kwr75FtThread, this, ARM_RIGHT);
+            kwr75_ft_thread_right_.detach();
+        }
+
+        RCLCPP_INFO(get_logger(), "KWR75 FT poll threads started (one thread per arm, send+recv)");
+    }
+
+    void MarvinHardware::stopKwr75FtThreads()
+    {
+        kwr75_ft_running_.store(false);
+    }
+
+    void MarvinHardware::applyKwr75Wrench(int arm_index, const std::array<double, 6>& wrench)
+    {
+        const bool is_left = (arm_index == ARM_LEFT);
+        if (is_left)
+        {
+            left_ft_state_ = wrench;
+        }
+        else
+        {
+            right_ft_state_ = wrench;
+        }
+
+        auto pub = is_left ? left_wrench_pub_ : right_wrench_pub_;
+        if (pub)
+        {
+            geometry_msgs::msg::WrenchStamped msg;
+            msg.header.stamp = node_->now();
+            msg.header.frame_id = is_left ? kwr75_ft_config_.left_frame_id : kwr75_ft_config_.right_frame_id;
+            msg.wrench.force.x = wrench[0];
+            msg.wrench.force.y = wrench[1];
+            msg.wrench.force.z = wrench[2];
+            msg.wrench.torque.x = wrench[3];
+            msg.wrench.torque.y = wrench[4];
+            msg.wrench.torque.z = wrench[5];
+            pub->publish(msg);
+        }
+    }
+
+    void MarvinHardware::kwr75FtThread(int arm_index)
+    {
+        Send485Func send_485 = (arm_index == ARM_LEFT) ? OnSetChDataA : OnSetChDataB;
+        GetChDataFunc get_ch_data = (arm_index == ARM_LEFT) ? OnGetChDataA : OnGetChDataB;
+        const long ft_channel = (arm_index == ARM_LEFT) ? kwr75_ft_config_.left_channel : kwr75_ft_config_.right_channel;
+        const char* side_label = (arm_index == ARM_LEFT) ? "left" : "right";
+
+        Kwr75Marvin485Client client(
+            send_485, get_ch_data, ft_channel,
+            kwr75_ft_config_.command_code, kwr75_ft_config_.convert_to_si,
+            kwr75_ft_config_.gravity, kwr75_ft_config_.response_timeout_ms);
+
+        if (client.warmup())
+        {
+            RCLCPP_INFO(get_logger(),
+                        "KWR75 ready on %s Marvin RS485 channel %ld",
+                        side_label, ft_channel);
+        }
+        else
+        {
+            RCLCPP_WARN(get_logger(),
+                        "KWR75 warmup failed on %s Marvin RS485 channel %ld; output stays 0",
+                        side_label, ft_channel);
+        }
+
+        std::array<double, Kwr75Protocol::kAxisCount> wrench {};
+        const int interval_ms = std::max(1, kwr75_ft_config_.poll_interval_ms);
+
+        while (kwr75_ft_running_.load() && hardware_connected_)
+        {
+            const auto cycle_start = std::chrono::steady_clock::now();
+            if (client.readWrench(wrench))
+            {
+                applyKwr75Wrench(arm_index, wrench);
+            }
+            std::this_thread::sleep_until(cycle_start + std::chrono::milliseconds(interval_ms));
+        }
     }
 
 } // namespace marvin_ros2_control

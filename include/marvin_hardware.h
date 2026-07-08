@@ -29,6 +29,7 @@
 #include "marvin_ros2_control/tool/hands/modbus_hand.h"
 #include "gripper_hardware_common/GripperBase.h"
 #include "marvin_ros2_control/tool/modbus_io.h"
+#include "marvin_ros2_control/sensors/kwr75_protocol.h"
 
 namespace marvin_ros2_control
 {
@@ -108,14 +109,24 @@ private:
         std::vector<double> hw_commands_deg_buffer_;
 
         // Virtual FT sensor state (filled from external wrench topic)
-        std::string left_wrench_topic_;
-        std::string right_wrench_topic_;
         rclcpp::Subscription<geometry_msgs::msg::WrenchStamped>::SharedPtr left_wrench_sub_;
         rclcpp::Subscription<geometry_msgs::msg::WrenchStamped>::SharedPtr right_wrench_sub_;
+        rclcpp::Publisher<geometry_msgs::msg::WrenchStamped>::SharedPtr left_wrench_pub_;
+        rclcpp::Publisher<geometry_msgs::msg::WrenchStamped>::SharedPtr right_wrench_pub_;
         std::mutex wrench_mutex_;
         std::array<double, 6> left_ft_state_{};
         std::array<double, 6> right_ft_state_{};
         std::array<double, 6> single_ft_state_{};  // used for single-arm configs
+        Kwr75FtConfig kwr75_ft_config_;
+        std::atomic<bool> kwr75_ft_running_{false};
+        std::thread kwr75_ft_thread_left_;
+        std::thread kwr75_ft_thread_right_;
+
+        void loadKwr75FtConfig();
+        void startKwr75FtThreads();
+        void stopKwr75FtThreads();
+        void kwr75FtThread(int arm_index);
+        void applyKwr75Wrench(int arm_index, const std::array<double, 6>& wrench);
 
         // Joint limits from URDF
         std::vector<double> position_lower_limits_;
