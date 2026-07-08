@@ -32,8 +32,10 @@ namespace marvin_ros2_control
     };
 
     TheoHandSTD16A::TheoHandSTD16A(Clear485Func clear_485, Send485Func send_485,
-                                   GetChDataFunc on_get_ch_data, long channel)
-        : ModbusHand(clear_485, send_485, on_get_ch_data, channel)
+                                   GetChDataFunc on_get_ch_data, long channel,
+                                   uint8_t slave_id)
+        : ModbusHand(clear_485, send_485, on_get_ch_data, channel),
+          slave_id_(slave_id)
     {
     }
 
@@ -41,8 +43,8 @@ namespace marvin_ros2_control
     {
         RCLCPP_INFO(logger_,
                     "Initializing TheoHand STD16A (slave: 0x%02X, channel: %ld): FC06 @0x%04X = 0x%04X",
-                    kSlaveId, channel_, kControlWordRegister, kEnableControlWord);
-        return writeSingleRegister(kSlaveId, kControlWordRegister, kEnableControlWord, kWriteSingleFunction);
+                    slave_id_, channel_, kControlWordRegister, kEnableControlWord);
+        return writeSingleRegister(slave_id_, kControlWordRegister, kEnableControlWord, kWriteSingleFunction);
     }
 
     bool TheoHandSTD16A::move_gripper(double normalized_torque,
@@ -83,13 +85,13 @@ namespace marvin_ros2_control
             registers[i] = radiansToProtocol(positions[i], kLowerLimits[i], kUpperLimits[i]);
         }
 
-        return writeMultipleRegisters(kSlaveId, kTargetPositionRegister, registers, kWriteMultipleFunction);
+        return writeMultipleRegisters(slave_id_, kTargetPositionRegister, registers, kWriteMultipleFunction);
     }
 
     bool TheoHandSTD16A::getStatus()
     {
-        return sendReadRequestAsync(kSlaveId, kFeedbackPositionRegister,
-                                    static_cast<uint16_t>(kJointCount), kReadFunction);
+        return sendReadRequestAsync(slave_id_, kStatusWordRegister,
+                                    static_cast<uint16_t>(kJointCount + 1), kReadFunction);
     }
 
     int TheoHandSTD16A::mapJointNameToIndex(const std::string& joint_name) const
@@ -110,22 +112,44 @@ namespace marvin_ros2_control
     bool TheoHandSTD16A::processReadResponse(const uint8_t* data, size_t data_size,
                                              std::vector<double>& positions)
     {
-        if (data_size < 5 || data[0] != kSlaveId)
+        if (data_size < 5 || data[0] != slave_id_)
         {
             return false;
         }
 
         const std::vector<uint16_t> registers =
-            parseModbusResponse(data, data_size, kSlaveId, kReadFunction);
+            parseModbusResponse(data, data_size, slave_id_, kReadFunction);
         if (registers.size() < kJointCount)
         {
             return false;
         }
 
+        size_t position_offset = 0;
+        if (registers.size() >= kJointCount + 1)
+        {
+            const uint16_t status_word = registers[0];
+            position_offset = 1;
+            if (!status_word_initialized_ || status_word != last_status_word_)
+            {
+                status_word_initialized_ = true;
+                last_status_word_ = status_word;
+                RCLCPP_DEBUG(logger_,
+                             "TheoHand STD16A StatusWord=0x%04X ready=%u switched_on=%u enabled=%u fault=%u warning=%u target_reached=%u internal_limit=%u",
+                             status_word,
+                             (status_word >> 0) & 0x1,
+                             (status_word >> 1) & 0x1,
+                             (status_word >> 2) & 0x1,
+                             (status_word >> 3) & 0x1,
+                             (status_word >> 7) & 0x1,
+                             (status_word >> 10) & 0x1,
+                             (status_word >> 11) & 0x1);
+            }
+        }
+
         positions.assign(kJointCount, 0.0);
         for (size_t i = 0; i < kJointCount; ++i)
         {
-            const int raw = static_cast<int>(static_cast<int16_t>(registers[i]));
+            const int raw = static_cast<int>(static_cast<int16_t>(registers[position_offset + i]));
             positions[i] = protocolToRadians(raw, kLowerLimits[i], kUpperLimits[i]);
         }
         return true;
