@@ -11,7 +11,7 @@ namespace marvin_ros2_control
     /** Marvin internal RS485 COM2 (SDK channel 3). Tools default to COM1 (channel 2). */
     constexpr long KWR75_FT_CHANNEL = 3;
 
-    /** KWR75 RS485 frame layout (28 bytes, default poll 0x49 AA 0D 0A). */
+    /** KWR75 RS485 frame layout (28 bytes, default start 0x48 AA 0D 0A). */
     struct Kwr75Protocol
     {
         static constexpr std::size_t kAxisCount = 6;
@@ -22,7 +22,7 @@ namespace marvin_ros2_control
         static constexpr std::size_t kPayloadOffset = 2;
         static constexpr std::size_t kFloatBytes = 4;
 
-        static std::array<uint8_t, 4> buildPollRequest(uint8_t command_code = 0x49)
+        static std::array<uint8_t, 4> buildPollRequest(uint8_t command_code = 0x48)
         {
             return {command_code, kFrameMarker, kFrameEnd0, kFrameEnd1};
         }
@@ -116,7 +116,7 @@ namespace marvin_ros2_control
         long left_channel = KWR75_FT_CHANNEL;
         long right_channel = KWR75_FT_CHANNEL;
         int poll_interval_ms = 10;
-        uint8_t command_code = 0x49;
+        uint8_t command_code = 0x48;
         bool convert_to_si = true;
         double gravity = 9.80665;
         int response_timeout_ms = 50;

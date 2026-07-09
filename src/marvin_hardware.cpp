@@ -2000,7 +2000,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                     applyGripperWriteAckFromInFlight(tool_idx);
                 continue;
             }
-            if (received >= 2 && data_buf[1] == 0x04)
+            if (received >= 2 && (data_buf[1] == 0x03 || data_buf[1] == 0x04))
             {
                 const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -2019,8 +2019,9 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
     {
         // Async send: only getStatus() and move_gripper/move_hand; no blocking receive (recv thread handles responses).
         constexpr int kControlPeriodMs = 100;
-        constexpr int kHeartbeatIntervalMs = 1000;
-        constexpr int kHeartbeatOfflineThresholdMs = 10000;
+        // Stopped tools still poll at control rate (not 1Hz): shared RS485 often drops most replies.
+        constexpr int kStoppedPollIntervalMs = kControlPeriodMs;
+        constexpr int kHeartbeatOfflineThresholdMs = 30000;
         if (tool_idx >= kMaxTools || tool_idx >= toolCount())
             return;
 
@@ -2148,7 +2149,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             }
             else
             {
-                // Priority: normal status read first; heartbeat is lower priority (only when no need to read).
+                // Priority: normal status read first; when stopped, keep polling at control rate for heartbeat.
                 if (should_read)
                 {
                     tool->getStatus();
@@ -2158,7 +2159,8 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                 else if (tool_idx < tool_hb_tx_ms_.size())
                 {
                     const auto last_tx = tool_hb_tx_ms_[tool_idx].load();
-                    const bool interval_due = (last_tx <= 0) || ((now_ms - last_tx) >= kHeartbeatIntervalMs);
+                    const bool interval_due = (last_tx <= 0) ||
+                        ((now_ms - last_tx) >= kStoppedPollIntervalMs);
                     if (interval_due)
                     {
                         tool->getStatus();
@@ -3028,9 +3030,9 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             applyGripperWriteAckFromInFlight(tool_idx);
             return;
         }
-        if (received >= 2 && data_buf[1] == 0x04)
+        if (received >= 2 && (data_buf[1] == 0x03 || data_buf[1] == 0x04))
             processToolResponse(data_buf, static_cast<size_t>(received), tool_idx);
-        // 收到的是读响应(FC 04)则只更新状态，不清除 in_flight，继续等写应答
+        // 收到的是读响应(FC 03/04)则只更新状态，不清除 in_flight，继续等写应答
     }
 
     bool MarvinHardware::isToolStopped(size_t tool_idx)
@@ -3096,20 +3098,19 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         }
         else
         {
-            // 仅用 stabilized / target_reached 判断，不再乘 at_command
+            // Gripper stopped: trust device feedback flag (target_reached).
             auto* tool = toolAt(tool_idx);
             auto* gripper = dynamic_cast<ModbusGripper*>(tool);
             const size_t gi = gripperJointIndexForTool(tool_idx);
-            const bool stabilized = (gi < gripper_stopped_.size() && gripper_stopped_[gi]);
             const bool target_reached = (gripper && gripper->isTargetReached());
-            stopped = stabilized;
+            stopped = target_reached;
             double pos_val = (gi < gripper_position_.size()) ? gripper_position_[gi] : std::numeric_limits<double>::quiet_NaN();
             double cmd_val = (gi < gripper_position_command_.size()) ? gripper_position_command_[gi] : std::numeric_limits<double>::quiet_NaN();
             if (debug_tool_logs_)
             {
                 RCLCPP_INFO_THROTTLE(get_logger(), *node_->get_clock(), 1000,
-                                     "isToolStopped(tool_idx=%zu) gripper: stabilized=%d target_reached=%d -> stopped=%d | position=%.4f command=%.4f",
-                                     tool_idx, stabilized ? 1 : 0, target_reached ? 1 : 0, stopped ? 1 : 0, pos_val, cmd_val);
+                                     "isToolStopped(tool_idx=%zu) gripper: target_reached=%d -> stopped=%d | position=%.4f command=%.4f",
+                                     tool_idx, target_reached ? 1 : 0, stopped ? 1 : 0, pos_val, cmd_val);
             }
         }
         if (debug_tool_logs_)
@@ -3343,6 +3344,24 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         if (motion_tag > 0)
         {
             RCLCPP_INFO(get_logger(), "Successfully connected to Marvin hardware (verified by frame updates)");
+
+            const long sdk_major = OnGetSDKVersion();
+            char version_param[30] = "VERSION";
+            long ctrl_version = 0;
+            if (OnGetIntPara(version_param, &ctrl_version) == 0)
+            {
+                RCLCPP_INFO(
+                    get_logger(),
+                    "Marvin controller version: %ld (SDK major %ld, sub %ld)",
+                    ctrl_version, sdk_major, ctrl_version % 100);
+            }
+            else
+            {
+                RCLCPP_WARN(
+                    get_logger(),
+                    "Failed to read Marvin controller VERSION parameter (SDK major %ld)",
+                    sdk_major);
+            }
         }
         else
         {
@@ -3618,9 +3637,21 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         }
         else
         {
-            RCLCPP_WARN(get_logger(),
-                        "KWR75 warmup failed on %s Marvin RS485 channel %ld; output stays 0",
-                        side_label, ft_channel);
+            const std::string sample = client.lastIoSampleHex();
+            if (sample.empty())
+            {
+                RCLCPP_WARN(get_logger(),
+                            "KWR75 warmup failed on %s Marvin RS485 channel %ld; "
+                            "no raw data received (output stays 0)",
+                            side_label, ft_channel);
+            }
+            else
+            {
+                RCLCPP_WARN(get_logger(),
+                            "KWR75 warmup failed on %s Marvin RS485 channel %ld; "
+                            "raw RX ch=%ld [%s] (output stays 0)",
+                            side_label, ft_channel, client.lastRxChannel(), sample.c_str());
+            }
         }
 
         std::array<double, Kwr75Protocol::kAxisCount> wrench {};

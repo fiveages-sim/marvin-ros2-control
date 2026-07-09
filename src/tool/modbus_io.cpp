@@ -184,6 +184,41 @@ namespace marvin_ros2_control
         return sendRequest(request);
     }
 
+    bool ModbusIO::sendWriteSingleRegisterAsync(uint8_t slave_id, uint16_t register_addr, uint16_t value,
+                                                uint8_t function_code)
+    {
+        std::vector<uint8_t> data = {
+            static_cast<uint8_t>(register_addr >> 8),
+            static_cast<uint8_t>(register_addr & 0xFF),
+            static_cast<uint8_t>(value >> 8),
+            static_cast<uint8_t>(value & 0xFF)
+        };
+        return sendRequest(buildRequest(slave_id, function_code, data));
+    }
+
+    bool ModbusIO::sendFC06QueryAsync(uint8_t slave_id, uint16_t register_addr)
+    {
+        return sendWriteSingleRegisterAsync(slave_id, register_addr, 0x0000, 0x06);
+    }
+
+    bool ModbusIO::parseFC06Response(const uint8_t* data, size_t data_size,
+                                     uint8_t expected_slave_id, uint16_t expected_register_addr,
+                                     uint16_t& value_out)
+    {
+        if (data_size < 8 || data[0] != expected_slave_id || data[1] != 0x06)
+        {
+            return false;
+        }
+        const uint16_t register_addr =
+            static_cast<uint16_t>((static_cast<uint16_t>(data[2]) << 8) | data[3]);
+        if (register_addr != expected_register_addr)
+        {
+            return false;
+        }
+        value_out = static_cast<uint16_t>((static_cast<uint16_t>(data[4]) << 8) | data[5]);
+        return true;
+    }
+
     std::vector<uint16_t> ModbusIO::parseModbusResponse(const uint8_t* data, size_t data_size,
                                                         uint8_t expected_slave_id, uint8_t expected_function_code)
     {

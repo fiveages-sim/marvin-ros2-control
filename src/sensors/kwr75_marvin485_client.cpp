@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cstring>
+#include <iomanip>
+#include <sstream>
 
 namespace marvin_ros2_control
 {
@@ -23,18 +25,69 @@ namespace marvin_ros2_control
     {
     }
 
+    void Kwr75Marvin485Client::recordIoSample(const std::vector<uint8_t>& buffer, long rx_channel)
+    {
+        last_rx_channel_ = rx_channel;
+        if (buffer.empty())
+        {
+            last_io_sample_hex_.clear();
+            return;
+        }
+        const std::size_t sample_len = std::min(buffer.size(), std::size_t{32});
+        std::ostringstream oss;
+        oss << std::hex << std::setfill('0');
+        for (std::size_t i = 0; i < sample_len; ++i)
+        {
+            if (i > 0)
+            {
+                oss << ' ';
+            }
+            oss << std::setw(2) << static_cast<int>(buffer[i]);
+        }
+        if (buffer.size() > sample_len)
+        {
+            oss << " ...";
+        }
+        last_io_sample_hex_ = oss.str();
+    }
+
+    bool Kwr75Marvin485Client::ensureStreaming()
+    {
+        if (streaming_started_)
+        {
+            return true;
+        }
+        if (!sendStartCommand())
+        {
+            return false;
+        }
+        streaming_started_ = true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        return true;
+    }
+
     bool Kwr75Marvin485Client::warmup()
     {
-        if (!sendPoll())
+        last_io_sample_hex_.clear();
+        last_rx_channel_ = -1;
+
+        if (usesPollPerRead())
+        {
+            if (!sendStartCommand())
+            {
+                return false;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            if (!sendStartCommand())
+            {
+                return false;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        else if (!ensureStreaming())
         {
             return false;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        if (!sendPoll())
-        {
-            return false;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
 
         std::array<uint8_t, Kwr75Protocol::kFrameLength> frame {};
         if (!readResponseFrame(frame))
@@ -48,7 +101,14 @@ namespace marvin_ros2_control
 
     bool Kwr75Marvin485Client::readWrench(std::array<double, Kwr75Protocol::kAxisCount>& wrench_si)
     {
-        if (!sendPoll())
+        if (usesPollPerRead())
+        {
+            if (!sendStartCommand())
+            {
+                return false;
+            }
+        }
+        else if (!ensureStreaming())
         {
             return false;
         }
@@ -69,7 +129,12 @@ namespace marvin_ros2_control
         return true;
     }
 
-    bool Kwr75Marvin485Client::sendPoll()
+    bool Kwr75Marvin485Client::usesPollPerRead() const
+    {
+        return command_code_ == 0x49;
+    }
+
+    bool Kwr75Marvin485Client::sendStartCommand()
     {
         const auto request = Kwr75Protocol::buildPollRequest(command_code_);
         return send_485_(const_cast<uint8_t*>(request.data()), static_cast<long>(request.size()), channel_);
@@ -79,16 +144,18 @@ namespace marvin_ros2_control
     {
         std::vector<uint8_t> buffer;
         buffer.reserve(Kwr75Protocol::kFrameLength * 2);
+        long last_rx_channel = -1;
         const auto deadline = std::chrono::steady_clock::now() +
                             std::chrono::milliseconds(response_timeout_ms_);
 
         while (std::chrono::steady_clock::now() <= deadline)
         {
             unsigned char chunk[256] = {0};
-            long channel = channel_;
-            const long received = get_ch_data_(chunk, &channel);
+            long rx_channel = channel_;
+            const long received = get_ch_data_(chunk, &rx_channel);
             if (received > 0)
             {
+                last_rx_channel = rx_channel;
                 buffer.insert(
                     buffer.end(),
                     chunk,
@@ -96,6 +163,7 @@ namespace marvin_ros2_control
                 if (Kwr75Protocol::findFrameInBuffer(
                         buffer.data(), buffer.size(), command_code_, frame))
                 {
+                    last_io_sample_hex_.clear();
                     return true;
                 }
                 if (buffer.size() > Kwr75Protocol::kFrameLength * 4)
@@ -111,6 +179,7 @@ namespace marvin_ros2_control
             }
         }
 
+        recordIoSample(buffer, last_rx_channel);
         return false;
     }
 }  // namespace marvin_ros2_control
