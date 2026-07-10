@@ -260,6 +260,21 @@ private:
         std::array<std::atomic<std::int64_t>, kMaxTools> tool_hb_last_rx_ms_{};
         std::array<std::atomic<bool>, kMaxTools> tool_hb_offline_reported_{};
 
+        // --- Async per-cycle request/response pairing & timeout accounting ---
+        // Fully decoupled design: sender thread only marks a frame pending; the recv
+        // thread (20ms cadence) clears the pending flag when it parses a reply.
+        // At the START of the next control cycle, if pending is still set, it means the
+        // recv thread did not observe a reply within ~n chances (n = ctrl_period/recv_period),
+        // so the previous frame is counted as a timeout. Zero synchronization cost on
+        // the sender path besides atomic flag flips.
+        std::array<std::atomic<bool>, kMaxTools> tool_reply_pending_{};     // true = sent, awaiting reply
+        std::array<std::atomic<int>, kMaxTools> tool_reply_kind_{};         // 0=none,1=read,2=write (for logging)
+        std::array<std::atomic<std::uint64_t>, kMaxTools> tool_tx_total_{}; // total frames sent
+        std::array<std::atomic<std::uint64_t>, kMaxTools> tool_rx_total_{}; // frames answered (pending cleared by recv)
+        std::array<std::atomic<std::uint64_t>, kMaxTools> tool_timeout_count_{}; // frames never answered within cycle
+        // Last reported snapshot of timeout counters (for periodic summary diffs).
+        std::array<std::uint64_t, kMaxTools> tool_last_reported_timeout_{};
+
         void tool_callback_for_tool(size_t tool_idx);
         /** Async: recv thread for one tool; only calls get_ch_data and processes responses (no sending). */
         void tool_recv_thread_func(size_t tool_idx);
@@ -283,6 +298,24 @@ private:
         void tryConsumeWriteAck(size_t tool_idx);
         /** True if data_buf looks like Modbus write response (FC 0x10). */
         static bool isModbusWriteAck(const unsigned char* data_buf, size_t size);
+        /**
+         * @brief Check the previous cycle's pending reply; if still unanswered, count a timeout.
+         *
+         * Call this at the START of each control cycle BEFORE sending a new frame.
+         * It is fully non-blocking: it only inspects the atomic tool_reply_pending_ flag
+         * which the recv thread (20ms cadence) clears on a valid reply.
+         *
+         * @return true if the previous frame timed out (no reply within the cycle).
+         */
+        bool checkPrevCycleTimeout(size_t tool_idx);
+        /** Mark a frame as just-sent (pending reply). Called by sender right after send_485. */
+        void markFrameSent(size_t tool_idx, int kind);
+        /** Mark a frame as answered. Called by recv thread when it parses a valid reply. */
+        void markFrameAnswered(size_t tool_idx);
+        /** Sync-mode accounting: update tx/rx/timeout counters immediately from a known send result. */
+        void accountSyncFrame(size_t tool_idx, int kind, bool got_reply);
+        /** Periodic timeout summary: emits an aggregated WARN when new timeouts occurred since last call. */
+        void emitTimeoutSummary(size_t tool_idx);
         /** Apply in-flight write as acknowledged: update last_gripper_command_ and clear in_flight for tool_idx. */
         void applyGripperWriteAckFromInFlight(size_t tool_idx);
         void updateGripperState(size_t gripper_idx, double position, int velocity, int torque);

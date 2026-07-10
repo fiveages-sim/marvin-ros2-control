@@ -185,28 +185,40 @@ bool EincinXGripper::initialize()
     RCLCPP_INFO(logger_, "Initializing EincinX gripper (slave 0x%02X)", EincinXCfg::SLAVE_ID);
     resetState();
 
-    auto send_fc06 = [&](uint16_t reg, uint16_t value) {
-        const bool ok = sendWriteSingleRegisterAsync(EincinXCfg::SLAVE_ID, reg, value,
-                                                     EincinXCfg::WRITE_SINGLE_FUNCTION);
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        return ok;
-    };
+    if (clear_485_)
+    {
+        clear_485_();
+    }
 
-    bool ok = send_fc06(EincinXCfg::CONTROL_WORD_REG, EincinXCfg::ENABLE_VALUE);
-    ok = send_fc06(EincinXCfg::CURRENT_REG, static_cast<uint16_t>(EincinXCfg::DEFAULT_CURRENT)) && ok;
-    ok = writeMultipleRegisters(EincinXCfg::SLAVE_ID, EincinXCfg::SPEED_REG,
-                                encodeU32HighLow(static_cast<int32_t>(EincinXCfg::DEFAULT_SPEED_PULSES)),
-                                EincinXCfg::WRITE_FUNCTION) &&
-         ok;
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    ok = send_fc06(EincinXCfg::SAVE_PARAM_REG, EincinXCfg::SAVE_PARAM_VALUE) && ok;
+    if (!sendWriteSingleRegisterAsync(EincinXCfg::SLAVE_ID, EincinXCfg::CONTROL_WORD_REG,
+                                      EincinXCfg::ENABLE_VALUE, EincinXCfg::WRITE_SINGLE_FUNCTION))
+    {
+        RCLCPP_ERROR(logger_, "EincinX enable write failed (FC06@0x6040=0x%04X)",
+                     EincinXCfg::ENABLE_VALUE);
+        return false;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-    target_current_ = static_cast<uint16_t>(EincinXCfg::DEFAULT_CURRENT);
-    target_speed_pulses_ = EincinXCfg::DEFAULT_SPEED_PULSES;
+    if (!sendReadRequestAsync(EincinXCfg::SLAVE_ID, EincinXCfg::SOFTWARE_VERSION_REG,
+                              EincinXCfg::SOFTWARE_VERSION_REGISTER_COUNT, EincinXCfg::READ_FUNCTION))
+    {
+        RCLCPP_ERROR(logger_, "EincinX version query send failed (FC03@0x%04X)",
+                     EincinXCfg::SOFTWARE_VERSION_REG);
+        return false;
+    }
+    last_read_step_ = ReadStep::Version;
+    version_query_sent_ = true;
+
+    // Avoid pending motion writes blocking the first status read in doInitialToolReads.
     applied_current_ = target_current_;
     applied_speed_pulses_ = target_speed_pulses_;
+    applied_position_pulses_ = target_position_pulses_;
+    pending_current_write_ = false;
+    pending_speed_write_ = false;
+    pending_position_write_ = false;
+
     motion_stopped_ = true;
-    return ok;
+    return true;
 }
 
 bool EincinXGripper::move_gripper(double normalized_torque, double normalized_velocity,
@@ -218,6 +230,18 @@ bool EincinXGripper::move_gripper(double normalized_torque, double normalized_ve
 
 bool EincinXGripper::getStatus()
 {
+    // Before the first valid read, only poll feedback; skip motion writes so
+    // readToolStatusSync receives FC03 frames instead of FC06 write acks.
+    if (!status_valid_)
+    {
+        if (!sendReadStep(active_read_step_))
+        {
+            return false;
+        }
+        active_read_step_ = (active_read_step_ == ReadStep::Position) ? ReadStep::StatusWord
+                                                                      : ReadStep::Position;
+        return true;
+    }
     return advanceCommCycle();
 }
 
@@ -234,6 +258,24 @@ bool EincinXGripper::processReadResponse(const uint8_t* data, size_t data_size, 
     if (registers.empty())
     {
         return false;
+    }
+
+    if (last_read_step_ == ReadStep::Version)
+    {
+        if (registers.size() >= 2)
+        {
+            RCLCPP_INFO(logger_, "EincinX firmware version: 0x%04X%04X", registers[0], registers[1]);
+        }
+        else
+        {
+            RCLCPP_INFO(logger_, "EincinX firmware version: 0x%04X", registers[0]);
+        }
+        version_query_sent_ = false;
+        status_valid_ = true;
+        position = cached_position_;
+        velocity = 0;
+        torque = 0;
+        return true;
     }
 
     if (last_read_step_ == ReadStep::StatusWord)
@@ -282,6 +324,7 @@ void EincinXGripper::resetState()
     applied_current_ = 0;
     status_word_ = 0;
     motion_stopped_ = true;
+    version_query_sent_ = false;
 }
 
 }  // namespace marvin_ros2_control

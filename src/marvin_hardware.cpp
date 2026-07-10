@@ -1758,23 +1758,22 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         rightkineParam_.resize(6, 0.0);
         rightdynParam_.resize(10, 0.0);
         
-        // Connect and initialize end effector (gripper or hand) (this will update kineParam and dynPara if detected)
-        // 只有在配置了末端执行器类型且允许启动初始化时才尝试连接
+        // Connect and initialize end effector (gripper or hand).
         if (init_tool_on_startup_ && has_gripper_ && !gripper_type_.empty() && gripper_type_ != "NONE")
         {
             if (toolCount() == 0)
             {
-                // 配置了末端执行器类型但没有检测到关节或创建对象失败
-                RCLCPP_WARN(get_logger(), "End effector type configured but no end effector detected or created");
+                RCLCPP_ERROR(get_logger(),
+                             "End effector type '%s' configured but no end effector detected or created; "
+                             "skipping tool communication",
+                             gripper_type_.c_str());
             }
-            else
+            else if (!connect_tool())
             {
-                const bool ok = connect_tool();  // initializes the selected tool list (hand/gripper)
-                if (!ok)
-                {
-                    RCLCPP_WARN(get_logger(), "%s initialization failed, using default (zero) parameters",
-                                toolTypeLogName());
-                }
+                RCLCPP_ERROR(get_logger(),
+                             "%s communication verification failed during initialize(); "
+                             "skipping further tool communication for failed side(s)",
+                             toolTypeLogName());
             }
         }
         else if (!init_tool_on_startup_ && has_gripper_ && !gripper_type_.empty() && gripper_type_ != "NONE")
@@ -1844,13 +1843,35 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                         frame_data_.m_In[1].m_Joint_Vel_Ratio, frame_data_.m_In[1].m_Joint_Acc_Ratio);
         }
 
-        // One-time initial read per tool; if one side fails we mark it and continue (no abort), that side will not be polled
+        // One-time initial read per verified tool; failed tools are marked and never polled again.
         if (init_tool_on_startup_ && has_gripper_ && !gripper_type_.empty() && gripper_type_ != "NONE" && toolCount() > 0)
         {
-            RCLCPP_INFO(get_logger(), "sleeping 500ms for tool initialization");
-            std::this_thread::sleep_for(std::chrono::milliseconds(500)); // 如果有末端工具需要等待 工具初始化完成
-            (void)doInitialToolReads();
-            RCLCPP_INFO(get_logger(), "Initial end-effector read done; starting tool_callback_for_tool threads");
+            bool any_tool_needs_read = false;
+            for (size_t ti = 0; ti < toolCount(); ++ti)
+            {
+                if (!toolAt(ti))
+                    continue;
+                if (ti < tool_init_failed_.size() && tool_init_failed_[ti])
+                    continue;
+                any_tool_needs_read = true;
+                break;
+            }
+            if (any_tool_needs_read)
+            {
+                RCLCPP_INFO(get_logger(), "sleeping 500ms for tool initialization");
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                if (!doInitialToolReads())
+                {
+                    RCLCPP_ERROR(get_logger(),
+                                 "%s communication verification failed after initial read; "
+                                 "skipping further tool communication for failed side(s)",
+                                 toolTypeLogName());
+                }
+                else
+                {
+                    RCLCPP_INFO(get_logger(), "Initial end-effector read done; starting tool_callback_for_tool threads");
+                }
+            }
         }
 
         // Start tool callback threads only after initial end-effector data has been updated above
@@ -1869,6 +1890,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                 for (size_t ti = 0; ti < toolCount(); ++ti)
                 {
                     if (!toolAt(ti)) continue;
+                    if (ti < tool_init_failed_.size() && tool_init_failed_[ti]) continue;
                     tool_recv_threads_[ti] = std::thread(&MarvinHardware::tool_recv_thread_func, this, ti);
                     tool_recv_threads_[ti].detach();
                 }
@@ -1877,10 +1899,24 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                 for (size_t ti = 0; ti < toolCount(); ++ti)
                 {
                     if (!toolAt(ti)) continue;
+                    if (ti < tool_init_failed_.size() && tool_init_failed_[ti]) continue;
                     gripper_ctrl_threads_[ti] = std::thread(&MarvinHardware::tool_callback_for_tool_async, this, ti);
                     gripper_ctrl_threads_[ti].detach();
                 }
-                RCLCPP_INFO(get_logger(), "%s Connected (async tool comm: recv + send threads per tool)", toolTypeLogName());
+                bool any_tool_active = false;
+                for (size_t ti = 0; ti < toolCount(); ++ti)
+                {
+                    if (toolAt(ti) && ti < tool_init_failed_.size() && !tool_init_failed_[ti])
+                    {
+                        any_tool_active = true;
+                        break;
+                    }
+                }
+                if (any_tool_active)
+                {
+                    RCLCPP_INFO(get_logger(), "%s Connected (async tool comm: recv + send threads per tool)",
+                                toolTypeLogName());
+                }
             }
             else
             {
@@ -1888,15 +1924,27 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                 for (size_t ti = 0; ti < toolCount(); ++ti)
                 {
                     if (!toolAt(ti)) continue;
+                    if (ti < tool_init_failed_.size() && tool_init_failed_[ti]) continue;
                     gripper_ctrl_threads_[ti] = std::thread(&MarvinHardware::tool_callback_for_tool, this, ti);
                     gripper_ctrl_threads_[ti].detach();
                 }
-                RCLCPP_INFO(get_logger(), "%s Connected (independent scheduler per tool)", toolTypeLogName());
+                bool any_tool_active = false;
+                for (size_t ti = 0; ti < toolCount(); ++ti)
+                {
+                    if (toolAt(ti) && ti < tool_init_failed_.size() && !tool_init_failed_[ti])
+                    {
+                        any_tool_active = true;
+                        break;
+                    }
+                }
+                if (any_tool_active)
+                {
+                    RCLCPP_INFO(get_logger(), "%s Connected (independent scheduler per tool)", toolTypeLogName());
+                }
             }
         }
         else if (!kwr75_ft_config_.enabled)
         {
-            // 没有配置末端执行器是正常情况，不应该返回错误
             if (!init_tool_on_startup_ && !gripper_type_.empty() && gripper_type_ != "NONE")
             {
                 RCLCPP_WARN(get_logger(),
@@ -1905,13 +1953,12 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             }
             else if (!gripper_type_.empty() && gripper_type_ != "NONE")
             {
-                // 配置了末端执行器类型但连接失败
-                RCLCPP_ERROR(get_logger(), "%s type configured but connection failed", toolTypeLogName());
-                return hardware_interface::CallbackReturn::ERROR;
+                RCLCPP_ERROR(get_logger(),
+                             "%s type configured but no verified tool communication; arm will continue without tool",
+                             toolTypeLogName());
             }
             else
             {
-                // 没有配置末端执行器，这是正常情况
                 RCLCPP_INFO(get_logger(), "No gripper configured, continuing without gripper");
             }
         }
@@ -1963,15 +2010,18 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
 
             if (should_read)
             {
-                (void)readToolStatusSync(tool_idx, kPollMs);
+                const bool got = readToolStatusSync(tool_idx, kPollMs);
+                accountSyncFrame(tool_idx, 1, got);
             }
 
             std::vector<double> write_cmd;
             if (shouldSendToolCommand(tool_idx, write_cmd) && !write_cmd.empty())
             {
-                (void)writeToolStatusSync(tool_idx, write_cmd, kPollMs);
+                const bool got = writeToolStatusSync(tool_idx, write_cmd, kPollMs);
+                accountSyncFrame(tool_idx, 2, got);
             }
 
+            emitTimeoutSummary(tool_idx);
             std::this_thread::sleep_until(cycle_start + std::chrono::milliseconds(kControlPeriodMs));
         }
     }
@@ -1987,6 +2037,12 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         long ch = toolChannel(tool_idx);
         while (hardware_connected_)
         {
+            if (tool_idx < tool_init_failed_.size() && tool_init_failed_[tool_idx])
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                continue;
+            }
+
             ch = toolChannel(tool_idx);
             long received = get_ch(data_buf, &ch);
             if (received <= 0)
@@ -1998,6 +2054,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             {
                 if (tool_idx < in_flight_type_.size() && in_flight_type_[tool_idx].load() == 2)
                     applyGripperWriteAckFromInFlight(tool_idx);
+                markFrameAnswered(tool_idx);
                 continue;
             }
             if (received >= 2 && (data_buf[1] == 0x03 || data_buf[1] == 0x04))
@@ -2008,6 +2065,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                     tool_hb_last_rx_ms_[tool_idx].store(static_cast<std::int64_t>(now_ms));
                 if (tool_idx < tool_hb_offline_reported_.size())
                     tool_hb_offline_reported_[tool_idx].store(false);
+                markFrameAnswered(tool_idx);
             }
             processToolResponse(data_buf, static_cast<size_t>(received), tool_idx);
             if (tool_idx < tool_initial_read_done_.size())
@@ -2030,6 +2088,11 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             const auto cycle_start = std::chrono::steady_clock::now();
             const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                 cycle_start.time_since_epoch()).count();
+
+            // At the start of each cycle: account for the previous cycle's frame.
+            // If still pending, the recv thread never observed a reply -> timeout.
+            checkPrevCycleTimeout(tool_idx);
+            emitTimeoutSummary(tool_idx);
 
             if (!has_gripper_ || toolCount() == 0)
             {
@@ -2108,6 +2171,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                         }
                         std::vector<double> pos(write_cmd.begin(), write_cmd.begin() + static_cast<std::vector<double>::difference_type>(dof));
                         hand->move_hand(torques, velocities, pos);
+                        markFrameSent(tool_idx, 2);
                         for (size_t k = 0; k < gripper_joint_name_.size() && k < last_gripper_command_.size() && k < gripper_stopped_.size(); ++k)
                         {
                             if (!gripperJointBelongsToTool(k, tool_idx)) continue;
@@ -2144,6 +2208,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                             applyGripperWriteAckFromInFlight(tool_idx);
                         }
                         // 异步模式：不等待控制指令返回帧，只根据读状态返回帧更新状态
+                        markFrameSent(tool_idx, 2);
                     }
                 }
             }
@@ -2155,6 +2220,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                     tool->getStatus();
                     if (tool_idx < tool_hb_tx_ms_.size())
                         tool_hb_tx_ms_[tool_idx].store(static_cast<std::int64_t>(now_ms));
+                    markFrameSent(tool_idx, 1);
                 }
                 else if (tool_idx < tool_hb_tx_ms_.size())
                 {
@@ -2165,6 +2231,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                     {
                         tool->getStatus();
                         tool_hb_tx_ms_[tool_idx].store(static_cast<std::int64_t>(now_ms));
+                        markFrameSent(tool_idx, 1);
                     }
                 }
             }
@@ -2178,18 +2245,32 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         bool result = true;
         for (size_t i = 0; i < toolCount(); i++)
         {
+            if (i < tool_init_failed_.size())
+                tool_init_failed_[i] = false;
+
             if (auto* tool = toolAt(i))
             {
-                // Don't short-circuit: even if one side fails, still try init the other side.
+                // Clear this tool's channel receive buffer BEFORE initialize() sends the
+                // enable/version commands, so the gripper's early replies are not discarded.
+                if (robot_arm_index_ == ARM_RIGHT)
+                    OnClearChDataB();
+                else if (robot_arm_index_ == ARM_LEFT)
+                    OnClearChDataA();
+                else if (i == 0)
+                    OnClearChDataA();
+                else if (i == 1)
+                    OnClearChDataB();
+
                 const bool ok = tool->initialize();
-                result = result && ok;
-                if (ok)
+                if (!ok)
                 {
-                    // Clear this tool's channel receive buffer once at init
-                    if (robot_arm_index_ == ARM_RIGHT) OnClearChDataB();
-                    else if (robot_arm_index_ == ARM_LEFT) OnClearChDataA();
-                    else if (i == 0) OnClearChDataA();      // ARM_DUAL: 0->A(left)
-                    else if (i == 1) OnClearChDataB();      // ARM_DUAL: 1->B(right)
+                    if (i < tool_init_failed_.size())
+                        tool_init_failed_[i] = true;
+                    RCLCPP_ERROR(get_logger(),
+                                 "Tool initialize failed: tool_idx=%zu type=%s channel=%ld",
+                                 i, eeTypeForTool(i).c_str(), toolChannel(i));
+                    result = false;
+                    continue;
                 }
             }
         }
@@ -2202,10 +2283,16 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         constexpr int kMaxRetries = 3;
         constexpr int kFirstWaitMs = 100;
         constexpr int kRetryWaitMs = 100;
+        bool all_ok = true;
         for (size_t ti = 0; ti < n; ++ti)
         {
             if (!toolAt(ti))
                 continue;
+            if (ti < tool_init_failed_.size() && tool_init_failed_[ti])
+            {
+                all_ok = false;
+                continue;
+            }
             bool ok = false;
             for (int attempt = 0; attempt < kMaxRetries && !ok; ++attempt)
             {
@@ -2227,50 +2314,15 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             }
             if (!ok)
             {
-                RCLCPP_WARN(get_logger(), "Initial tool read failed for tool_idx=%zu after %d attempts (no valid status); continuing to poll this side", ti, kMaxRetries);
+                if (ti < tool_init_failed_.size())
+                    tool_init_failed_[ti] = true;
                 if (ti < tool_initial_read_done_.size())
                     tool_initial_read_done_[ti] = false;
-                if (toolIsHand(ti))
-                {
-                    const size_t tool_n = toolCount();
-                    const size_t n_j = std::min(gripper_joint_name_.size(),
-                                                std::min(gripper_position_.size(),
-                                                         std::min(gripper_position_command_.size(), last_gripper_command_.size())));
-                    std::vector<double> current;
-                    current.reserve(8);
-                    for (size_t gi = 0; gi < n_j; ++gi)
-                    {
-                        std::string name_lower = gripper_joint_name_[gi];
-                        std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
-                        const size_t mapped_tool = (tool_n >= 2 && name_lower.find("right_hand_") != std::string::npos) ? 1 : 0;
-                        if (mapped_tool != ti)
-                            continue;
-                        const double pos = gripper_position_[gi];
-                        gripper_position_command_[gi] = pos;
-                        last_gripper_command_[gi] = pos;
-                        if (gi < gripper_stopped_.size())
-                            gripper_stopped_[gi] = true;
-                        current.push_back(pos);
-                    }
-                    if (ti < hand_previous_position_.size() && ti < hand_stable_count_.size() && ti < hand_stabilized_.size())
-                    {
-                        hand_previous_position_[ti] = current;
-                        hand_stable_count_[ti] = kHandStableFrameCount;
-                        hand_stabilized_[ti] = true;
-                    }
-                    syncHandDynamicsAckToCommand(ti);
-                }
-                else
-                {
-                    size_t gi = gripperJointIndexForTool(ti);
-                    if (gi < gripper_position_command_.size() && gi < last_gripper_command_.size() && gi < gripper_stopped_.size())
-                    {
-                        double pos = (gi < gripper_position_.size()) ? gripper_position_[gi] : 0.0;
-                        gripper_position_command_[gi] = pos;
-                        last_gripper_command_[gi] = pos;
-                        gripper_stopped_[gi] = true;
-                    }
-                }
+                RCLCPP_ERROR(get_logger(),
+                             "Initial tool read failed for tool_idx=%zu after %d attempts (no valid status); "
+                             "skipping further communication for this tool",
+                             ti, kMaxRetries);
+                all_ok = false;
                 continue;
             }
             if (ti < tool_initial_read_done_.size())
@@ -2284,8 +2336,6 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                     gripper_stopped_[gi] = true;
             }
 
-            // After the initial successful read, sync command to current state so we don't start from -1.0 commands.
-            // For Hand: sync all mapped joints for this tool; for Gripper: sync the single joint for this tool.
             if (toolIsHand(ti))
             {
                 const size_t n_j = std::min(gripper_joint_name_.size(),
@@ -2330,12 +2380,14 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             }
             RCLCPP_INFO(get_logger(), "Initial tool read done for tool_idx=%zu", ti);
         }
-        return true;
+        return all_ok;
     }
 
     bool MarvinHardware::readToolStatusSync(size_t tool_idx, int elapsed_time_for_poll)
     {
         if (tool_idx >= toolCount())
+            return false;
+        if (tool_idx < tool_init_failed_.size() && tool_init_failed_[tool_idx])
             return false;
         auto* tool = toolAt(tool_idx);
         if (!tool)
@@ -2347,17 +2399,35 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             RCLCPP_DEBUG(get_logger(), "Reading tool data");
         }
         tool->getStatus();
-        if (debug_tool_logs_)
-        {
-            RCLCPP_DEBUG(get_logger(), "Sleeping tool %d ms", elapsed_time_for_poll);
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(elapsed_time_for_poll));
+
+        // Windowed receive: poll the channel repeatedly within an 80ms window instead
+        // of a single shot. The gripper's reply can arrive tens of ms after the send,
+        // and a single get_ch_data after a fixed sleep frequently misses it (the root
+        // cause of the original "received no bytes" failures).
+        constexpr int kRecvWindowMs = 80;
+        constexpr int kRecvPollIntervalMs = 5;
+        // Honor a small initial turnaround (RS485 turn-around) before first poll.
+        std::this_thread::sleep_for(std::chrono::milliseconds(
+            std::min(elapsed_time_for_poll > 0 ? elapsed_time_for_poll : kRecvPollIntervalMs, 10)));
+        const auto deadline = std::chrono::steady_clock::now()
+            + std::chrono::milliseconds(kRecvWindowMs);
+
         unsigned char data_buf[256] = {0};
-        long received = receiveToolResponse(data_buf, sizeof(data_buf), get_ch, toolChannel(tool_idx));
+        long received = 0;
+        while (true)
+        {
+            received = receiveToolResponse(data_buf, sizeof(data_buf), get_ch, toolChannel(tool_idx));
+            if (received > 0)
+                break;
+            if (std::chrono::steady_clock::now() >= deadline)
+                break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(kRecvPollIntervalMs));
+        }
+
         if (received <= 0)
         {
-            RCLCPP_WARN(get_logger(), "readToolStatusSync(tool_idx=%zu, channel=%ld) received no bytes",
-                        tool_idx, toolChannel(tool_idx));
+            RCLCPP_WARN(get_logger(), "readToolStatusSync(tool_idx=%zu, channel=%ld) received no bytes within %dms window",
+                        tool_idx, toolChannel(tool_idx), kRecvWindowMs);
             return false;
         }
         std::string hex_log = "readToolStatusSync(tool_idx=" + std::to_string(tool_idx) + ") received (" + std::to_string(received) + " bytes):";
@@ -2425,6 +2495,8 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
     bool MarvinHardware::writeToolStatusSync(size_t tool_idx, const std::vector<double>& write_cmd, int wait_ms)
     {
         if (tool_idx >= toolCount() || write_cmd.empty())
+            return false;
+        if (tool_idx < tool_init_failed_.size() && tool_init_failed_[tool_idx])
             return false;
         auto* tool = toolAt(tool_idx);
         if (!tool)
@@ -2898,6 +2970,8 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         write_cmd_out.clear();
         if (tool_idx >= toolCount())
             return false;
+        if (tool_idx < tool_init_failed_.size() && tool_init_failed_[tool_idx])
+            return false;
         auto* tool = toolAt(tool_idx);
         if (!tool)
             return false;
@@ -3149,6 +3223,104 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         }
         return 0;
     }
+
+    // Async per-cycle pairing: recv thread polls every ~20ms, control cycle is 100ms,
+    // so the recv thread gets ~5 chances per cycle to observe a reply.
+    void MarvinHardware::markFrameSent(size_t tool_idx, int kind)
+    {
+        if (tool_idx >= kMaxTools)
+            return;
+        tool_tx_total_[tool_idx].fetch_add(1, std::memory_order_relaxed);
+        tool_reply_kind_[tool_idx].store(kind, std::memory_order_relaxed);
+        // Set pending LAST so the recv thread sees a consistent (pending, kind) pair.
+        tool_reply_pending_[tool_idx].store(true, std::memory_order_release);
+    }
+
+    void MarvinHardware::markFrameAnswered(size_t tool_idx)
+    {
+        if (tool_idx >= kMaxTools)
+            return;
+        // Only count if there really was a pending frame; avoid double-counting
+        // stray frames that arrive after a timeout already cleared the pending bit.
+        const bool was_pending = tool_reply_pending_[tool_idx].exchange(
+            false, std::memory_order_acq_rel);
+        if (was_pending)
+            tool_rx_total_[tool_idx].fetch_add(1, std::memory_order_relaxed);
+    }
+
+    bool MarvinHardware::checkPrevCycleTimeout(size_t tool_idx)
+    {
+        if (tool_idx >= kMaxTools)
+            return false;
+        // Non-blocking: just inspect the flag. If still pending at the start of the
+        // next cycle, the recv thread never cleared it within ~5 polls -> timeout.
+        const bool was_pending = tool_reply_pending_[tool_idx].exchange(
+            false, std::memory_order_acq_rel);
+        if (!was_pending)
+            return false;
+
+        const auto timeouts = tool_timeout_count_[tool_idx].fetch_add(
+            1, std::memory_order_relaxed) + 1;
+        const int kind = tool_reply_kind_[tool_idx].load(std::memory_order_relaxed);
+        if (timeouts == 1)
+        {
+            RCLCPP_WARN(get_logger(),
+                        "tool reply timeout (first): tool_idx=%zu kind=%s channel=%ld — "
+                        "no reply observed by recv thread within one control cycle",
+                        tool_idx, kind == 2 ? "write" : (kind == 1 ? "read" : "?"),
+                        toolChannel(tool_idx));
+        }
+        return true;
+    }
+
+    void MarvinHardware::emitTimeoutSummary(size_t tool_idx)
+    {
+        if (tool_idx >= kMaxTools)
+            return;
+        const auto total = tool_tx_total_[tool_idx].load(std::memory_order_relaxed);
+        const auto ok = tool_rx_total_[tool_idx].load(std::memory_order_relaxed);
+        const auto timeouts = tool_timeout_count_[tool_idx].load(std::memory_order_relaxed);
+        const auto last_reported = tool_last_reported_timeout_[tool_idx];
+
+        // Only log when new timeouts have accumulated since the last summary.
+        if (timeouts == last_reported)
+            return;
+
+        RCLCPP_WARN(get_logger(),
+                    "tool reply timeout summary: tool_idx=%zu channel=%ld — timeouts=%llu (delta=%llu), ok=%llu, total_sent=%llu, loss=%.1f%%",
+                    tool_idx, toolChannel(tool_idx),
+                    static_cast<unsigned long long>(timeouts),
+                    static_cast<unsigned long long>(timeouts - last_reported),
+                    static_cast<unsigned long long>(ok),
+                    static_cast<unsigned long long>(total),
+                    total > 0 ? 100.0 * static_cast<double>(timeouts) / static_cast<double>(total) : 0.0);
+        tool_last_reported_timeout_[tool_idx] = timeouts;
+    }
+
+    void MarvinHardware::accountSyncFrame(size_t tool_idx, int kind, bool got_reply)
+    {
+        if (tool_idx >= kMaxTools)
+            return;
+        tool_tx_total_[tool_idx].fetch_add(1, std::memory_order_relaxed);
+        tool_reply_kind_[tool_idx].store(kind, std::memory_order_relaxed);
+        if (got_reply)
+        {
+            tool_rx_total_[tool_idx].fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        const auto timeouts = tool_timeout_count_[tool_idx].fetch_add(1, std::memory_order_relaxed) + 1;
+        if (timeouts == 1)
+        {
+            RCLCPP_WARN(get_logger(),
+                        "tool reply timeout (first): tool_idx=%zu kind=%s channel=%ld — "
+                        "sync read/write got no reply",
+                        tool_idx, kind == 2 ? "write" : (kind == 1 ? "read" : "?"),
+                        toolChannel(tool_idx));
+        }
+    }
+
+
+
 
     void MarvinHardware::processToolResponse(const unsigned char* data_buf, size_t size, size_t gripper_idx)
     {

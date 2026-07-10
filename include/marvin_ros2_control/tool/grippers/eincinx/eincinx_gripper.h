@@ -30,6 +30,7 @@ namespace marvin_ros2_control
         {
             Position,
             StatusWord,
+            Version,
         };
 
         void queueMotionCommand(double normalized_torque, double normalized_velocity, double position_rad);
@@ -56,5 +57,6 @@ namespace marvin_ros2_control
 
         uint16_t status_word_ = 0;
         bool motion_stopped_ = true;
+        bool version_query_sent_ = false;
     };
 }  // namespace marvin_ros2_control
