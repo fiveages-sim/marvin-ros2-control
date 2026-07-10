@@ -130,7 +130,10 @@ namespace marvin_ros2_control
             if (tag >= 1)
             {
                 hex_to_str(data_buf, static_cast<int>(tag), hex_str1, sizeof(hex_str1));
-                RCLCPP_INFO(logger_, "Received channel=%ld size=%ld: %s", set_ch1, tag, hex_str1);
+                if (isDebugEnabled())
+                {
+                    RCLCPP_DEBUG(logger_, "Received channel=%ld size=%ld: %s", set_ch1, tag, hex_str1);
+                }
 
                 std::vector<uint8_t> response(data_buf, data_buf + static_cast<size_t>(tag));
                 if (response.size() < 5)
@@ -178,7 +181,7 @@ namespace marvin_ros2_control
             }
         }
 
-        RCLCPP_DEBUG(logger_, "Modbus read timeout: no valid response after %d attempts", kMaxAttempts);
+        RCLCPP_WARN(logger_, "Modbus read timeout: no valid response after %d attempts", kMaxAttempts);
         return {};
     }
 
@@ -351,10 +354,20 @@ namespace marvin_ros2_control
 
         char debug_str[512];
         hex_to_str(request.data(), static_cast<int>(request.size()), debug_str, sizeof(debug_str));
-        RCLCPP_INFO(logger_, "Sending channel=%ld size=%zu: %s", channel_, request.size(), debug_str);
+        if (isDebugEnabled())
+        {
+            RCLCPP_DEBUG(logger_, "Sending channel=%ld size=%zu: %s", channel_, request.size(), debug_str);
+        }
 
         const bool ok = send_485_((uint8_t*)request.data(), static_cast<long>(request.size()), channel_);
-        RCLCPP_INFO(logger_, "Sent channel=%ld result=%s", channel_, ok ? "true" : "false");
+        if (!ok)
+        {
+            RCLCPP_WARN(logger_, "Send failed channel=%ld size=%zu: %s", channel_, request.size(), debug_str);
+        }
+        else if (isDebugEnabled())
+        {
+            RCLCPP_DEBUG(logger_, "Sent channel=%ld result=true", channel_);
+        }
         return ok;
     }
 
@@ -367,11 +380,14 @@ namespace marvin_ros2_control
             long channel = channel_;
             int received = on_get_ch_data_(buffer, &channel);
 
-            if (received > 0)
+            if (received > 0 && channel == channel_)
             {
-                char hex_str[2048];
-                hex_to_str(buffer, received, hex_str, sizeof(hex_str));
-                RCLCPP_INFO(logger_, "Received channel=%ld size=%d: %s", channel, received, hex_str);
+                if (isDebugEnabled())
+                {
+                    char hex_str[2048];
+                    hex_to_str(buffer, received, hex_str, sizeof(hex_str));
+                    RCLCPP_DEBUG(logger_, "Received channel=%ld size=%d: %s", channel, received, hex_str);
+                }
                 std::vector<uint8_t> response(buffer, buffer + received);
                 return response;
             }
@@ -382,6 +398,7 @@ namespace marvin_ros2_control
             }
         }
 
+        RCLCPP_WARN(logger_, "Receive timeout channel=%ld after %d attempts", channel_, max_attempts);
         return {};
     }
 

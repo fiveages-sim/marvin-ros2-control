@@ -23,7 +23,10 @@
 #include "std_msgs/msg/int64.hpp"
 #include "std_msgs/msg/int32.hpp"
 #include "geometry_msgs/msg/wrench_stamped.hpp"
+// SDK include chain (Robot.h → TCPFileClient.h → FileOP.h) leaves #pragma pack(4) active
+// without pop, shrinking sizeof() for all types below in this TU vs gripper .cpp files.
 #include "MarvinSDK.h"
+#pragma pack()
 #include <cmath>
 #include "marvin_ros2_control/tool/grippers/modbus_gripper.h"
 #include "marvin_ros2_control/tool/hands/modbus_hand.h"

@@ -18,9 +18,11 @@ namespace marvin_ros2_control
     using Send485Func = bool(*)(uint8_t*, long, long);
     using GetChDataFunc = long(*)(unsigned char*, long*);
 
-    // Constants
+    // Marvin SDK channel IDs (OnSetChData / OnGetChData): 1=CANFD, 2=COM1, 3=COM2.
+    // OnGetChData: set *channel to the target COM before call; SDK returns data for that COM.
     constexpr long CAN_CHANNEL = 1;
     constexpr long COM1_CHANNEL = 2;
+    constexpr long COM2_CHANNEL = 3;
     constexpr size_t MAX_MODBUS_REGISTERS = 125;
     constexpr size_t MAX_BUFFER_SIZE = 256;
 

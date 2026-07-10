@@ -17,6 +17,8 @@ namespace marvin_ros2_control
         EincinXGripper(Clear485Func clear_485, Send485Func send_485,
                        GetChDataFunc on_get_ch_data = nullptr);
 
+        void setInitialToolConfig(double normalized_torque, double normalized_velocity) override;
+        bool hasPendingConfigWrites() const override;
         bool initialize() override;
         bool move_gripper(double normalized_torque, double normalized_velocity, double position) override;
         bool getStatus() override;
@@ -35,11 +37,22 @@ namespace marvin_ros2_control
 
         void queueMotionCommand(double normalized_torque, double normalized_velocity, double position_rad);
         void updatePendingWrites();
+        bool applyInitialDeviceConfig();
+        void convertNormalizedToDevice(double normalized_torque, double normalized_velocity,
+                                       uint16_t& current_out, uint32_t& speed_out) const;
+
+        static constexpr double kUserSettingEpsilon = 0.001;
+        double init_torque_norm_ = 1.0;
+        double init_velocity_norm_ = 1.0;
+        bool init_config_provided_ = false;
+        double last_user_torque_norm_ = 1.0;
+        double last_user_velocity_norm_ = 1.0;
         bool advanceCommCycle();
         bool sendCurrent();
         bool sendSpeed();
         bool sendPosition();
         bool sendReadStep(ReadStep step);
+        void drainPendingResponses(int timeout_ms);
 
         bool pending_current_write_ = false;
         bool pending_speed_write_ = false;

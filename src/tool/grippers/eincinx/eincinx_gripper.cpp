@@ -1,6 +1,6 @@
 #include "marvin_ros2_control/tool/grippers/eincinx/eincinx_gripper.h"
 
-#include <chrono>
+#include <cmath>
 #include <thread>
 #include <vector>
 
@@ -48,6 +48,62 @@ int32_t jointRadToPulses(double position_rad)
 
 }  // namespace
 
+void EincinXGripper::setInitialToolConfig(double normalized_torque, double normalized_velocity)
+{
+    init_torque_norm_ = normalized_torque;
+    init_velocity_norm_ = normalized_velocity;
+    init_config_provided_ = true;
+}
+
+bool EincinXGripper::hasPendingConfigWrites() const
+{
+    return pending_current_write_ || pending_speed_write_;
+}
+
+void EincinXGripper::convertNormalizedToDevice(double normalized_torque, double normalized_velocity,
+                                               uint16_t& current_out, uint32_t& speed_out) const
+{
+    using gripper_hardware_common::TorqueConverter;
+    using gripper_hardware_common::VelocityConverter;
+
+    current_out = static_cast<uint16_t>(
+        TorqueConverter::EincinX::normalizedToGripCurrent(normalized_torque) & 0xFFFF);
+    speed_out = (normalized_velocity <= 0.0)
+                    ? EincinXCfg::DEFAULT_SPEED_PULSES
+                    : VelocityConverter::EincinX::normalizedToSpeed(
+                          normalized_velocity, EincinXCfg::MAX_SPEED_PULSES);
+}
+
+bool EincinXGripper::applyInitialDeviceConfig()
+{
+    const double nt = init_config_provided_ ? init_torque_norm_ : 1.0;
+    const double nv = init_config_provided_ ? init_velocity_norm_ : 1.0;
+
+    last_user_torque_norm_ = nt;
+    last_user_velocity_norm_ = nv;
+    convertNormalizedToDevice(nt, nv, target_current_, target_speed_pulses_);
+
+    RCLCPP_INFO(logger_,
+                "EincinX initial config: torque=%.3f -> current=%u, velocity=%.3f -> speed=%u",
+                nt, target_current_, nv, target_speed_pulses_);
+
+    if (!sendCurrent())
+    {
+        RCLCPP_ERROR(logger_, "EincinX initial current write failed (FC06@4307)");
+        return false;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    applied_current_ = target_current_;
+
+    if (!sendSpeed())
+    {
+        RCLCPP_ERROR(logger_, "EincinX initial speed write failed (FC10@4702)");
+        return false;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    applied_speed_pulses_ = target_speed_pulses_;
+    return true;
+}
 
 EincinXGripper::EincinXGripper(Clear485Func clear_485, Send485Func send_485,
                                  GetChDataFunc on_get_ch_data)
@@ -91,21 +147,80 @@ bool EincinXGripper::sendReadStep(ReadStep step)
     }
 }
 
+void EincinXGripper::drainPendingResponses(int timeout_ms)
+{
+    if (!on_get_ch_data_)
+    {
+        return;
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    int idle_polls = 0;
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        unsigned char buf[MAX_BUFFER_SIZE] = {0};
+        long ch = channel_;
+        const long received = on_get_ch_data_(buf, &ch);
+        if (received <= 0)
+        {
+            if (++idle_polls >= 4)
+            {
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            continue;
+        }
+
+        idle_polls = 0;
+        if (received >= 2 && (buf[1] == 0x06 || buf[1] == 0x10))
+        {
+            continue;
+        }
+
+        int torque = 0;
+        int velocity = 0;
+        double position = 0.0;
+        processReadResponse(buf, static_cast<size_t>(received), torque, velocity, position);
+    }
+    version_query_sent_ = false;
+}
+
 void EincinXGripper::queueMotionCommand(double normalized_torque, double normalized_velocity,
                                         double position_rad)
 {
-    using gripper_hardware_common::TorqueConverter;
-    using gripper_hardware_common::VelocityConverter;
-
     target_position_pulses_ = jointRadToPulses(position_rad);
-    target_current_ = static_cast<uint16_t>(
-        TorqueConverter::EincinX::normalizedToGripCurrent(normalized_torque) & 0xFFFF);
-    target_speed_pulses_ = (normalized_velocity <= 0.0)
-                               ? EincinXCfg::DEFAULT_SPEED_PULSES
-                               : VelocityConverter::EincinX::normalizedToSpeed(
-                                     normalized_velocity, EincinXCfg::MAX_SPEED_PULSES);
 
-    updatePendingWrites();
+    // Position: highest priority — queue whenever target changes, even while gripping
+    // (motion_stopped_=false when stalled on an object before target_reached).
+    if (target_position_pulses_ != applied_position_pulses_)
+    {
+        pending_position_write_ = true;
+    }
+
+    // current / speed: only when the user explicitly changed torque or speed, and only while stopped.
+    if (std::abs(normalized_torque - last_user_torque_norm_) > kUserSettingEpsilon)
+    {
+        last_user_torque_norm_ = normalized_torque;
+        convertNormalizedToDevice(normalized_torque, normalized_velocity,
+                                  target_current_, target_speed_pulses_);
+        if (motion_stopped_ && target_current_ != applied_current_)
+        {
+            pending_current_write_ = true;
+            RCLCPP_INFO(logger_, "EincinX user torque changed -> queue current: %u", target_current_);
+        }
+    }
+
+    if (std::abs(normalized_velocity - last_user_velocity_norm_) > kUserSettingEpsilon)
+    {
+        last_user_velocity_norm_ = normalized_velocity;
+        convertNormalizedToDevice(normalized_torque, normalized_velocity,
+                                  target_current_, target_speed_pulses_);
+        if (motion_stopped_ && target_speed_pulses_ != applied_speed_pulses_)
+        {
+            pending_speed_write_ = true;
+            RCLCPP_INFO(logger_, "EincinX user speed changed -> queue speed: %u", target_speed_pulses_);
+        }
+    }
 }
 
 void EincinXGripper::updatePendingWrites()
@@ -115,6 +230,10 @@ void EincinXGripper::updatePendingWrites()
         return;
     }
 
+    if (target_position_pulses_ != applied_position_pulses_)
+    {
+        pending_position_write_ = true;
+    }
     if (target_current_ != applied_current_)
     {
         pending_current_write_ = true;
@@ -123,14 +242,25 @@ void EincinXGripper::updatePendingWrites()
     {
         pending_speed_write_ = true;
     }
-    if (target_position_pulses_ != applied_position_pulses_)
-    {
-        pending_position_write_ = true;
-    }
 }
 
 bool EincinXGripper::advanceCommCycle()
 {
+    // Position preempts reads and in-progress hold (gripping on object).
+    if (pending_position_write_)
+    {
+        if (!sendPosition())
+        {
+            return false;
+        }
+        pending_position_write_ = false;
+        applied_position_pulses_ = target_position_pulses_;
+        motion_stopped_ = false;
+        RCLCPP_INFO(logger_, "EincinX position sent (FC10@6101): %d pulses (%.6f rad)",
+                    target_position_pulses_, pulsesToJointRad(target_position_pulses_));
+        return true;
+    }
+
     if (motion_stopped_)
     {
         if (pending_current_write_)
@@ -154,19 +284,6 @@ bool EincinXGripper::advanceCommCycle()
             pending_speed_write_ = false;
             applied_speed_pulses_ = target_speed_pulses_;
             RCLCPP_INFO(logger_, "EincinX speed sent (FC10@4702): %u", target_speed_pulses_);
-            return true;
-        }
-
-        if (pending_position_write_)
-        {
-            if (!sendPosition())
-            {
-                return false;
-            }
-            pending_position_write_ = false;
-            applied_position_pulses_ = target_position_pulses_;
-            RCLCPP_INFO(logger_, "EincinX position sent (FC10@6101): %d pulses (%.6f rad)",
-                        target_position_pulses_, pulsesToJointRad(target_position_pulses_));
             return true;
         }
     }
@@ -208,15 +325,18 @@ bool EincinXGripper::initialize()
     }
     last_read_step_ = ReadStep::Version;
     version_query_sent_ = true;
+    drainPendingResponses(150);
 
-    // Avoid pending motion writes blocking the first status read in doInitialToolReads.
-    applied_current_ = target_current_;
-    applied_speed_pulses_ = target_speed_pulses_;
-    applied_position_pulses_ = target_position_pulses_;
+    if (!applyInitialDeviceConfig())
+    {
+        return false;
+    }
+
+    drainPendingResponses(200);
+
     pending_current_write_ = false;
     pending_speed_write_ = false;
     pending_position_write_ = false;
-
     motion_stopped_ = true;
     return true;
 }
@@ -322,6 +442,9 @@ void EincinXGripper::resetState()
     applied_position_pulses_ = -1;
     applied_speed_pulses_ = 0;
     applied_current_ = 0;
+    last_user_torque_norm_ = 1.0;
+    last_user_velocity_norm_ = 1.0;
+    init_config_provided_ = false;
     status_word_ = 0;
     motion_stopped_ = true;
     version_query_sent_ = false;
