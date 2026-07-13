@@ -16,8 +16,8 @@ namespace marvin_ros2_control
     constexpr long KWR75_FT_CHANNEL = COM2_CHANNEL;
 
     /**
-     * KWR75 28-byte frame: [cmd][0xAA][Fx..Mz floats LE][0x0D][0x0A]
-     * Only exact 28-byte chunks are accepted.
+     * KWR75 28-byte frame: [cmd][0xAA][Fx..Mz 4B each][0x0D][0x0A]
+     * Each float: 4 wire bytes, low byte first (matches LE host layout).
      */
     struct Kwr75Protocol
     {
@@ -34,12 +34,11 @@ namespace marvin_ros2_control
             return {command_code, kFrameMarker, kFrameEnd0, kFrameEnd1};
         }
 
+        /** Wire low-byte-first; direct memcpy on LE host (e.g. B0751CC1 -> float 0xC11C75B0). */
         static float decodeWireFloat(const uint8_t* wire_bytes)
         {
-            const uint8_t ieee754[4] = {
-                wire_bytes[3], wire_bytes[2], wire_bytes[1], wire_bytes[0]};
             float value = 0.0F;
-            std::memcpy(&value, ieee754, sizeof(value));
+            std::memcpy(&value, wire_bytes, sizeof(value));
             return value;
         }
 
