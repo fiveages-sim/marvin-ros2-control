@@ -11,6 +11,7 @@ Marvin 机械臂（M6 等）的 ROS2 Control 硬件接口。通过 **Marvin SDK*
 | 类型键（常用） | 产品 | 实现 | 默认总线 |
 |----------------|------|------|----------|
 | `RG75`, `JDGRIPPER` | Jodell RG75 | `JDGripper` | RS485（COM1） |
+| `eincinx`, `epgi180`, `EINCINX` | EincinX / EPGI180 电动夹爪 | `EincinXGripper` | RS485（COM1，夹持轴站号 2） |
 | `ERG32`, `erg32` | Jodell ERG32-150（旋转 + 夹爪，2-DOF） | `ERG32Hand` | RS485（COM1） |
 | `AG2F90_C`, `AG2F90C`, `CHANGINGTEK90C` | ChangingTek AG2F90-C | `ChangingtekGripper90C` | RS485 |
 | `AG2F90_D`, `AG2F90D`, `CHANGINGTEK90D` | ChangingTek AG2F90-D | `ChangingtekGripper90D` | RS485 |

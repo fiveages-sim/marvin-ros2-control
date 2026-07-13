@@ -18,9 +18,11 @@ namespace marvin_ros2_control
     using Send485Func = bool(*)(uint8_t*, long, long);
     using GetChDataFunc = long(*)(unsigned char*, long*);
 
-    // Constants
+    // Marvin SDK channel IDs (OnSetChData / OnGetChData): 1=CANFD, 2=COM1, 3=COM2.
+    // OnGetChData: set *channel to the target COM before call; SDK returns data for that COM.
     constexpr long CAN_CHANNEL = 1;
     constexpr long COM1_CHANNEL = 2;
+    constexpr long COM2_CHANNEL = 3;
     constexpr size_t MAX_MODBUS_REGISTERS = 125;
     constexpr size_t MAX_BUFFER_SIZE = 256;
 
@@ -49,10 +51,21 @@ namespace marvin_ros2_control
         
         bool sendReadRequestAsync(uint8_t slave_id, uint16_t start_addr, 
                                  uint16_t count, uint8_t function_code);
+
+        /** FC06 write without post-send delay (async tool threads). */
+        bool sendWriteSingleRegisterAsync(uint8_t slave_id, uint16_t register_addr, uint16_t value,
+                                          uint8_t function_code = 0x06);
+
+        /** FC06 query: write 0 to register; device echoes current value in response. */
+        bool sendFC06QueryAsync(uint8_t slave_id, uint16_t register_addr);
         
         std::vector<uint16_t> parseModbusResponse(const uint8_t* data, size_t data_size,
                                                   uint8_t expected_slave_id, 
                                                   uint8_t expected_function_code);
+
+        static bool parseFC06Response(const uint8_t* data, size_t data_size,
+                                      uint8_t expected_slave_id, uint16_t expected_register_addr,
+                                      uint16_t& value_out);
         
         bool writeSingleRegister(uint8_t slave_id, uint16_t register_addr, uint16_t value,
                                 uint8_t function_code);

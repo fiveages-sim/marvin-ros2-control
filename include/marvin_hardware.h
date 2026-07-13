@@ -23,12 +23,16 @@
 #include "std_msgs/msg/int64.hpp"
 #include "std_msgs/msg/int32.hpp"
 #include "geometry_msgs/msg/wrench_stamped.hpp"
+// SDK include chain (Robot.h → TCPFileClient.h → FileOP.h) leaves #pragma pack(4) active
+// without pop, shrinking sizeof() for all types below in this TU vs gripper .cpp files.
 #include "MarvinSDK.h"
+#pragma pack()
 #include <cmath>
 #include "marvin_ros2_control/tool/grippers/modbus_gripper.h"
 #include "marvin_ros2_control/tool/hands/modbus_hand.h"
 #include "gripper_hardware_common/GripperBase.h"
 #include "marvin_ros2_control/tool/modbus_io.h"
+#include "marvin_ros2_control/sensors/kwr75_protocol.h"
 
 namespace marvin_ros2_control
 {
@@ -108,14 +112,29 @@ private:
         std::vector<double> hw_commands_deg_buffer_;
 
         // Virtual FT sensor state (filled from external wrench topic)
-        std::string left_wrench_topic_;
-        std::string right_wrench_topic_;
         rclcpp::Subscription<geometry_msgs::msg::WrenchStamped>::SharedPtr left_wrench_sub_;
         rclcpp::Subscription<geometry_msgs::msg::WrenchStamped>::SharedPtr right_wrench_sub_;
+        rclcpp::Publisher<geometry_msgs::msg::WrenchStamped>::SharedPtr left_wrench_pub_;
+        rclcpp::Publisher<geometry_msgs::msg::WrenchStamped>::SharedPtr right_wrench_pub_;
         std::mutex wrench_mutex_;
         std::array<double, 6> left_ft_state_{};
         std::array<double, 6> right_ft_state_{};
         std::array<double, 6> single_ft_state_{};  // used for single-arm configs
+        Kwr75FtConfig kwr75_ft_config_;
+        Kwr75LockFreeSample left_kwr75_sample_{};
+        Kwr75LockFreeSample right_kwr75_sample_{};
+        std::atomic<bool> kwr75_ft_running_{false};
+        std::thread kwr75_ft_thread_left_;
+        std::thread kwr75_ft_thread_right_;
+
+        void loadKwr75FtConfig();
+        void startKwr75FtThreads();
+        void stopKwr75FtThreads();
+        void kwr75FtThread(int arm_index);
+        void applyKwr75Wrench(int arm_index, const std::array<double, 6>& wrench);
+        /** When ft_poll_interval_ms<=0: publish latest FT sample each read() cycle. */
+        void publishKwr75SyncedToControl();
+        bool kwr75UsesPollThread() const { return kwr75_ft_config_.poll_interval_ms > 0; }
 
         // Joint limits from URDF
         std::vector<double> position_lower_limits_;
@@ -191,10 +210,8 @@ private:
         long left_ee_channel_ = COM1_CHANNEL;
         long right_ee_channel_ = COM1_CHANNEL;
         double gripper_torque_scale_ = 1.0;  // Torque scaling factor (0.0-1.0, default: 1.0)
-        /** If true, enable high-frequency INFO logs for tool (hand/gripper) and Modbus hex dumps. */
         std::vector<double> gripper_effort_command_;   // HW_IF_EFFORT command → normalized torque to tool
         std::vector<double> gripper_velocity_command_; // HW_IF_VELOCITY command → normalized velocity to tool
-        bool debug_tool_logs_ = false;
         bool has_gripper_ = false;
         std::vector<std::string> gripper_joint_name_;
         size_t gripper_joint_index_ = 0;
@@ -237,9 +254,7 @@ private:
         std::array<size_t, kMaxTools> hand_stable_count_{};
         std::array<bool, kMaxTools> hand_stabilized_{};
         std::vector<std::thread> gripper_ctrl_threads_;
-        /** Async mode: one recv thread per tool, only polls get485 and dispatches to processToolResponse / write ack. */
-        std::vector<std::thread> tool_recv_threads_;
-        /** If true, use async tool comm: recv thread(s) + send-only tool_callback_for_tool_async (see marvin_*_init_example). */
+        /** If true, async send threads; OnGetChData runs in hardware read(). */
         bool use_async_tool_comm_ = true;
         /** If true, initialize end-effector (hand/gripper) on activate. If false, skip tool initialize/reads/threads. */
         bool init_tool_on_startup_ = true;
@@ -249,11 +264,26 @@ private:
         std::array<std::atomic<std::int64_t>, kMaxTools> tool_hb_last_rx_ms_{};
         std::array<std::atomic<bool>, kMaxTools> tool_hb_offline_reported_{};
 
+        // --- Async per-cycle request/response pairing & timeout accounting ---
+        // Fully decoupled design: sender thread only marks a frame pending; hardware
+        // read() clears the pending flag when it parses a reply (CM update rate).
+        // At the START of the next control cycle, if pending is still set, count timeout.
+        std::array<std::atomic<bool>, kMaxTools> tool_reply_pending_{};     // true = sent, awaiting reply
+        std::array<std::atomic<int>, kMaxTools> tool_reply_kind_{};         // 0=none,1=read,2=write (for logging)
+        std::array<std::atomic<std::uint64_t>, kMaxTools> tool_tx_total_{}; // total frames sent
+        std::array<std::atomic<std::uint64_t>, kMaxTools> tool_rx_total_{}; // frames answered (pending cleared by recv)
+        std::array<std::atomic<std::uint64_t>, kMaxTools> tool_timeout_count_{}; // frames never answered within cycle
+        // Last reported snapshot of timeout counters (for periodic summary diffs).
+        std::array<std::uint64_t, kMaxTools> tool_last_reported_timeout_{};
+        std::array<std::chrono::steady_clock::time_point, kMaxTools> tool_last_summary_tp_{};
+
         void tool_callback_for_tool(size_t tool_idx);
-        /** Async: recv thread for one tool; only calls get_ch_data and processes responses (no sending). */
-        void tool_recv_thread_func(size_t tool_idx);
-        /** Async: same loop as tool_callback_for_tool but only sends (getStatus/move); no blocking receive. */
+        /** Async: send-only (getStatus/move); replies observed in hardware read(). */
         void tool_callback_for_tool_async(size_t tool_idx);
+        /** Sole OnGetChData path: COM1 tools + COM2 KWR75, called from read(). */
+        void pollRs485InHardwareRead();
+        void dispatchToolCom1Frame(size_t tool_idx, const unsigned char* data, long received);
+        void ingestKwr75Com2Frame(bool left_arm, const unsigned char* data, long received, long rx_channel);
         /** Read once from channel, copy to data_buf, return byte count or 0. */
         long receiveToolResponse(unsigned char* data_buf, size_t buf_size, GetChDataFunc get_ch_data, long channel);
         void processToolResponse(const unsigned char* data_buf, size_t size, size_t gripper_idx);
@@ -272,6 +302,24 @@ private:
         void tryConsumeWriteAck(size_t tool_idx);
         /** True if data_buf looks like Modbus write response (FC 0x10). */
         static bool isModbusWriteAck(const unsigned char* data_buf, size_t size);
+        /**
+         * @brief Check the previous cycle's pending reply; if still unanswered, count a timeout.
+         *
+         * Call this at the START of each control cycle BEFORE sending a new frame.
+         * It is fully non-blocking: it only inspects the atomic tool_reply_pending_ flag
+         * which the recv thread (20ms cadence) clears on a valid reply.
+         *
+         * @return true if the previous frame timed out (no reply within the cycle).
+         */
+        bool checkPrevCycleTimeout(size_t tool_idx);
+        /** Mark a frame as just-sent (pending reply). Called by sender right after send_485. */
+        void markFrameSent(size_t tool_idx, int kind);
+        /** Mark a frame as answered. Called by recv thread when it parses a valid reply. */
+        void markFrameAnswered(size_t tool_idx);
+        /** Sync-mode accounting: update tx/rx/timeout counters immediately from a known send result. */
+        void accountSyncFrame(size_t tool_idx, int kind, bool got_reply);
+        /** Periodic timeout summary: emits an aggregated WARN when new timeouts occurred since last call. */
+        void emitTimeoutSummary(size_t tool_idx);
         /** Apply in-flight write as acknowledged: update last_gripper_command_ and clear in_flight for tool_idx. */
         void applyGripperWriteAckFromInFlight(size_t tool_idx);
         void updateGripperState(size_t gripper_idx, double position, int velocity, int torque);
