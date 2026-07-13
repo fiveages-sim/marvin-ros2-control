@@ -5,11 +5,10 @@
 namespace marvin_ros2_control
 {
     /**
-     * Thin wrappers around Marvin SDK On*ChDataA/B.
+     * Thin wrappers around Marvin SDK On*ChDataA/B. No locks.
      *
-     * COM1 (SDK ch=2, gripper Modbus) and COM2 (SDK ch=3, KWR75) are independent
-     * logical buses on the 8-pin EE connector. No cross-COM locking: set *channel to
-     * COM1_CHANNEL or COM2_CHANNEL before OnGetChData*; SDK routes by COM.
+     * COM1/COM2 are independent channels, but OnGetChDataA is not re-entrant:
+     * only one thread per arm may call get/set (see tool_recv feeding KWR75).
      */
     class MarvinRs485Bus
     {

@@ -265,16 +265,12 @@ namespace marvin_ros2_control
                      [](const std::string& s, int def) { try { return std::stoi(s); } catch (...) { return def; } });
         ensure_param("ft_poll_interval_ms", kwr75_defaults.poll_interval_ms, hw_find("ft_poll_interval_ms"),
                      [](const std::string& s, int def) { try { return std::stoi(s); } catch (...) { return def; } });
-        ensure_param("ft_recv_interval_ms", kwr75_defaults.recv_interval_ms, hw_find("ft_recv_interval_ms"),
-                     [](const std::string& s, int def) { try { return std::stoi(s); } catch (...) { return def; } });
         ensure_param("ft_command_code", static_cast<int>(kwr75_defaults.command_code), hw_find("ft_command_code"),
                      [](const std::string& s, int def) { try { return std::stoi(s); } catch (...) { return def; } });
         ensure_param("ft_convert_to_si", kwr75_defaults.convert_to_si, hw_find("ft_convert_to_si"),
                      [](const std::string& s, bool def) { return parseBoolLoose(s, def); });
         ensure_param("ft_gravity", kwr75_defaults.gravity, hw_find("ft_gravity"),
                      [](const std::string& s, double def) { try { return std::stod(s); } catch (...) { return def; } });
-        ensure_param("ft_response_timeout_ms", kwr75_defaults.response_timeout_ms, hw_find("ft_response_timeout_ms"),
-                     [](const std::string& s, int def) { try { return std::stoi(s); } catch (...) { return def; } });
         ensure_param("ft_warmup_timeout_ms", kwr75_defaults.warmup_timeout_ms, hw_find("ft_warmup_timeout_ms"),
                      [](const std::string& s, int def) { try { return std::stoi(s); } catch (...) { return def; } });
         ensure_param("left_ft_frame_id", kwr75_defaults.left_frame_id, hw_find("left_ft_frame_id"),
@@ -318,10 +314,13 @@ namespace marvin_ros2_control
                 kwr75_ft_config_.left_wrench_topic, rclcpp::SystemDefaultsQoS());
             right_wrench_pub_ = node_->create_publisher<geometry_msgs::msg::WrenchStamped>(
                 kwr75_ft_config_.right_wrench_topic, rclcpp::SystemDefaultsQoS());
+            const std::string pub_mode = kwr75_ft_config_.poll_interval_ms > 0
+                ? ("poll " + std::to_string(kwr75_ft_config_.poll_interval_ms) + "ms")
+                : "synced to ros2_control read()";
             RCLCPP_INFO(get_logger(),
-                        "KWR75 FT enabled: left/right channel=%ld/%ld, poll=%dms",
+                        "KWR75 FT enabled: left/right channel=%ld/%ld, publish=%s",
                         kwr75_ft_config_.left_channel, kwr75_ft_config_.right_channel,
-                        kwr75_ft_config_.poll_interval_ms);
+                        pub_mode.c_str());
         }
         else
         {
@@ -1887,17 +1886,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         {
             if (use_async_tool_comm_)
             {
-                // Async tool comm (reference: marvin_hand_init_example / marvin_gripper_init_example):
-                // One recv thread per tool (only get485), one writer thread per tool (only set485: getStatus/move).
-                tool_recv_threads_.resize(toolCount());
-                for (size_t ti = 0; ti < toolCount(); ++ti)
-                {
-                    if (!toolAt(ti)) continue;
-                    if (ti < tool_init_failed_.size() && tool_init_failed_[ti]) continue;
-                    tool_recv_threads_[ti] = std::thread(&MarvinHardware::tool_recv_thread_func, this, ti);
-                    tool_recv_threads_[ti].detach();
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                // Send-only threads; OnGetChData is polled in MarvinHardware::read().
                 gripper_ctrl_threads_.resize(toolCount());
                 for (size_t ti = 0; ti < toolCount(); ++ti)
                 {
@@ -1917,7 +1906,8 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                 }
                 if (any_tool_active)
                 {
-                    RCLCPP_INFO(get_logger(), "%s Connected (async tool comm: recv + send threads per tool)",
+                    RCLCPP_INFO(get_logger(),
+                                "%s Connected (async send; RS485 get in hardware read)",
                                 toolTypeLogName());
                 }
             }
@@ -1966,7 +1956,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             }
         }
 
-        // KWR75 shares Marvin RS485 with tools — start after tool threads are up.
+        // KWR75: COM2 get runs in hardware read(); this thread only starts stream + publishes.
         if (kwr75_ft_config_.enabled)
         {
             startKwr75FtThreads();
@@ -2036,58 +2026,141 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         }
     }
 
-    void MarvinHardware::tool_recv_thread_func(size_t tool_idx)
+    void MarvinHardware::dispatchToolCom1Frame(size_t tool_idx, const unsigned char* data, long received)
     {
-        // Async recv on COM1 only (SDK ch=2). KWR75 uses COM2 (ch=3) in kwr75FtThread.
-        if (tool_idx >= toolCount())
-            return;
-        GetChDataFunc get_ch = toolUsesLeftChannel(tool_idx)
-            ? MarvinRs485Bus::getA() : MarvinRs485Bus::getB();
-        const long com1 = toolChannel(tool_idx);
-        unsigned char data_buf[256] = {0};
-        while (hardware_connected_)
+        if (tool_idx >= toolCount() || received < 2 || data == nullptr)
         {
-            if (tool_idx < tool_init_failed_.size() && tool_init_failed_[tool_idx])
+            return;
+        }
+        if (isModbusWriteAck(data, static_cast<size_t>(received)))
+        {
+            if (tool_idx < in_flight_type_.size() && in_flight_type_[tool_idx].load() == 2)
             {
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                continue;
+                applyGripperWriteAckFromInFlight(tool_idx);
+            }
+            markFrameAnswered(tool_idx);
+            return;
+        }
+        if (data[1] == 0x03 || data[1] == 0x04)
+        {
+            const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            if (tool_idx < tool_hb_last_rx_ms_.size())
+            {
+                tool_hb_last_rx_ms_[tool_idx].store(static_cast<std::int64_t>(now_ms));
+            }
+            if (tool_idx < tool_hb_offline_reported_.size())
+            {
+                tool_hb_offline_reported_[tool_idx].store(false);
+            }
+            markFrameAnswered(tool_idx);
+        }
+        processToolResponse(data, static_cast<size_t>(received), tool_idx);
+        if (tool_idx < tool_initial_read_done_.size())
+        {
+            tool_initial_read_done_[tool_idx] = true;
+        }
+    }
+
+    void MarvinHardware::ingestKwr75Com2Frame(
+        bool left_arm, const unsigned char* data, long received, long rx_channel)
+    {
+        auto& slot = left_arm ? left_kwr75_sample_ : right_kwr75_sample_;
+        const long want_ch = left_arm ? kwr75_ft_config_.left_channel : kwr75_ft_config_.right_channel;
+        if (!Kwr75Protocol::isExactFrameRead(received, rx_channel, want_ch))
+        {
+            return;
+        }
+        std::array<float, Kwr75Protocol::kAxisCount> raw {};
+        if (!Kwr75Protocol::tryParseCompleteFrame(
+                data, static_cast<std::size_t>(received),
+                kwr75_ft_config_.command_code, raw))
+        {
+            return;
+        }
+        slot.publish(raw);
+    }
+
+    void MarvinHardware::pollRs485InHardwareRead()
+    {
+        const bool poll_left =
+            (robot_arm_index_ == ARM_LEFT || robot_arm_index_ == ARM_DUAL);
+        const bool poll_right =
+            (robot_arm_index_ == ARM_RIGHT || robot_arm_index_ == ARM_DUAL);
+
+        auto poll_side = [this](bool left) {
+            GetChDataFunc get_ch = left ? MarvinRs485Bus::getA() : MarvinRs485Bus::getB();
+            const long com1 = left ? left_ee_channel_ : right_ee_channel_;
+
+            int tool_idx = -1;
+            for (size_t ti = 0; ti < toolCount(); ++ti)
+            {
+                if (!toolAt(ti))
+                {
+                    continue;
+                }
+                if (ti < tool_init_failed_.size() && tool_init_failed_[ti])
+                {
+                    continue;
+                }
+                if (toolUsesLeftChannel(ti) == left)
+                {
+                    tool_idx = static_cast<int>(ti);
+                    break;
+                }
             }
 
-            long ch = com1;
-            long received = get_ch(data_buf, &ch);
-            if (received <= 0)
+            unsigned char buf[256] = {0};
+            if (tool_idx >= 0)
             {
-                std::this_thread::sleep_for(std::chrono::milliseconds(20));
-                continue;
+                for (int drain = 0; drain < 4; ++drain)
+                {
+                    long ch = com1;
+                    const long received = get_ch(buf, &ch);
+                    if (received <= 0 || received > static_cast<long>(sizeof(buf)))
+                    {
+                        break;
+                    }
+                    if (ch == KWR75_FT_CHANNEL)
+                    {
+                        ingestKwr75Com2Frame(left, buf, received, ch);
+                        continue;
+                    }
+                    if (ch != com1)
+                    {
+                        continue;
+                    }
+                    dispatchToolCom1Frame(static_cast<size_t>(tool_idx), buf, received);
+                }
             }
-            if (received > static_cast<long>(sizeof(data_buf)))
+
+            const bool ft_side_on = left ? kwr75_ft_config_.left_enabled
+                                         : kwr75_ft_config_.right_enabled;
+            if (kwr75_ft_config_.enabled && kwr75_ft_running_.load(std::memory_order_acquire) && ft_side_on)
             {
-                continue;
+                long ch = left ? kwr75_ft_config_.left_channel : kwr75_ft_config_.right_channel;
+                // 0x49 request/response: when publishing in read(), send one poll before get.
+                if (!kwr75UsesPollThread() && kwr75_ft_config_.command_code == 0x49)
+                {
+                    Send485Func send_485 = left ? MarvinRs485Bus::sendA() : MarvinRs485Bus::sendB();
+                    const auto req = Kwr75Protocol::buildPollRequest(kwr75_ft_config_.command_code);
+                    send_485(const_cast<uint8_t*>(req.data()), static_cast<long>(req.size()), ch);
+                }
+                const long received = get_ch(buf, &ch);
+                if (received > 0)
+                {
+                    ingestKwr75Com2Frame(left, buf, received, ch);
+                }
             }
-            if (ch != com1)
-            {
-                continue;
-            }
-            if (received >= 2 && isModbusWriteAck(data_buf, static_cast<size_t>(received)))
-            {
-                if (tool_idx < in_flight_type_.size() && in_flight_type_[tool_idx].load() == 2)
-                    applyGripperWriteAckFromInFlight(tool_idx);
-                markFrameAnswered(tool_idx);
-                continue;
-            }
-            if (received >= 2 && (data_buf[1] == 0x03 || data_buf[1] == 0x04))
-            {
-                const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::steady_clock::now().time_since_epoch()).count();
-                if (tool_idx < tool_hb_last_rx_ms_.size())
-                    tool_hb_last_rx_ms_[tool_idx].store(static_cast<std::int64_t>(now_ms));
-                if (tool_idx < tool_hb_offline_reported_.size())
-                    tool_hb_offline_reported_[tool_idx].store(false);
-                markFrameAnswered(tool_idx);
-            }
-            processToolResponse(data_buf, static_cast<size_t>(received), tool_idx);
-            if (tool_idx < tool_initial_read_done_.size())
-                tool_initial_read_done_[tool_idx] = true;
+        };
+
+        if (poll_left)
+        {
+            poll_side(true);
+        }
+        if (poll_right)
+        {
+            poll_side(false);
         }
     }
 
@@ -2907,6 +2980,17 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             return hardware_interface::return_type::ERROR;
         }
 
+        // Single OnGetChData entry: COM1 tools + COM2 KWR75 (ros2_control update rate).
+        if (use_async_tool_comm_ || kwr75_ft_config_.enabled)
+        {
+            pollRs485InHardwareRead();
+        }
+        // Stream mode default: publish at control rate; poll thread only when interval>0.
+        if (kwr75_ft_config_.enabled && !kwr75UsesPollThread())
+        {
+            publishKwr75SyncedToControl();
+        }
+
         // For single-arm setups, mirror the corresponding side into ft_sensor.
         // This keeps the semantic-component interfaces stable regardless of arm configuration.
         {
@@ -3342,6 +3426,15 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         if (timeouts == last_reported)
             return;
 
+        // Rate-limit: at most one summary every 5s (control loop is 100ms — was flooding WARN).
+        constexpr auto kSummaryPeriod = std::chrono::seconds(5);
+        const auto now = std::chrono::steady_clock::now();
+        if (tool_last_summary_tp_[tool_idx].time_since_epoch().count() != 0 &&
+            now - tool_last_summary_tp_[tool_idx] < kSummaryPeriod)
+        {
+            return;
+        }
+
         RCLCPP_WARN(get_logger(),
                     "tool reply timeout summary: tool_idx=%zu channel=%ld — timeouts=%llu (delta=%llu), ok=%llu, total_sent=%llu, loss=%.1f%%",
                     tool_idx, toolChannel(tool_idx),
@@ -3351,6 +3444,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                     static_cast<unsigned long long>(total),
                     total > 0 ? 100.0 * static_cast<double>(timeouts) / static_cast<double>(total) : 0.0);
         tool_last_reported_timeout_[tool_idx] = timeouts;
+        tool_last_summary_tp_[tool_idx] = now;
     }
 
     void MarvinHardware::accountSyncFrame(size_t tool_idx, int kind, bool got_reply)
@@ -3774,13 +3868,10 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         kwr75_ft_config_.left_channel = get_node_param("left_ft_channel", kwr75_ft_config_.left_channel);
         kwr75_ft_config_.right_channel = get_node_param("right_ft_channel", kwr75_ft_config_.right_channel);
         kwr75_ft_config_.poll_interval_ms = get_node_param("ft_poll_interval_ms", kwr75_ft_config_.poll_interval_ms);
-        kwr75_ft_config_.recv_interval_ms = get_node_param("ft_recv_interval_ms", kwr75_ft_config_.recv_interval_ms);
         kwr75_ft_config_.command_code = static_cast<uint8_t>(
             get_node_param("ft_command_code", static_cast<int>(kwr75_ft_config_.command_code)));
         kwr75_ft_config_.convert_to_si = get_node_param("ft_convert_to_si", kwr75_ft_config_.convert_to_si);
         kwr75_ft_config_.gravity = get_node_param("ft_gravity", kwr75_ft_config_.gravity);
-        kwr75_ft_config_.response_timeout_ms =
-            get_node_param("ft_response_timeout_ms", kwr75_ft_config_.response_timeout_ms);
         kwr75_ft_config_.warmup_timeout_ms =
             get_node_param("ft_warmup_timeout_ms", kwr75_ft_config_.warmup_timeout_ms);
         kwr75_ft_config_.left_frame_id =
@@ -3872,72 +3963,79 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         }
     }
 
-    void MarvinHardware::kwr75FtThread(int arm_index)
+    void MarvinHardware::publishKwr75SyncedToControl()
     {
-        Send485Func send_485 = (arm_index == ARM_LEFT) ? MarvinRs485Bus::sendA() : MarvinRs485Bus::sendB();
-        GetChDataFunc get_ch_data = (arm_index == ARM_LEFT) ? MarvinRs485Bus::getA() : MarvinRs485Bus::getB();
-        const long ft_channel = (arm_index == ARM_LEFT) ? kwr75_ft_config_.left_channel
-                                                        : kwr75_ft_config_.right_channel;
-        const char* side_label = (arm_index == ARM_LEFT) ? "left" : "right";
-        const auto logger = get_logger();
-
-        Kwr75RxLogFunc rx_log = [logger, side_label, ft_channel](long received, long rx_channel) {
-            if (received <= 0)
+        auto publish_side = [this](bool left, int arm_index) {
+            const bool side_on = left ? kwr75_ft_config_.left_enabled : kwr75_ft_config_.right_enabled;
+            if (!side_on)
             {
                 return;
             }
-            RCLCPP_INFO(
-                logger,
-                "KWR75 %s recv thread OnGetChData: %ld bytes (ret_ch=%ld, want_ch=%ld)",
-                side_label, received, rx_channel, ft_channel);
+            auto& slot = left ? left_kwr75_sample_ : right_kwr75_sample_;
+            std::array<float, Kwr75Protocol::kAxisCount> raw {};
+            if (slot.tryConsume(raw))
+            {
+                std::array<double, Kwr75Protocol::kAxisCount> wrench {};
+                Kwr75Protocol::rawToSi(
+                    raw, wrench, kwr75_ft_config_.convert_to_si, kwr75_ft_config_.gravity);
+                applyKwr75Wrench(arm_index, wrench);
+                return;
+            }
+            if (slot.has_any.load(std::memory_order_acquire))
+            {
+                applyKwr75Wrench(arm_index, left ? left_ft_state_ : right_ft_state_);
+            }
         };
 
+        if (robot_arm_index_ == ARM_LEFT || robot_arm_index_ == ARM_DUAL)
+        {
+            publish_side(true, ARM_LEFT);
+        }
+        if (robot_arm_index_ == ARM_RIGHT || robot_arm_index_ == ARM_DUAL)
+        {
+            publish_side(false, ARM_RIGHT);
+        }
+    }
+
+    void MarvinHardware::kwr75FtThread(int arm_index)
+    {
+        Send485Func send_485 = (arm_index == ARM_LEFT) ? MarvinRs485Bus::sendA() : MarvinRs485Bus::sendB();
+        const long ft_channel = (arm_index == ARM_LEFT) ? kwr75_ft_config_.left_channel
+                                                        : kwr75_ft_config_.right_channel;
+        const char* side_label = (arm_index == ARM_LEFT) ? "left" : "right";
+        Kwr75LockFreeSample* sample_slot =
+            (arm_index == ARM_LEFT) ? &left_kwr75_sample_ : &right_kwr75_sample_;
+
         Kwr75Marvin485Client client(
-            send_485, get_ch_data, ft_channel,
+            send_485, ft_channel, sample_slot,
             kwr75_ft_config_.command_code, kwr75_ft_config_.convert_to_si,
-            kwr75_ft_config_.gravity, kwr75_ft_config_.response_timeout_ms,
-            kwr75_ft_config_.recv_interval_ms, kwr75_ft_config_.warmup_timeout_ms,
-            std::move(rx_log));
+            kwr75_ft_config_.gravity, kwr75_ft_config_.warmup_timeout_ms);
 
         if (client.warmup())
         {
-            const char* mode_label =
-                (kwr75_ft_config_.command_code == 0x49) ? "poll" : "stream";
             RCLCPP_INFO(get_logger(),
-                        "KWR75 ready on %s Marvin RS485 COM2 (ch=%ld, cmd=0x%02X, %s, recv=%dms, pub=%dms)",
-                        side_label, ft_channel, kwr75_ft_config_.command_code, mode_label,
-                        kwr75_ft_config_.recv_interval_ms, kwr75_ft_config_.poll_interval_ms);
-        }
-        else if (kwr75_ft_config_.command_code != 0x49)
-        {
-            RCLCPP_WARN(get_logger(),
-                        "KWR75 stream starting on %s COM2 (ch=%ld): 0x48 sent once, "
-                        "recv thread active — waiting for first 28-byte frame",
-                        side_label, ft_channel);
+                        "KWR75 ready on %s COM2 (ch=%ld, cmd=0x%02X, %s)",
+                        side_label, ft_channel, kwr75_ft_config_.command_code,
+                        kwr75UsesPollThread() ? "poll thread" : "synced to control");
         }
         else
         {
-            const std::string sample = client.lastIoSampleHex();
-            if (sample.empty())
-            {
-                RCLCPP_WARN(get_logger(),
-                            "KWR75 warmup pending on %s Marvin RS485 channel %ld; "
-                            "will keep polling (output stays 0 until first frame)",
-                            side_label, ft_channel);
-            }
-            else
-            {
-                RCLCPP_WARN(get_logger(),
-                            "KWR75 warmup pending on %s Marvin RS485 channel %ld; "
-                            "raw RX ch=%ld [%s] — will keep polling",
-                            side_label, ft_channel, client.lastRxChannel(), sample.c_str());
-            }
+            RCLCPP_WARN(get_logger(),
+                        "KWR75 warmup pending on %s COM2 (ch=%ld); publishing when frames arrive",
+                        side_label, ft_channel);
         }
 
-        // 0x48: one 0x48 start on COM2, recv thread @20ms, publish @10Hz (hold last sample).
-        // 0x49: send→recv retry each 100ms cycle, publish @10Hz (hold last sample).
+        // Default: only start stream (0x48); publish happens in read().
+        if (!kwr75UsesPollThread())
+        {
+            while (kwr75_ft_running_.load() && hardware_connected_)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+            return;
+        }
+
         const int interval_ms = std::max(1, kwr75_ft_config_.poll_interval_ms);
-        const bool stream_mode = (kwr75_ft_config_.command_code != 0x49);
         std::array<double, Kwr75Protocol::kAxisCount> last_wrench {};
         bool have_wrench = false;
 
@@ -3947,24 +4045,20 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             const auto cycle_end = cycle_start + std::chrono::milliseconds(interval_ms);
 
             std::array<double, Kwr75Protocol::kAxisCount> wrench {};
-            const bool got_new = stream_mode
-                ? client.readWrench(wrench)
-                : client.readWrenchUntil(cycle_end, wrench);
+            const bool got_new = client.isPollMode()
+                ? client.pollAndTakeWrench(cycle_end, wrench)
+                : client.takeWrench(wrench);
             if (got_new)
             {
                 last_wrench = wrench;
                 have_wrench = true;
             }
-
             if (have_wrench)
             {
                 applyKwr75Wrench(arm_index, last_wrench);
             }
-
             std::this_thread::sleep_until(cycle_end);
         }
-
-        client.stop();
     }
 
 } // namespace marvin_ros2_control

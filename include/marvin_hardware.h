@@ -121,6 +121,8 @@ private:
         std::array<double, 6> right_ft_state_{};
         std::array<double, 6> single_ft_state_{};  // used for single-arm configs
         Kwr75FtConfig kwr75_ft_config_;
+        Kwr75LockFreeSample left_kwr75_sample_{};
+        Kwr75LockFreeSample right_kwr75_sample_{};
         std::atomic<bool> kwr75_ft_running_{false};
         std::thread kwr75_ft_thread_left_;
         std::thread kwr75_ft_thread_right_;
@@ -130,6 +132,9 @@ private:
         void stopKwr75FtThreads();
         void kwr75FtThread(int arm_index);
         void applyKwr75Wrench(int arm_index, const std::array<double, 6>& wrench);
+        /** When ft_poll_interval_ms<=0: publish latest FT sample each read() cycle. */
+        void publishKwr75SyncedToControl();
+        bool kwr75UsesPollThread() const { return kwr75_ft_config_.poll_interval_ms > 0; }
 
         // Joint limits from URDF
         std::vector<double> position_lower_limits_;
@@ -251,9 +256,7 @@ private:
         std::array<size_t, kMaxTools> hand_stable_count_{};
         std::array<bool, kMaxTools> hand_stabilized_{};
         std::vector<std::thread> gripper_ctrl_threads_;
-        /** Async mode: one recv thread per tool, only polls get485 and dispatches to processToolResponse / write ack. */
-        std::vector<std::thread> tool_recv_threads_;
-        /** If true, use async tool comm: recv thread(s) + send-only tool_callback_for_tool_async (see marvin_*_init_example). */
+        /** If true, async send threads; OnGetChData runs in hardware read(). */
         bool use_async_tool_comm_ = true;
         /** If true, initialize end-effector (hand/gripper) on activate. If false, skip tool initialize/reads/threads. */
         bool init_tool_on_startup_ = true;
@@ -264,12 +267,9 @@ private:
         std::array<std::atomic<bool>, kMaxTools> tool_hb_offline_reported_{};
 
         // --- Async per-cycle request/response pairing & timeout accounting ---
-        // Fully decoupled design: sender thread only marks a frame pending; the recv
-        // thread (20ms cadence) clears the pending flag when it parses a reply.
-        // At the START of the next control cycle, if pending is still set, it means the
-        // recv thread did not observe a reply within ~n chances (n = ctrl_period/recv_period),
-        // so the previous frame is counted as a timeout. Zero synchronization cost on
-        // the sender path besides atomic flag flips.
+        // Fully decoupled design: sender thread only marks a frame pending; hardware
+        // read() clears the pending flag when it parses a reply (CM update rate).
+        // At the START of the next control cycle, if pending is still set, count timeout.
         std::array<std::atomic<bool>, kMaxTools> tool_reply_pending_{};     // true = sent, awaiting reply
         std::array<std::atomic<int>, kMaxTools> tool_reply_kind_{};         // 0=none,1=read,2=write (for logging)
         std::array<std::atomic<std::uint64_t>, kMaxTools> tool_tx_total_{}; // total frames sent
@@ -277,12 +277,15 @@ private:
         std::array<std::atomic<std::uint64_t>, kMaxTools> tool_timeout_count_{}; // frames never answered within cycle
         // Last reported snapshot of timeout counters (for periodic summary diffs).
         std::array<std::uint64_t, kMaxTools> tool_last_reported_timeout_{};
+        std::array<std::chrono::steady_clock::time_point, kMaxTools> tool_last_summary_tp_{};
 
         void tool_callback_for_tool(size_t tool_idx);
-        /** Async: recv thread for one tool; only calls get_ch_data and processes responses (no sending). */
-        void tool_recv_thread_func(size_t tool_idx);
-        /** Async: same loop as tool_callback_for_tool but only sends (getStatus/move); no blocking receive. */
+        /** Async: send-only (getStatus/move); replies observed in hardware read(). */
         void tool_callback_for_tool_async(size_t tool_idx);
+        /** Sole OnGetChData path: COM1 tools + COM2 KWR75, called from read(). */
+        void pollRs485InHardwareRead();
+        void dispatchToolCom1Frame(size_t tool_idx, const unsigned char* data, long received);
+        void ingestKwr75Com2Frame(bool left_arm, const unsigned char* data, long received, long rx_channel);
         /** Read once from channel, copy to data_buf, return byte count or 0. */
         long receiveToolResponse(unsigned char* data_buf, size_t buf_size, GetChDataFunc get_ch_data, long channel);
         void processToolResponse(const unsigned char* data_buf, size_t size, size_t gripper_idx);
