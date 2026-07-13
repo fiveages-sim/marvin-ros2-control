@@ -210,10 +210,8 @@ private:
         long left_ee_channel_ = COM1_CHANNEL;
         long right_ee_channel_ = COM1_CHANNEL;
         double gripper_torque_scale_ = 1.0;  // Torque scaling factor (0.0-1.0, default: 1.0)
-        /** If true, enable high-frequency INFO logs for tool (hand/gripper) and Modbus hex dumps. */
         std::vector<double> gripper_effort_command_;   // HW_IF_EFFORT command → normalized torque to tool
         std::vector<double> gripper_velocity_command_; // HW_IF_VELOCITY command → normalized velocity to tool
-        bool debug_tool_logs_ = false;
         bool has_gripper_ = false;
         std::vector<std::string> gripper_joint_name_;
         size_t gripper_joint_index_ = 0;
