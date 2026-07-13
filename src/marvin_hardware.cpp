@@ -787,13 +787,6 @@ MarvinHardware::paramCallback(const std::vector<rclcpp::Parameter> & params)
             need_config_update = true;
             ctrl_mode_changed = true;
             RCLCPP_INFO(get_logger(), "ctrl_mode parameter changed to: %s", ctrl_mode.c_str());
-            if (mode == 4) {
-                on_deactivate(rclcpp_lifecycle::State{});
-                need_config_update = false;
-            } else {
-                on_activate(rclcpp_lifecycle::State{});
-                need_config_update = false;
-            }
             if (mode != 4) {
                 if (robot_arm_index_ == ARM_LEFT || robot_arm_index_ == ARM_DUAL) left_brake_released_ = false;
                 if (robot_arm_index_ == ARM_RIGHT || robot_arm_index_ == ARM_DUAL) right_brake_released_ = false;
@@ -2772,6 +2765,9 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
     {
         RCLCPP_ERROR(get_logger(), "Error in Marvin Hardware Interface, emergency brake...");
 
+        stopKwr75FtThreads();
+        robot_ctrl_mode_ = "POWER_OFF";
+
         if (hardware_connected_) {
             const bool update_left = (robot_arm_index_ == ARM_LEFT || robot_arm_index_ == ARM_DUAL);
             const bool update_right = (robot_arm_index_ == ARM_RIGHT || robot_arm_index_ == ARM_DUAL);
@@ -3599,6 +3595,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         // Publish encoded error codes when non-zero:
         //  - Left arm:  0x600000 + m_ERRCode
         //  - Right arm: 0x610000 + m_ERRCode
+        // read() returns ERROR when arm_ok is false → ResourceManager calls on_error().
         if (hardware_error_pub_)
         {
             auto publish_error_code = [&](int arm_index, int err_code)
@@ -3618,6 +3615,10 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                     base = 0x610000;
                     arm_name = "Right";
                 }
+                else
+                {
+                    return;
+                }
 
                 const int encoded = base + err_code;
 
@@ -3628,8 +3629,6 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                 RCLCPP_ERROR(get_logger(),
                              "Tianji robot error on %s arm: raw_err=%d, encoded_err=0x%X",
                              arm_name, err_code, encoded);
-                if (robot_ctrl_mode_ != "POWER_OFF")
-                    on_deactivate(rclcpp_lifecycle::State{});
             };
 
             if (robot_arm_index_ == ARM_LEFT || robot_arm_index_ == ARM_RIGHT)
