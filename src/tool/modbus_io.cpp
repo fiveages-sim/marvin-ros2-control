@@ -83,6 +83,11 @@ namespace marvin_ros2_control
     std::vector<uint16_t> ModbusIO::readRegisters(uint8_t slave_id, uint16_t start_addr,
                                                   uint16_t count, uint8_t function_code)
     {
+        // Polling parameters are internal to this implementation; the channel is fixed
+        // at construction (channel_) and not exposed via the API.
+        constexpr int kMaxAttempts = 50;
+        constexpr int kPollIntervalMs = 200;
+
         if (count > MAX_MODBUS_REGISTERS)
         {
             count = MAX_MODBUS_REGISTERS;
@@ -104,15 +109,15 @@ namespace marvin_ros2_control
             return {};
         }
 
-        // Read data using OnGetChDataA until we receive at least one frame (or attempts exhausted)
+        // Allow RS485 turnaround before the first poll (matches gripper init example).
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
         std::vector<uint16_t> result;
         uint8_t data_buf[MAX_BUFFER_SIZE];
         char hex_str1[512];
         long set_ch1 = channel_;
 
-        // Limit attempts to avoid an infinite loop, but preserve the requested read pattern
-        const int max_attempts = 50;
-        for (int attempt = 0; attempt < max_attempts; ++attempt)
+        for (int attempt = 0; attempt < kMaxAttempts; ++attempt)
         {
             if (!on_get_ch_data_)
             {
@@ -121,34 +126,44 @@ namespace marvin_ros2_control
             }
 
             long tag = on_get_ch_data_(data_buf, &set_ch1);
-            std::this_thread::sleep_for(std::chrono::milliseconds(200)); // sleep(0.2) equivalent
 
             if (tag >= 1)
             {
                 hex_to_str(data_buf, static_cast<int>(tag), hex_str1, sizeof(hex_str1));
-                RCLCPP_DEBUG(logger_, "接收信号: %ld, 接收的HEX数据: %s", tag, hex_str1);
-
-                // Basic Modbus RTU parsing: [slave][func][byte_count][data...][crc_low][crc_high]
-                std::vector<uint8_t> response(data_buf, data_buf + static_cast<size_t>(tag));
-                if (response.size() < 5) // minimal RTU frame size
+                if (isDebugEnabled())
                 {
+                    RCLCPP_DEBUG(logger_, "Received channel=%ld size=%ld: %s", set_ch1, tag, hex_str1);
+                }
+
+                std::vector<uint8_t> response(data_buf, data_buf + static_cast<size_t>(tag));
+                if (response.size() < 5)
+                {
+                    if (attempt + 1 < kMaxAttempts)
+                    {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(kPollIntervalMs));
+                    }
                     continue;
                 }
 
-                // Optional: validate slave id and function code
                 if (response[0] != slave_id || response[1] != function_code)
                 {
+                    if (attempt + 1 < kMaxAttempts)
+                    {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(kPollIntervalMs));
+                    }
                     continue;
                 }
 
                 uint8_t byte_count = response[2];
-                // Ensure we have enough data bytes plus CRC
                 if (response.size() < static_cast<size_t>(3 + byte_count + 2))
                 {
+                    if (attempt + 1 < kMaxAttempts)
+                    {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(kPollIntervalMs));
+                    }
                     continue;
                 }
 
-                // Extract register values (big-endian pairs)
                 size_t reg_count = byte_count / 2;
                 result.reserve(reg_count);
                 for (size_t i = 0; i < reg_count; ++i)
@@ -159,9 +174,14 @@ namespace marvin_ros2_control
                 }
                 return result;
             }
+
+            if (attempt + 1 < kMaxAttempts)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(kPollIntervalMs));
+            }
         }
 
-        RCLCPP_DEBUG(logger_, "Modbus read timeout: no valid response after %d attempts", max_attempts);
+        RCLCPP_WARN(logger_, "Modbus read timeout: no valid response after %d attempts", kMaxAttempts);
         return {};
     }
 
@@ -182,6 +202,41 @@ namespace marvin_ros2_control
 
         auto request = buildRequest(slave_id, function_code, data);
         return sendRequest(request);
+    }
+
+    bool ModbusIO::sendWriteSingleRegisterAsync(uint8_t slave_id, uint16_t register_addr, uint16_t value,
+                                                uint8_t function_code)
+    {
+        std::vector<uint8_t> data = {
+            static_cast<uint8_t>(register_addr >> 8),
+            static_cast<uint8_t>(register_addr & 0xFF),
+            static_cast<uint8_t>(value >> 8),
+            static_cast<uint8_t>(value & 0xFF)
+        };
+        return sendRequest(buildRequest(slave_id, function_code, data));
+    }
+
+    bool ModbusIO::sendFC06QueryAsync(uint8_t slave_id, uint16_t register_addr)
+    {
+        return sendWriteSingleRegisterAsync(slave_id, register_addr, 0x0000, 0x06);
+    }
+
+    bool ModbusIO::parseFC06Response(const uint8_t* data, size_t data_size,
+                                     uint8_t expected_slave_id, uint16_t expected_register_addr,
+                                     uint16_t& value_out)
+    {
+        if (data_size < 8 || data[0] != expected_slave_id || data[1] != 0x06)
+        {
+            return false;
+        }
+        const uint16_t register_addr =
+            static_cast<uint16_t>((static_cast<uint16_t>(data[2]) << 8) | data[3]);
+        if (register_addr != expected_register_addr)
+        {
+            return false;
+        }
+        value_out = static_cast<uint16_t>((static_cast<uint16_t>(data[4]) << 8) | data[5]);
+        return true;
     }
 
     std::vector<uint16_t> ModbusIO::parseModbusResponse(const uint8_t* data, size_t data_size,
@@ -291,17 +346,27 @@ namespace marvin_ros2_control
 
     bool ModbusIO::sendRequest(const std::vector<uint8_t>& request)
     {
+        //if (clear_485_)
+        //{
+        //    const bool cleared = clear_485_();
+        //    RCLCPP_INFO(logger_, "Cleared channel=%ld result=%s", channel_, cleared ? "true" : "false");
+        //}
+
+        char debug_str[512];
+        hex_to_str(request.data(), static_cast<int>(request.size()), debug_str, sizeof(debug_str));
         if (isDebugEnabled())
         {
-            char debug_str[512];
-            hex_to_str(request.data(), request.size(), debug_str, sizeof(debug_str));
             RCLCPP_DEBUG(logger_, "Sending channel=%ld size=%zu: %s", channel_, request.size(), debug_str);
         }
 
         const bool ok = send_485_((uint8_t*)request.data(), static_cast<long>(request.size()), channel_);
-        if (isDebugEnabled())
+        if (!ok)
         {
-            RCLCPP_DEBUG(logger_, "Sent channel=%ld result=%s", channel_, ok ? "true" : "false");
+            RCLCPP_WARN(logger_, "Send failed channel=%ld size=%zu: %s", channel_, request.size(), debug_str);
+        }
+        else if (isDebugEnabled())
+        {
+            RCLCPP_DEBUG(logger_, "Sent channel=%ld result=true", channel_);
         }
         return ok;
     }
@@ -315,9 +380,14 @@ namespace marvin_ros2_control
             long channel = channel_;
             int received = on_get_ch_data_(buffer, &channel);
 
-            if (received > 0)
+            if (received > 0 && channel == channel_)
             {
-                std::cout << "Received gripper message " << received << std::endl;
+                if (isDebugEnabled())
+                {
+                    char hex_str[2048];
+                    hex_to_str(buffer, received, hex_str, sizeof(hex_str));
+                    RCLCPP_DEBUG(logger_, "Received channel=%ld size=%d: %s", channel, received, hex_str);
+                }
                 std::vector<uint8_t> response(buffer, buffer + received);
                 return response;
             }
@@ -328,6 +398,7 @@ namespace marvin_ros2_control
             }
         }
 
+        RCLCPP_WARN(logger_, "Receive timeout channel=%ld after %d attempts", channel_, max_attempts);
         return {};
     }
 

@@ -50,6 +50,12 @@ namespace marvin_ros2_control
             return true;  // Default: reached (for grippers that don't implement this)
         }
 
+        /** Optional: user torque/speed before initialize() for one-time device config write. */
+        virtual void setInitialToolConfig(double /*normalized_torque*/, double /*normalized_velocity*/) {}
+
+        /** True while a user-initiated current/speed write is still queued (EincinX). */
+        virtual bool hasPendingConfigWrites() const { return false; }
+
     protected:
         // Cached status values (updated by updateStatusFromResponse)
         double cached_position_ = 0.0;
