@@ -127,6 +127,7 @@ add_library(${PROJECT_NAME} SHARED
         src/tool/grippers/jodell/jd_gripper.cpp
         src/tool/grippers/eincinx/eincinx_gripper.cpp
         src/tool/hands/jodell/erg32_hand.cpp
+        src/tool/hands/theo/theo_hand.cpp
 )
 
 add_dependencies(${PROJECT_NAME} build_kine_sdk build_marvin_sdk)

@@ -28,6 +28,7 @@
 #include "marvin_ros2_control/tool/hands/inspire/inspire_hand.h"
 #include "marvin_ros2_control/tool/hands/linkerhand/dexterous_hand.h"
 #include "marvin_ros2_control/tool/hands/jodell/erg32_hand.h"
+#include "marvin_ros2_control/tool/hands/theo/theo_hand.h"
 #include "marvin_ros2_control/tool/marvin_rs485_bus.h"
 
 using namespace gripper_hardware_common;
@@ -1222,7 +1223,8 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             "FREEDOM_V1", "FREEDOM_V2", "FREEDOM",
             "INSPIRE_E2", "INSPIRE", "RH56E2",
             "INSPIRE_F2", "RH56F2",
-            "ERG32"
+            "ERG32",
+            "THEOHAND_STD16A", "THEOHAND", "STD16A"
         };
         
         // Check if type contains hand indicators
@@ -1242,6 +1244,17 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         
         if (is_hand_type)
         {
+            if (normalized_ee_type == "THEOHAND_STD16A" ||
+                normalized_ee_type == "THEOHAND" ||
+                normalized_ee_type == "STD16A" ||
+                normalized_ee_type.find("THEOHAND") != std::string::npos)
+            {
+                const uint8_t slave_id = is_left_hand ? 0x02 : 0x01;
+                RCLCPP_INFO(get_logger(), "Creating TheoHand STD16A (16-DOF, slave: 0x%02X, channel: %ld)",
+                            slave_id, channel);
+                return std::make_unique<marvin_ros2_control::TheoHandSTD16A>(
+                    clear_485, send_485, get_ch_data, channel, slave_id);
+            }
             if (normalized_ee_type == "ERG32" || normalized_ee_type.find("ERG32") != std::string::npos)
             {
                 RCLCPP_INFO(get_logger(), "Creating ERG32 hand (2-DOF rotate+grip, slave: 0x%02X)",
@@ -1450,7 +1463,9 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
 
     bool MarvinHardware::eeTypeIsHand(const std::string& ee_type) const
     {
-        return ee_type == "ERG32" || ee_type.find("ERG32") != std::string::npos ||
+        return ee_type == "THEOHAND_STD16A" || ee_type == "THEOHAND" || ee_type == "STD16A" ||
+               ee_type.find("THEOHAND") != std::string::npos ||
+               ee_type == "ERG32" || ee_type.find("ERG32") != std::string::npos ||
                ee_type == "LINKERHAND_O7" || ee_type == "LINKERHAND_O6" || ee_type == "LINKERHAND_L6" ||
                ee_type == "O7" || ee_type == "O6" || ee_type == "L6" ||
                ee_type == "FREEDOM_V1" || ee_type == "FREEDOM_V2" || ee_type == "FREEDOM" ||
@@ -1507,7 +1522,8 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             "FREEDOM_V1", "FREEDOM_V2", "FREEDOM",
             "INSPIRE_E2", "INSPIRE", "RH56E2",
             "INSPIRE_F2", "RH56F2",
-            "ERG32"
+            "ERG32",
+            "THEOHAND_STD16A", "THEOHAND", "STD16A"
         };
         // Gripper types: JD, Changingtek variants
         static const std::set<std::string> gripper_types = {
@@ -2252,7 +2268,11 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                             }
                         }
                         std::vector<double> pos(write_cmd.begin(), write_cmd.begin() + static_cast<std::vector<double>::difference_type>(dof));
-                        hand->move_hand(torques, velocities, pos);
+                        if (!hand->move_hand(torques, velocities, pos))
+                        {
+                            std::this_thread::sleep_until(cycle_start + std::chrono::milliseconds(kControlPeriodMs));
+                            continue;
+                        }
                         markFrameSent(tool_idx, 2);
                         for (size_t k = 0; k < gripper_joint_name_.size() && k < last_gripper_command_.size() && k < gripper_stopped_.size(); ++k)
                         {
