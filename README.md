@@ -24,6 +24,7 @@ Marvin 机械臂（M6 等）的 ROS2 Control 硬件接口。通过 **Marvin SDK*
 | `freedom_v2` | Freedom V2 | `FreedomHandV2` | RS485；`ee_channel=1` 时 CAN |
 | `inspire_e2`, `RH56E2`, `INSPIRE` | Inspire RH56E2 | `InspireHandE2` / `InspireHandE2Canfd` | RS485；`ee_channel=1` 时 CAN FD |
 | `inspire_f2`, `RH56F2` | Inspire RH56F2 | 同上（F2 类型） | 同上 |
+| `theohand_std16a`, `THEOHAND_STD16A` | TheoHand STD16A | `TheoHandSTD16A` | RS485（COM1；左 ID 2、右 ID 1） |
 
 未知夹爪类型回退为 `JDGripper`；未知灵巧手类型回退为 O7。
 
@@ -36,7 +37,7 @@ marvin_ros2_control/
 ├── include/marvin_ros2_control/tool/
 │   ├── modbus_io.h                  # SDK 485/CAN 帧收发
 │   ├── grippers/                    # RG75（jodell/）、Changingtek
-│   └── hands/                       # LinkerHand、Freedom、Inspire、ERG32（jodell/）
+│   └── hands/                       # LinkerHand、Freedom、Inspire、TheoHand、ERG32（jodell/）
 └── external/TJ_FX_ROBOT_CONTRL_SDK/ # Marvin SDK（子模块）
 ```
 
