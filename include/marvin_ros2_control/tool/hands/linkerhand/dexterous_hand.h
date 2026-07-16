@@ -376,18 +376,31 @@ namespace marvin_ros2_control
                 return false;
             }
             
-            // Convert register values to normalized positions [0.0, 1.0]
-            // Protocol: 0 = bend/close, 255 = straight/open
-            // So normalized = (255 - raw) / 255.0
+            // Convert register values to radians (must match move_hand write path).
+            // Protocol raw: 0 = bend/close, 255 = straight/open
+            // normalized = (255 - raw) / 255, then rad = lower + normalized * (upper - lower)
             positions.reserve(JOINT_COUNT);
             for (size_t i = 0; i < JOINT_COUNT; ++i)
             {
-                // Each register contains one byte (0-255) in the low byte
-                uint8_t raw_pos = static_cast<uint8_t>(registers[i] & 0xFF);
-                // Convert to normalized [0.0, 1.0]: 0 (bend) -> 1.0, 255 (straight) -> 0.0
-                double normalized = (255.0 - static_cast<double>(raw_pos)) / 255.0;
-                normalized = std::clamp(normalized, 0.0, 1.0);
-                positions.push_back(normalized);
+                const uint8_t raw_pos = static_cast<uint8_t>(registers[i] & 0xFF);
+                const double normalized =
+                    std::clamp((255.0 - static_cast<double>(raw_pos)) / 255.0, 0.0, 1.0);
+
+                const std::string joint_name = getJointNameByIndex(i);
+                double lower = 0.0, upper = 1.0;
+                if (!getJointLimits(joint_name, lower, upper))
+                {
+                    RCLCPP_WARN(logger_,
+                                "LinkerHand %s: unknown joint '%s' at index %zu while reading; "
+                                "leaving normalized value",
+                                Traits::PRODUCT_NAME, joint_name.c_str(), i);
+                    positions.push_back(normalized);
+                    continue;
+                }
+                const double range = upper - lower;
+                const double radians =
+                    (range > 1e-6) ? (lower + normalized * range) : lower;
+                positions.push_back(radians);
             }
 
             if (pending_full_register_io_ && registers.size() >= expected_regs)
