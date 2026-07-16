@@ -18,7 +18,6 @@
 #include "hardware_interface/types/hardware_interface_type_values.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include <string>
-#include "geometry_msgs/msg/wrench_stamped.hpp"
 #include "gripper_hardware_common/ChangingtekGripper.h"
 #include "gripper_hardware_common/JodellGripper.h"
 #include "marvin_ros2_control/tool/grippers/changingtek/changingtek_gripper.h"
@@ -274,14 +273,6 @@ namespace marvin_ros2_control
                      [](const std::string& s, double def) { try { return std::stod(s); } catch (...) { return def; } });
         ensure_param("ft_warmup_timeout_ms", kwr75_defaults.warmup_timeout_ms, hw_find("ft_warmup_timeout_ms"),
                      [](const std::string& s, int def) { try { return std::stoi(s); } catch (...) { return def; } });
-        ensure_param("left_ft_frame_id", kwr75_defaults.left_frame_id, hw_find("left_ft_frame_id"),
-                     [](const std::string& s, const std::string& def) { (void)def; return s; });
-        ensure_param("right_ft_frame_id", kwr75_defaults.right_frame_id, hw_find("right_ft_frame_id"),
-                     [](const std::string& s, const std::string& def) { (void)def; return s; });
-        ensure_param("left_wrench_topic", kwr75_defaults.left_wrench_topic, hw_find("left_wrench_topic"),
-                     [](const std::string& s, const std::string& def) { (void)def; return s; });
-        ensure_param("right_wrench_topic", kwr75_defaults.right_wrench_topic, hw_find("right_wrench_topic"),
-                     [](const std::string& s, const std::string& def) { (void)def; return s; });
     }
     
     hardware_interface::CallbackReturn MarvinHardware::on_init(
@@ -305,49 +296,19 @@ namespace marvin_ros2_control
         // 先把 hardware_parameters 的初始值灌入并声明成 ROS2 参数（便于后续动态修改）
         declare_node_parameters();
 
-        // Virtual FT sensor inputs (wrench estimated elsewhere, published as WrenchStamped)
-        // These topics are optional; when not available, the FT state will stay at zeros.
+        // FT state interfaces: kwr75_485 fills HI from COM2; when disabled, zero.
         loadKwr75FtConfig();
 
         if (kwr75_ft_config_.enabled)
         {
-            left_wrench_pub_ = node_->create_publisher<geometry_msgs::msg::WrenchStamped>(
-                kwr75_ft_config_.left_wrench_topic, rclcpp::SystemDefaultsQoS());
-            right_wrench_pub_ = node_->create_publisher<geometry_msgs::msg::WrenchStamped>(
-                kwr75_ft_config_.right_wrench_topic, rclcpp::SystemDefaultsQoS());
-            const std::string pub_mode = kwr75_ft_config_.poll_interval_ms > 0
+            const std::string update_mode = kwr75_ft_config_.poll_interval_ms > 0
                 ? ("poll " + std::to_string(kwr75_ft_config_.poll_interval_ms) + "ms")
                 : "synced to ros2_control read()";
             RCLCPP_INFO(get_logger(),
-                        "KWR75 FT enabled: left/right channel=%ld/%ld, publish=%s",
+                        "KWR75 FT enabled: left/right channel=%ld/%ld, HI update=%s "
+                        "(no topic publish; use force_torque_sensor_broadcaster if needed)",
                         kwr75_ft_config_.left_channel, kwr75_ft_config_.right_channel,
-                        pub_mode.c_str());
-        }
-        else
-        {
-            const auto cb_left = [this](geometry_msgs::msg::WrenchStamped::SharedPtr msg) {
-                std::lock_guard<std::mutex> lock(wrench_mutex_);
-                left_ft_state_[0] = msg->wrench.force.x;
-                left_ft_state_[1] = msg->wrench.force.y;
-                left_ft_state_[2] = msg->wrench.force.z;
-                left_ft_state_[3] = msg->wrench.torque.x;
-                left_ft_state_[4] = msg->wrench.torque.y;
-                left_ft_state_[5] = msg->wrench.torque.z;
-            };
-            const auto cb_right = [this](geometry_msgs::msg::WrenchStamped::SharedPtr msg) {
-                std::lock_guard<std::mutex> lock(wrench_mutex_);
-                right_ft_state_[0] = msg->wrench.force.x;
-                right_ft_state_[1] = msg->wrench.force.y;
-                right_ft_state_[2] = msg->wrench.force.z;
-                right_ft_state_[3] = msg->wrench.torque.x;
-                right_ft_state_[4] = msg->wrench.torque.y;
-                right_ft_state_[5] = msg->wrench.torque.z;
-            };
-
-            left_wrench_sub_ = node_->create_subscription<geometry_msgs::msg::WrenchStamped>(
-                kwr75_ft_config_.left_wrench_topic, rclcpp::SystemDefaultsQoS(), cb_left);
-            right_wrench_sub_ = node_->create_subscription<geometry_msgs::msg::WrenchStamped>(
-                kwr75_ft_config_.right_wrench_topic, rclcpp::SystemDefaultsQoS(), cb_right);
+                        update_mode.c_str());
         }
         
         // Get the number of joints from the hardware info
@@ -2882,31 +2843,26 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             }
         }
 
-        // Export virtual FT sensor state interfaces for admittance_controller.
-        // NOTE:
-        // Some setups may not populate info_.sensors reliably even though URDF declares <sensor>.
-        // To avoid startup mismatch, we export a deterministic set based on arm configuration.
-        const auto add_ft_sensor_interfaces = [&state_interfaces](
-            const std::string& sensor_name, std::array<double, 6>& data)
+        // Export FT sensor state interfaces from URDF <sensor> declarations.
+        // Which sensors appear is controlled by the xacro (marvin_ft_sensor_interfaces
+        // macro) driven by robot.local.yaml. The C++ side just maps known names.
+        for (const auto& sensor : info_.sensors)
         {
+            std::array<double, 6>* data = nullptr;
+            if (sensor.name == "left_ft_sensor")
+                data = &left_ft_state_;
+            else if (sensor.name == "right_ft_sensor")
+                data = &right_ft_state_;
+            if (!data) continue;
+
             static const std::array<const char*, 6> kNames = {
                 "force.x", "force.y", "force.z", "torque.x", "torque.y", "torque.z"};
             for (size_t i = 0; i < kNames.size(); ++i)
             {
                 state_interfaces.push_back(
                     std::make_shared<hardware_interface::StateInterface>(
-                        sensor_name, kNames[i], &data[i]));
+                        sensor.name, kNames[i], &(*data)[i]));
             }
-        };
-
-        if (robot_arm_index_ == ARM_DUAL)
-        {
-            add_ft_sensor_interfaces("left_ft_sensor", left_ft_state_);
-            add_ft_sensor_interfaces("right_ft_sensor", right_ft_state_);
-        }
-        else
-        {
-            add_ft_sensor_interfaces("ft_sensor", single_ft_state_);
         }
         return state_interfaces;
     }
@@ -2968,21 +2924,10 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         {
             pollRs485InHardwareRead();
         }
-        // Stream mode default: publish at control rate; poll thread only when interval>0.
+        // Stream mode default: update FT HI at control rate; poll thread only when interval>0.
         if (kwr75_ft_config_.enabled && !kwr75UsesPollThread())
         {
-            publishKwr75SyncedToControl();
-        }
-
-        // For single-arm setups, mirror the corresponding side into ft_sensor.
-        // This keeps the semantic-component interfaces stable regardless of arm configuration.
-        {
-            std::lock_guard<std::mutex> lock(wrench_mutex_);
-            if (robot_arm_index_ == ARM_LEFT) {
-                single_ft_state_ = left_ft_state_;
-            } else if (robot_arm_index_ == ARM_RIGHT) {
-                single_ft_state_ = right_ft_state_;
-            }
+            updateKwr75StateInterfaces();
         }
 
         return hardware_interface::return_type::OK;
@@ -3780,14 +3725,6 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         kwr75_ft_config_.gravity = get_node_param("ft_gravity", kwr75_ft_config_.gravity);
         kwr75_ft_config_.warmup_timeout_ms =
             get_node_param("ft_warmup_timeout_ms", kwr75_ft_config_.warmup_timeout_ms);
-        kwr75_ft_config_.left_frame_id =
-            get_node_param<std::string>("left_ft_frame_id", kwr75_ft_config_.left_frame_id);
-        kwr75_ft_config_.right_frame_id =
-            get_node_param<std::string>("right_ft_frame_id", kwr75_ft_config_.right_frame_id);
-        kwr75_ft_config_.left_wrench_topic =
-            get_node_param<std::string>("left_wrench_topic", kwr75_ft_config_.left_wrench_topic);
-        kwr75_ft_config_.right_wrench_topic =
-            get_node_param<std::string>("right_wrench_topic", kwr75_ft_config_.right_wrench_topic);
     }
 
     void MarvinHardware::startKwr75FtThreads()
@@ -3843,8 +3780,8 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
 
     void MarvinHardware::applyKwr75Wrench(int arm_index, const std::array<double, 6>& wrench)
     {
-        const bool is_left = (arm_index == ARM_LEFT);
-        if (is_left)
+        std::lock_guard<std::mutex> lock(ft_state_mutex_);
+        if (arm_index == ARM_LEFT)
         {
             left_ft_state_ = wrench;
         }
@@ -3852,26 +3789,11 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         {
             right_ft_state_ = wrench;
         }
-
-        auto pub = is_left ? left_wrench_pub_ : right_wrench_pub_;
-        if (pub)
-        {
-            geometry_msgs::msg::WrenchStamped msg;
-            msg.header.stamp = node_->now();
-            msg.header.frame_id = is_left ? kwr75_ft_config_.left_frame_id : kwr75_ft_config_.right_frame_id;
-            msg.wrench.force.x = wrench[0];
-            msg.wrench.force.y = wrench[1];
-            msg.wrench.force.z = wrench[2];
-            msg.wrench.torque.x = wrench[3];
-            msg.wrench.torque.y = wrench[4];
-            msg.wrench.torque.z = wrench[5];
-            pub->publish(msg);
-        }
     }
 
-    void MarvinHardware::publishKwr75SyncedToControl()
+    void MarvinHardware::updateKwr75StateInterfaces()
     {
-        auto publish_side = [this](bool left, int arm_index) {
+        auto update_side = [this](bool left, int arm_index) {
             const bool side_on = left ? kwr75_ft_config_.left_enabled : kwr75_ft_config_.right_enabled;
             if (!side_on)
             {
@@ -3879,27 +3801,23 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             }
             auto& slot = left ? left_kwr75_sample_ : right_kwr75_sample_;
             std::array<float, Kwr75Protocol::kAxisCount> raw {};
-            if (slot.tryConsume(raw))
+            if (!slot.tryConsume(raw))
             {
-                std::array<double, Kwr75Protocol::kAxisCount> wrench {};
-                Kwr75Protocol::rawToSi(
-                    raw, wrench, kwr75_ft_config_.convert_to_si, kwr75_ft_config_.gravity);
-                applyKwr75Wrench(arm_index, wrench);
                 return;
             }
-            if (slot.has_any.load(std::memory_order_acquire))
-            {
-                applyKwr75Wrench(arm_index, left ? left_ft_state_ : right_ft_state_);
-            }
+            std::array<double, Kwr75Protocol::kAxisCount> wrench {};
+            Kwr75Protocol::rawToSi(
+                raw, wrench, kwr75_ft_config_.convert_to_si, kwr75_ft_config_.gravity);
+            applyKwr75Wrench(arm_index, wrench);
         };
 
         if (robot_arm_index_ == ARM_LEFT || robot_arm_index_ == ARM_DUAL)
         {
-            publish_side(true, ARM_LEFT);
+            update_side(true, ARM_LEFT);
         }
         if (robot_arm_index_ == ARM_RIGHT || robot_arm_index_ == ARM_DUAL)
         {
-            publish_side(false, ARM_RIGHT);
+            update_side(false, ARM_RIGHT);
         }
     }
 
@@ -3920,18 +3838,18 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         if (client.warmup())
         {
             RCLCPP_INFO(get_logger(),
-                        "KWR75 ready on %s COM2 (ch=%ld, cmd=0x%02X, %s)",
+                        "KWR75 ready on %s COM2 (ch=%ld, cmd=0x%02X, %s → FT state interfaces)",
                         side_label, ft_channel, kwr75_ft_config_.command_code,
                         kwr75UsesPollThread() ? "poll thread" : "synced to control");
         }
         else
         {
             RCLCPP_WARN(get_logger(),
-                        "KWR75 warmup pending on %s COM2 (ch=%ld); publishing when frames arrive",
+                        "KWR75 warmup pending on %s COM2 (ch=%ld); HI updated when frames arrive",
                         side_label, ft_channel);
         }
 
-        // Default: only start stream (0x48); publish happens in read().
+        // Default: only start stream (0x48); HI update happens in read().
         if (!kwr75UsesPollThread())
         {
             while (kwr75_ft_running_.load() && hardware_connected_)
@@ -3942,8 +3860,6 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         }
 
         const int interval_ms = std::max(1, kwr75_ft_config_.poll_interval_ms);
-        std::array<double, Kwr75Protocol::kAxisCount> last_wrench {};
-        bool have_wrench = false;
 
         while (kwr75_ft_running_.load() && hardware_connected_)
         {
@@ -3956,12 +3872,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                 : client.takeWrench(wrench);
             if (got_new)
             {
-                last_wrench = wrench;
-                have_wrench = true;
-            }
-            if (have_wrench)
-            {
-                applyKwr75Wrench(arm_index, last_wrench);
+                applyKwr75Wrench(arm_index, wrench);
             }
             std::this_thread::sleep_until(cycle_end);
         }

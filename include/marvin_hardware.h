@@ -22,7 +22,7 @@
 #include "rclcpp/rclcpp.hpp"
 #include "std_msgs/msg/int64.hpp"
 #include "std_msgs/msg/int32.hpp"
-#include "geometry_msgs/msg/wrench_stamped.hpp"
+
 // SDK include chain (Robot.h → TCPFileClient.h → FileOP.h) leaves #pragma pack(4) active
 // without pop, shrinking sizeof() for all types below in this TU vs gripper .cpp files.
 #include "MarvinSDK.h"
@@ -111,15 +111,12 @@ private:
         // 复用的写入缓存（避免在 write() 控制回路中频繁分配/扩容导致抖动）
         std::vector<double> hw_commands_deg_buffer_;
 
-        // Virtual FT sensor state (filled from external wrench topic)
-        rclcpp::Subscription<geometry_msgs::msg::WrenchStamped>::SharedPtr left_wrench_sub_;
-        rclcpp::Subscription<geometry_msgs::msg::WrenchStamped>::SharedPtr right_wrench_sub_;
-        rclcpp::Publisher<geometry_msgs::msg::WrenchStamped>::SharedPtr left_wrench_pub_;
-        rclcpp::Publisher<geometry_msgs::msg::WrenchStamped>::SharedPtr right_wrench_pub_;
-        std::mutex wrench_mutex_;
+        // FT sensor state interfaces (left_ft_sensor / right_ft_sensor).
+        // Exported only when URDF declares <sensor>=left_ft_sensor or right_ft_sensor
+        // (driven by xacro marvin_ft_sensor_interfaces from robot.local.yaml).
+        std::mutex ft_state_mutex_;
         std::array<double, 6> left_ft_state_{};
         std::array<double, 6> right_ft_state_{};
-        std::array<double, 6> single_ft_state_{};  // used for single-arm configs
         Kwr75FtConfig kwr75_ft_config_;
         Kwr75LockFreeSample left_kwr75_sample_{};
         Kwr75LockFreeSample right_kwr75_sample_{};
@@ -131,9 +128,10 @@ private:
         void startKwr75FtThreads();
         void stopKwr75FtThreads();
         void kwr75FtThread(int arm_index);
+        /** Write wrench into exported FT state interfaces only (no topic publish). */
         void applyKwr75Wrench(int arm_index, const std::array<double, 6>& wrench);
-        /** When ft_poll_interval_ms<=0: publish latest FT sample each read() cycle. */
-        void publishKwr75SyncedToControl();
+        /** When ft_poll_interval_ms<=0: update FT HI from latest COM2 sample each read(). */
+        void updateKwr75StateInterfaces();
         bool kwr75UsesPollThread() const { return kwr75_ft_config_.poll_interval_ms > 0; }
 
         // Joint limits from URDF

@@ -157,17 +157,12 @@ namespace marvin_ros2_control
         bool right_enabled = false;
         long left_channel = KWR75_FT_CHANNEL;
         long right_channel = KWR75_FT_CHANNEL;
-        /** 0 = publish in hardware read() at ros2_control rate; >0 = dedicated poll thread. */
+        /** 0 = update FT state interfaces in hardware read(); >0 = dedicated poll thread. */
         int poll_interval_ms = 0;
         uint8_t command_code = 0x48;
         bool convert_to_si = true;
         double gravity = 9.80665;
         int warmup_timeout_ms = 500;
-        std::string left_frame_id = "left_eef";
-        std::string right_frame_id = "right_eef";
-        std::string left_wrench_topic = "/left_arm_external_wrench";
-        std::string right_wrench_topic = "/right_arm_external_wrench";
-
         static Kwr75FtConfig defaults() { return Kwr75FtConfig{}; }
     };
 }  // namespace marvin_ros2_control
