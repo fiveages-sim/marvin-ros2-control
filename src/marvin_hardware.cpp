@@ -540,13 +540,27 @@ namespace marvin_ros2_control
         {
             return 0;
         }
-        std::string name_lower = gripper_joint_name_[k];
+        const std::string& joint_name = gripper_joint_name_[k];
+        std::string name_lower = joint_name;
         std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
-        if (tool_type_ == ToolType::Hand)
+
+        // URDF 关节名的左右侧信息优先于工具类型识别。手型的 mapJointNameToIndex()
+        // 只识别手指名称、不识别侧别，不能让左手抢占右侧工具关节。
+        if (name_lower.rfind("right_", 0) == 0)
+            return 1u;
+        if (name_lower.rfind("left_", 0) == 0)
+            return 0u;
+
+        // 兼容不带左右前缀的旧模型：由手型识别关节，单工具则返回实际槽位。
+        for (size_t ti = 0; ti < toolCount(); ++ti)
         {
-            return (toolCount() >= 2 && name_lower.find("right_hand_") != std::string::npos) ? 1u : 0u;
+            if (!toolAt(ti) || !toolIsHand(ti))
+                continue;
+            auto* hand = dynamic_cast<const marvin_ros2_control::ModbusHand*>(toolAt(ti));
+            if (hand && hand->mapJointNameToIndex(joint_name) >= 0)
+                return ti;
         }
-        return (name_lower.find("right") != std::string::npos) ? 1u : 0u;
+        return toolAt(0) ? 0u : 1u;
     }
 
     bool MarvinHardware::gripperJointBelongsToTool(size_t k, size_t tool_idx) const
@@ -2542,17 +2556,13 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         if (!hand)
             return;
 
-        const size_t tool_n = toolCount();
         const size_t n = std::min(gripper_joint_name_.size(),
                                   std::min(gripper_effort_command_.size(),
                                            gripper_velocity_command_.size()));
         const size_t dof = hand->getJointCount();
         for (size_t gi = 0; gi < n; ++gi)
         {
-            std::string name_lower = gripper_joint_name_[gi];
-            std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
-            const size_t mapped_tool = (tool_n >= 2 && name_lower.find("right_hand_") != std::string::npos) ? 1 : 0;
-            if (mapped_tool != tool_idx)
+            if (!gripperJointBelongsToTool(gi, tool_idx))
                 continue;
 
             const int li = hand->mapJointNameToIndex(gripper_joint_name_[gi]);
