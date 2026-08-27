@@ -42,11 +42,9 @@ namespace marvin_ros2_control
             return value;
         }
 
-        static bool isExactFrameRead(long received, long rx_channel, long want_channel)
-        {
-            return received == static_cast<long>(kFrameLength) && rx_channel == want_channel;
-        }
-
+        /**
+         * Wire low-byte-first; direct memcpy on LE host (e.g. B0751CC1 -> float 0xC11C75B0).
+         */
         static bool tryParseCompleteFrame(
             const uint8_t* data,
             std::size_t data_size,

@@ -9,6 +9,7 @@
 #include <array>
 #include <atomic>
 #include <mutex>
+#include <condition_variable>
 #include <chrono>
 #include <cstdint>
 
@@ -85,10 +86,63 @@ private:
         int device_port_ = 8080;
         std::string robot_arm_config_;  // "LEFT", "RIGHT", "DUAL"
         int robot_arm_index_ = 0;       // 0=LEFT, 1=RIGHT, 2=DUAL (在初始化时设定)
-        std::string robot_ctrl_mode_;   // "POSITION", "JOINT_IMPEDANCE", "CART_IMPEDANCE", "POWER_OFF"
+        std::string robot_ctrl_mode_;   // "POSITION", "JOINT_IMPEDANCE", "CART_IMPEDANCE", "POWER_OFF", "PD"
         std::string last_active_ctrl_mode_ = "POSITION";
         int previous_message_frame_ = 0;
         DCSS frame_data_;
+
+        // OnClearSet false 暂时只计数并跳过本周期，不触发硬件错误；成功后清零并报告。
+        std::uint64_t clear_set_consecutive_false_count_ = 0;
+        // OnSetSend 连续失败仍保留阈值保护。
+        int main_frame_submit_failure_count_ = 0;
+        static constexpr int kMainFrameBusyFatalThreshold = 10;
+
+        // --- SDK 单线程访问约束 ---
+        // 底层 SDK 的 clear/send（主帧槽）与通道发送要求单线程串行访问。因此所有 SDK
+        // 请求（机械臂主帧、工具控制/状态读取、KWR75 轮询）一律收拢到控制线程 write()
+        // 按优先级每周期发送；其它线程（参数回调、生命周期）只置"待执行动作"，由 write()
+        // 执行。sdk_access_mutex_ 用于 write() 的 SDK 段与生命周期兜底直发之间互斥
+        // （write() 已停转的极端场景），保证 SDK 永不被并发访问。
+        std::mutex sdk_access_mutex_;
+
+        // 待执行的主帧动作（同一时刻至多一个；write() 每周期执行一步）
+        enum class PendingArmActionKind : std::uint8_t
+        {
+            kNone = 0,
+            kBrake,          // paramCallback：松闸/抱闸（仅在 POWER_OFF 模式允许）
+            kPowerOff,       // on_deactivate：目标状态置 0（下使能）
+            kEmergencyStop,  // on_error/on_shutdown：抱闸 + 目标状态置 0
+        };
+        struct PendingArmAction
+        {
+            PendingArmActionKind kind = PendingArmActionKind::kNone;
+            bool left = false;          // 是否更新左臂
+            bool right = false;         // 是否更新右臂
+            bool brake_release = false; // kBrake：true=松闸(2)，false=抱闸(1)
+            int step = 0;               // 已执行步数
+            int total_steps = 0;        // 总步数（达此值即完成）
+        };
+        std::mutex pending_action_mutex_;
+        std::condition_variable pending_action_cv_;
+        PendingArmAction pending_action_;
+
+        // write() 每周期执行一步待执行动作；返回 true 表示本周期主帧已被动作占用。
+        bool tryExecutePendingActionStep();
+        // 动作类型可读名（日志用）。
+        static const char* pendingActionKindName(PendingArmActionKind k);
+        // 其它线程请求执行动作；完成后通过 cv 通知。
+        void requestPendingAction(PendingArmAction action);
+        // 等待动作完成（wait_ms 超时返回 false，调用方据此走兜底直发）。
+        bool waitPendingActionDone(int wait_ms);
+        // 兜底：write() 未运行时直接串行执行全部步骤（需先获取 sdk_access_mutex_）。
+        void executePendingActionDirect(PendingArmAction action);
+        // 单步执行 kEmergencyStop 中"按需抱闸"（OnGetIntPara 检查 + 发送）。
+        void engageBrakeIfNeeded(int arm_index);
+
+        // KWR75 轮询线程模式的发送收拢：线程只置挂起标志，由 write() 代为发送。
+        std::atomic<bool> kwr75_poll_pending_left_{false};
+        std::atomic<bool> kwr75_poll_pending_right_{false};
+        void sendPendingKwr75Polls();
 
         // Control parameters
         // 这些成员变量是 ROS2 参数的缓存值，命名与参数保持一致，减少歧义
@@ -252,7 +306,7 @@ private:
         std::array<size_t, kMaxTools> hand_stable_count_{};
         std::array<bool, kMaxTools> hand_stabilized_{};
         std::vector<std::thread> gripper_ctrl_threads_;
-        /** If true, async send threads; OnGetChData runs in hardware read(). */
+        /** If true, tool send runs in write(); OnGetChData runs in hardware read(). */
         bool use_async_tool_comm_ = true;
         /** If true, initialize end-effector (hand/gripper) on activate. If false, skip tool initialize/reads/threads. */
         bool init_tool_on_startup_ = true;
@@ -261,6 +315,24 @@ private:
         std::array<std::atomic<std::int64_t>, kMaxTools> tool_hb_tx_ms_{};
         std::array<std::atomic<std::int64_t>, kMaxTools> tool_hb_last_rx_ms_{};
         std::array<std::atomic<bool>, kMaxTools> tool_hb_offline_reported_{};
+        std::array<std::atomic<std::int64_t>, kMaxTools> tool_sent_at_ms_{};  // 最近一次发送时刻（超时判定用）
+
+        // --- write() 时间门控调度（工具发送并入主控制循环，无锁单发送方） ---
+        // 机械臂主帧每次 write() 提交；工具通道由 43 版 SDK 独立发送。
+        // 频率由参数显式配置（tool_ctrl_rate/tool_read_rate/tool_hb_rate），
+        // 时间门控天然适配任何主循环频率（yaml update_rate 可为 100/250/500/1000Hz）。
+        double tool_ctrl_rate_ = 10.0;   // 工具控制指令频率 Hz
+        double tool_read_rate_ = 50.0;   // 工具读请求频率 Hz
+        double tool_hb_rate_ = 0.1;      // 心跳频率 Hz
+        std::chrono::steady_clock::duration tool_ctrl_interval_{};
+        std::chrono::steady_clock::duration tool_read_interval_{};
+        std::chrono::steady_clock::duration tool_hb_interval_{};
+        std::chrono::steady_clock::time_point last_tool_ctrl_tx_{};
+        std::chrono::steady_clock::time_point last_tool_read_tx_{};
+        std::chrono::steady_clock::time_point last_tool_hb_tx_{};
+        std::chrono::steady_clock::time_point last_rs485_rx_poll_{};
+        static constexpr std::chrono::milliseconds kRs485RxInterval{10};  // 100 Hz
+        static constexpr std::int64_t kToolReplyTimeoutMs = 200;  // 工具写/读响应超时窗口（发送后 200ms 未响应）
 
         // --- Async per-cycle request/response pairing & timeout accounting ---
         // Fully decoupled design: sender thread only marks a frame pending; hardware
@@ -275,19 +347,29 @@ private:
         std::array<std::uint64_t, kMaxTools> tool_last_reported_timeout_{};
         std::array<std::chrono::steady_clock::time_point, kMaxTools> tool_last_summary_tp_{};
 
+        // 工具通道通信调试日志开关（ros2 param tool_debug_log，默认关闭）。
+        // 开启后打印 pending/read_gate/RX valid|invalid/rx_drop 等工具帧级日志，便于排查。
+        std::atomic<bool> tool_debug_log_{false};
+
         void tool_callback_for_tool(size_t tool_idx);
         /** Async: send-only (getStatus/move); replies observed in hardware read(). */
         void tool_callback_for_tool_async(size_t tool_idx);
         /** Sole OnGetChData path: COM1 tools + COM2 KWR75, called from read(). */
         void pollRs485InHardwareRead();
         void dispatchToolCom1Frame(size_t tool_idx, const unsigned char* data, long received);
-        void ingestKwr75Com2Frame(bool left_arm, const unsigned char* data, long received, long rx_channel);
+        void ingestKwr75Com2Frame(bool left_arm, const unsigned char* data, long received);
         /** Read once from channel, copy to data_buf, return byte count or 0. */
         long receiveToolResponse(unsigned char* data_buf, size_t buf_size, GetChDataFunc get_ch_data, long channel);
-        void processToolResponse(const unsigned char* data_buf, size_t size, size_t gripper_idx);
+        /** Parse one complete tool frame; false means discard it. */
+        bool processToolResponse(const unsigned char* data_buf, size_t size, size_t gripper_idx);
         bool isToolStateCloseToCommand(size_t tool_idx, double threshold);
         /** True if tool is stopped (hand: at command and stabilized; gripper: at target and stopped). */
         bool isToolStopped(size_t tool_idx);
+        /**
+         * 计数器调度：在 write() 中向 SDK 的独立工具通道提交一条指令。
+         * 优先级：① 控制工具指令 > ② 获取状态指令(50Hz) > ③ 心跳。
+         */
+        void sendToolCommandOnce(size_t tool_idx, bool ctrl_due, bool read_due, bool hb_due);
         /** Sync read: one getStatus(), wait elapsed_time_for_poll ms, then read and parse. */
         bool readToolStatusSync(size_t tool_idx, int elapsed_time_for_poll);
         /** Hand init: accept current speed/force commands as acknowledged to avoid a startup write. */

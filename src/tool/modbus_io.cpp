@@ -364,6 +364,15 @@ namespace marvin_ros2_control
         {
             RCLCPP_WARN(logger_, "Send failed channel=%ld size=%zu: %s", channel_, request.size(), debug_str);
         }
+        else if (request.size() >= 2 &&
+                 (request[1] == 0x10 || request[1] == 0x06))
+        {
+            // 事件型诊断：只记录写指令，不打印 50Hz 状态读取请求。
+            // 这里的 accepted 表示 OnSetChData 已成功占用 SDK 通道发送槽。
+            RCLCPP_INFO(logger_,
+                        "Modbus TX accepted: channel=%ld slave=0x%02X fc=0x%02X size=%zu frame=[%s]",
+                        channel_, request[0], request[1], request.size(), debug_str);
+        }
         else if (isDebugEnabled())
         {
             RCLCPP_DEBUG(logger_, "Sent channel=%ld result=true", channel_);

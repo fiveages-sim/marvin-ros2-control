@@ -49,6 +49,7 @@ SDK_ROOT = _resolve_sdk_root()
 if SDK_ROOT not in sys.path:
     sys.path.insert(0, SDK_ROOT)
 
+
 from SDK_PYTHON.fx_kine import Marvin_Kine  # noqa: E402
 from SDK_PYTHON.fx_robot import Marvin_Robot, DCSS  # noqa: E402
 
@@ -74,7 +75,7 @@ def _max_abs_joint_error_deg(fb_joints, target_joints) -> float:
 def _resolve_ccs_paths(arm: str):
     """根据选择的手臂（A 左 / B 右）解析 CCS 示例路径。"""
     # PVT/配置文件从 SDK 安装目录读取；采集数据写入当前工作目录（可写）。
-    base_template = os.path.join(SDK_ROOT, "DEMO_PYTHON", "LoadData_ccs_right", "LoadData")
+    base_template = os.path.join(SDK_ROOT, "CommonConfig", "LoadData_ccs", "LoadData")
     side = "Left" if arm == "A" else "Right"
     pvt_file = os.path.join(base_template, "IdenTraj", f"LoadIdenTraj_MarvinCCS_{side}.fmv")
 
@@ -287,88 +288,27 @@ def collect_identy_data(
     logger.info(f"设置 PVT 轨迹文件: {pvt_file}, PVT id: {pvt_id}")
     time.sleep(0.5)
 
-    cols = 15
-    if arm == "A":
-        target_ids = [
-            0,
-            1,
-            2,
-            3,
-            4,
-            5,
-            6,
-            50,
-            51,
-            52,
-            53,
-            54,
-            55,
-            56,
-            76,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-        ]
-    elif arm == "B":
-        target_ids = [
-            100,
-            101,
-            102,
-            103,
-            104,
-            105,
-            106,
-            150,
-            151,
-            152,
-            153,
-            154,
-            155,
-            156,
-            176,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-        ]
-    else:
+    # 采集数据列布局：关节角(7) + 关节电流(7) + 时间标签(1)。
+    # 时间标签索引随 SDK 版本变化：43 版(100343007 之后)为 66，以前为 76；
+    # B 臂整体 +100。见 DEMO_PYTHON/showcase_identy_tool_dynamic_CCS_B.py。
+    try:
+        sdk_version = robot.SDK_version()
+    except Exception:
+        sdk_version = 0
+    tag_idx = 66 if sdk_version > 100343007 else 76
+    logger.info(f"SDK 版本={sdk_version}，采集时间标签索引={tag_idx}")
+
+    base = 0 if arm == "A" else 100
+    target_ids = (
+        [base + i for i in range(7)]
+        + [base + 50 + i for i in range(7)]
+        + [base + tag_idx]
+        + [0] * 21
+    )
+    if arm not in ("A", "B"):
         raise ValueError("arm must be A or B")
 
+    cols = 15
     rows = 1000000
     robot.clear_set()
     robot.collect_data(targetNum=cols, targetID=target_ids, recordNum=rows)
@@ -502,6 +442,9 @@ def run_wizard():
     logger.info("[步骤] 开始工具动力学参数辨识")
     kk = Marvin_Kine()
     tool_dynamic_parameters = kk.identify_tool_dyn(robot_type=1, ipath=base)
+    if isinstance(tool_dynamic_parameters, str):
+        logger.error(f"辨识失败: {tool_dynamic_parameters}")
+        raise RuntimeError(f"辨识失败: {tool_dynamic_parameters}")
     logger.info(f"[结果] 工具动力学参数 (m,mx,my,mz,ixx,ixy,ixz,iyy,iyz,izz): {tool_dynamic_parameters}")
     print("\n=== 辨识结果 ===")
     print(tool_dynamic_parameters)

@@ -43,11 +43,30 @@ namespace marvin_ros2_control
         return result;
     }
 
+    static bool rateDue(
+        const std::chrono::steady_clock::time_point now,
+        std::chrono::steady_clock::time_point& last,
+        const std::chrono::steady_clock::duration interval)
+    {
+        if (last.time_since_epoch().count() == 0)
+        {
+            last = now;
+            return true;
+        }
+        if (now - last < interval)
+            return false;
+        last = (now - last >= interval * 2) ? now : last + interval;
+        return true;
+    }
+
     // 默认参数（单一来源）：同时用于 declare_node_parameters / on_init / applyRobotConfiguration
     static const std::vector<double> kDefaultJointKGains = {2.0, 2.0, 2.0, 1.6, 1.0, 1.0, 1.0};
     static const std::vector<double> kDefaultJointDGains = {0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4};
     static const std::vector<double> kDefaultCartKGains  = {1800.0, 1800.0, 1800.0, 40.0, 40.0, 40.0, 20.0};
     static const std::vector<double> kDefaultCartDGains  = {0.6, 0.6, 0.6, 0.4, 0.4, 0.4, 0.4};
+    // PD 模式（关节阻抗+速度前馈）推荐增益：刚度 N·m/deg 常用值，阻尼系数 0.3×7
+    static const std::vector<double> kDefaultPDKGains = {14.0, 14.0, 14.0, 10.5, 5.6, 5.6, 5.6};
+    static const std::vector<double> kDefaultPDDGains = {0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3};
 
     static const std::vector<double> kDefaultLeftKineParam  = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
     static const std::vector<double> kDefaultLeftDynParam   = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
@@ -63,6 +82,7 @@ namespace marvin_ros2_control
         if (normalized == "JOINT_IMPEDANCE") return 2;
         if (normalized == "CART_IMPEDANCE") return 3;
         if (normalized == "POWER_OFF") return 4;
+        if (normalized == "PD") return 5;   // PD：关节阻抗 + 速度前馈（极低延时跟踪，遥操场景）
         RCLCPP_WARN(logger, "Invalid ctrl_mode value: %s, defaulting to POSITION", ctrl_mode_raw.c_str());
         return 1;
     }
@@ -74,6 +94,7 @@ namespace marvin_ros2_control
             case 2: return "JOINT_IMPEDANCE";
             case 3: return "CART_IMPEDANCE";
             case 4: return "POWER_OFF";
+            case 5: return "PD";
             default: return "POSITION";
         }
     }
@@ -203,6 +224,8 @@ namespace marvin_ros2_control
                      [](const std::string& s, const std::string& def) { (void)def; return s; });
         ensure_param("device_port", 8080, hw_find("device_port"),
                      [](const std::string& s, int def) { try { return std::stoi(s); } catch (...) { return def; } });
+        // 工具通道通信调试日志开关（默认关闭；开启后打印工具帧级日志）
+        ensure_param("tool_debug_log", false, hw_find("tool_debug_log"), parseBoolLoose);
 
         // Robot operation mode: "POSITION", "JOINT_IMPEDANCE", "CART_IMPEDANCE"
         ensure_param("ctrl_mode", std::string("POSITION"), hw_find("ctrl_mode"),
@@ -221,6 +244,12 @@ namespace marvin_ros2_control
         // Cartesian impedance type
         ensure_param("cart_type", 2, hw_find("cart_type"),
                      [](const std::string& s, int def) { try { return std::stoi(s); } catch (...) { return def; } });
+        // PD mode K/D gains (7 values, N·m/deg；常用推荐值见 kDefaultPDKGains/kDefaultPDDGains)
+        ensure_double_array_sized("pd_k_gains", kDefaultPDKGains, 7);
+        ensure_double_array_sized("pd_d_gains", kDefaultPDDGains, 7);
+        // PD 速度前馈周期 ms：0~20（<1 不添加前馈；建议 5）
+        ensure_param("pd_control_period_ms", 5, hw_find("pd_control_period_ms"),
+                     [](const std::string& s, int def) { try { return std::clamp(std::stoi(s), 0, 20); } catch (...) { return def; } });
         // Joint speed and acceleration limits
         ensure_param("max_joint_speed", 10.0, hw_find("max_joint_speed"),
                      [](const std::string& s, double def) { try { return std::stod(s); } catch (...) { return def; } });
@@ -295,6 +324,7 @@ namespace marvin_ros2_control
 
         // 先把 hardware_parameters 的初始值灌入并声明成 ROS2 参数（便于后续动态修改）
         declare_node_parameters();
+        tool_debug_log_.store(get_node_param("tool_debug_log", false));
 
         // FT state interfaces: kwr75_485 fills HI from COM2; when disabled, zero.
         loadKwr75FtConfig();
@@ -368,6 +398,20 @@ namespace marvin_ros2_control
         init_tool_on_startup_ = get_node_param("init_tool_on_startup", true);
 
         RCLCPP_INFO(get_logger(), "init_tool_on_startup: %s", init_tool_on_startup_ ? "true" : "false");
+
+        // 工具发送频率参数（时间门控，不依赖主循环 update_rate；yaml 可配置 100/250/500Hz 等）
+        tool_ctrl_rate_ = get_node_param("tool_ctrl_rate", 10.0);
+        tool_read_rate_ = get_node_param("tool_read_rate", 50.0);
+        tool_hb_rate_ = get_node_param("tool_hb_rate", 0.1);
+        const auto to_interval = [](double rate_hz) {
+            return std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                std::chrono::duration<double>(1.0 / std::max(0.001, rate_hz)));
+        };
+        tool_ctrl_interval_ = to_interval(tool_ctrl_rate_);
+        tool_read_interval_ = to_interval(tool_read_rate_);
+        tool_hb_interval_ = to_interval(tool_hb_rate_);
+        RCLCPP_INFO(get_logger(), "Tool rates: ctrl=%.1fHz, request=%.1fHz, receive=100Hz, hb=%.1fHz",
+                    tool_ctrl_rate_, tool_read_rate_, tool_hb_rate_);
 
         // 获取硬件连接参数
         device_ip_ = get_node_param("device_ip", std::string("192.168.1.190"));
@@ -680,6 +724,13 @@ MarvinHardware::paramCallback(const std::vector<rclcpp::Parameter> & params)
             continue;
         }
 
+        if (pname == "tool_debug_log") {
+            tool_debug_log_.store(param.as_bool());
+            RCLCPP_INFO(get_logger(), "tool_debug_log set to %s (工具通道通信调试日志)",
+                        param.as_bool() ? "ON" : "OFF");
+            continue;
+        }
+
         if (param.get_name() == "left_brake_release" || param.get_name() == "right_brake_release") {
             if (!hardware_connected_) {
                 result.successful = false;
@@ -706,22 +757,23 @@ MarvinHardware::paramCallback(const std::vector<rclcpp::Parameter> & params)
             }
 
             const bool release = param.as_bool();
-            const long sdk_value = release ? 2 : 1;  // 2=松闸, 1=抱闸
-            const int arm_index = is_left ? ARM_LEFT : ARM_RIGHT;
-            char name[30] = "";
-            std::snprintf(name, sizeof(name), "BRAK%d", arm_index);
+            // 刹车请求收拢到 write() 单线程执行（SDK clear/send 单线程要求）。
+            // 若控制循环未运行（无活动控制器），等待超时后兜底直发。
+            PendingArmAction action;
+            action.kind = PendingArmActionKind::kBrake;
+            action.left = is_left;
+            action.right = !is_left;
+            action.brake_release = release;
+            action.total_steps = 1;
 
-            OnClearSet();
-            if (release) {
-                if (is_left) OnSetTargetState_A(0);
-                else OnSetTargetState_B(0);
+            requestPendingAction(action);
+            if (!waitPendingActionDone(500))
+            {
+                RCLCPP_WARN(get_logger(),
+                            "%s arm brake: control loop not running, direct send fallback",
+                            is_left ? "Left" : "Right");
+                executePendingActionDirect(action);
             }
-            OnSetIntPara(name, sdk_value);
-            OnSetSend();
-            usleep(100000);
-
-            if (is_left) left_brake_released_ = release;
-            else right_brake_released_ = release;
 
             RCLCPP_INFO(get_logger(), "%s arm brake: %s",
                         is_left ? "Left" : "Right",
@@ -1065,6 +1117,56 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             usleep(100000);
         }
         RCLCPP_INFO(get_logger(), "Set to POWER_OFF mode (左右臂下使能)");
+    } else if (mode == 5) {
+        // PD 模式：关节阻抗 + 速度前馈（极低延时跟踪，主要适用于遥操场景）
+        // 前置条件：控制器 robot.ini 中 JointPIDCtlType=1；关节轨迹速度 ≤180°/s
+        const auto pd_k = get_node_param("pd_k_gains", kDefaultPDKGains);
+        const auto pd_d = get_node_param("pd_d_gains", kDefaultPDDGains);
+        const std::vector<double>& final_pd_k = (pd_k.size() == 7) ? pd_k : kDefaultPDKGains;
+        const std::vector<double>& final_pd_d = (pd_d.size() == 7) ? pd_d : kDefaultPDDGains;
+        const long pd_step = static_cast<long>(get_node_param("pd_control_period_ms", 5));
+
+        double K[7], D[7];
+        for (int i = 0; i < 7; i++) { K[i] = final_pd_k[i]; D[i] = final_pd_d[i]; }
+
+        // 切换关节阻抗：速度/加速度设为最大（100，以免限制轨迹），设置刚度阻尼参数
+        OnClearSet();
+        if (update_left) {
+            OnSetJointLmt_A(100, 100);
+            OnSetJointKD_A(K, D);
+            OnSetTargetState_A(3);   // Torque 模式
+            OnSetImpType_A(1);       // 关节阻抗
+        }
+        if (update_right) {
+            OnSetJointLmt_B(100, 100);
+            OnSetJointKD_B(K, D);
+            OnSetTargetState_B(3);
+            OnSetImpType_B(1);
+        }
+        send_and_sleep();
+
+        // 开启 PD 速度前馈：step 为轨迹发送周期(ms)，0~20，<1 则不添加前馈（建议 5ms）
+        // 仅 43 版及以上 SDK（SDK100343）提供 FX_OnSetVelEstStep；旧版退化为纯关节阻抗
+#if SDK_VERSION >= 100343
+        const char* pd_fb_suffix = "";
+        OnClearSet();
+        if (update_left) {
+            FX_OnSetVelEstStep('A', pd_step);
+        }
+        if (update_right) {
+            FX_OnSetVelEstStep('B', pd_step);
+        }
+        OnSetSend();
+        usleep(200000);
+#else
+        const char* pd_fb_suffix = " (SDK<100343: vel feedforward unsupported, joint impedance only)";
+#endif
+
+        RCLCPP_INFO(get_logger(),
+                    "Set to PD mode (joint impedance + vel feedforward): K=[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f], "
+                    "D=[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f], velest_step=%ldms, speed/acc=100%s",
+                    K[0], K[1], K[2], K[3], K[4], K[5], K[6],
+                    D[0], D[1], D[2], D[3], D[4], D[5], D[6], pd_step, pd_fb_suffix);
     }
 }
 
@@ -2014,8 +2116,45 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         {
             return;
         }
+
+        const auto frame_hex = [data, received]() {
+            std::ostringstream out;
+            out << std::uppercase << std::hex << std::setfill('0');
+            const long count = std::min(received, 64L);
+            for (long i = 0; i < count; ++i)
+            {
+                if (i > 0) out << ' ';
+                out << std::setw(2) << static_cast<unsigned>(data[i]);
+            }
+            if (received > count) out << " ...";
+            return out.str();
+        };
+
+        // 只做最小长度预检：modbus 帧至少 5 字节（slave+func+data+crc）。
+        // 过短/被拆包的残段直接跳过、不进解析器。
+        if (received < 5)
+        {
+            if (tool_debug_log_.load(std::memory_order_relaxed))
+            {
+                static rclcpp::Clock kIncompleteFrameLogClock(RCL_STEADY_TIME);
+                RCLCPP_WARN_THROTTLE(
+                    get_logger(), kIncompleteFrameLogClock, 1000,
+                    "Tool RX incomplete/discarded: tool_idx=%zu channel=%ld size=%ld frame=[%s]",
+                    tool_idx, toolChannel(tool_idx), received, frame_hex().c_str());
+            }
+            // 设备已有应答（只是帧不完整）：清理 pending，避免门控阻塞后续控制指令。
+            markFrameAnswered(tool_idx);
+            return;
+        }
+
         if (isModbusWriteAck(data, static_cast<size_t>(received)))
         {
+            if (tool_debug_log_.load(std::memory_order_relaxed))
+            {
+                RCLCPP_INFO(get_logger(),
+                            "Tool RX write ACK: tool_idx=%zu channel=%ld size=%ld frame=[%s]",
+                            tool_idx, toolChannel(tool_idx), received, frame_hex().c_str());
+            }
             if (tool_idx < in_flight_type_.size() && in_flight_type_[tool_idx].load() == 2)
             {
                 applyGripperWriteAckFromInFlight(tool_idx);
@@ -2023,21 +2162,53 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             markFrameAnswered(tool_idx);
             return;
         }
-        if (data[1] == 0x03 || data[1] == 0x04)
+        if (!processToolResponse(data, static_cast<size_t>(received), tool_idx))
         {
-            const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now().time_since_epoch()).count();
-            if (tool_idx < tool_hb_last_rx_ms_.size())
+            // 无效帧保留十六进制证据并节流，便于区分异常响应、短帧和协议不匹配。
+            if (tool_debug_log_.load(std::memory_order_relaxed))
             {
-                tool_hb_last_rx_ms_[tool_idx].store(static_cast<std::int64_t>(now_ms));
+                if (toolIsHand(tool_idx))
+                {
+                    static rclcpp::Clock kInvalidHandFrameLogClock(RCL_STEADY_TIME);
+                    RCLCPP_WARN_THROTTLE(
+                        get_logger(), kInvalidHandFrameLogClock, 1000,
+                        "Hand RX invalid: tool_idx=%zu channel=%ld size=%ld frame=[%s]",
+                        tool_idx, toolChannel(tool_idx), received, frame_hex().c_str());
+                }
+                else
+                {
+                    static rclcpp::Clock kInvalidGripperFrameLogClock(RCL_STEADY_TIME);
+                    RCLCPP_WARN_THROTTLE(
+                        get_logger(), kInvalidGripperFrameLogClock, 1000,
+                        "Gripper RX invalid: tool_idx=%zu channel=%ld size=%ld frame=[%s]",
+                        tool_idx, toolChannel(tool_idx), received, frame_hex().c_str());
+                }
             }
-            if (tool_idx < tool_hb_offline_reported_.size())
-            {
-                tool_hb_offline_reported_[tool_idx].store(false);
-            }
+            // 设备已有应答（帧不完整/协议不匹配时同样视为响应已到）：
+            // 清理 pending，避免响应门控长期阻塞后续控制指令导致夹爪不动作。
             markFrameAnswered(tool_idx);
+            return;
         }
-        processToolResponse(data, static_cast<size_t>(received), tool_idx);
+        if (tool_debug_log_.load(std::memory_order_relaxed))
+        {
+            if (toolIsHand(tool_idx))
+            {
+                static rclcpp::Clock kValidHandFrameLogClock(RCL_STEADY_TIME);
+                RCLCPP_INFO_THROTTLE(
+                    get_logger(), kValidHandFrameLogClock, 2000,
+                    "Hand RX valid: tool_idx=%zu channel=%ld size=%ld frame=[%s]",
+                    tool_idx, toolChannel(tool_idx), received, frame_hex().c_str());
+            }
+            else
+            {
+                static rclcpp::Clock kValidGripperFrameLogClock(RCL_STEADY_TIME);
+                RCLCPP_INFO_THROTTLE(
+                    get_logger(), kValidGripperFrameLogClock, 2000,
+                    "Gripper RX valid: tool_idx=%zu channel=%ld size=%ld frame=[%s]",
+                    tool_idx, toolChannel(tool_idx), received, frame_hex().c_str());
+            }
+        }
+        markFrameAnswered(tool_idx);
         if (tool_idx < tool_initial_read_done_.size())
         {
             tool_initial_read_done_[tool_idx] = true;
@@ -2045,14 +2216,11 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
     }
 
     void MarvinHardware::ingestKwr75Com2Frame(
-        bool left_arm, const unsigned char* data, long received, long rx_channel)
+        bool left_arm, const unsigned char* data, long received)
     {
         auto& slot = left_arm ? left_kwr75_sample_ : right_kwr75_sample_;
-        const long want_ch = left_arm ? kwr75_ft_config_.left_channel : kwr75_ft_config_.right_channel;
-        if (!Kwr75Protocol::isExactFrameRead(received, rx_channel, want_ch))
-        {
-            return;
-        }
+        // 通道为固定约定（KWR75=COM2），帧归属已在分发处按帧结构特征确认，
+        // 这里只做完整帧解析，不再依赖返回的 channel 数值。
         std::array<float, Kwr75Protocol::kAxisCount> raw {};
         if (!Kwr75Protocol::tryParseCompleteFrame(
                 data, static_cast<std::size_t>(received),
@@ -2072,7 +2240,13 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
 
         auto poll_side = [this](bool left) {
             GetChDataFunc get_ch = left ? MarvinRs485Bus::getA() : MarvinRs485Bus::getB();
-            const long com1 = left ? left_ee_channel_ : right_ee_channel_;
+            // SDK 343 的 OnGetChData 从每臂公共 FIFO 取下一帧；传入 channel 只用于
+            // 1~3 合法性校验，调用返回时会被该帧真实的 m_SUB_CH 覆盖。因此必须按
+            // 返回通道路由：工具=COM1、KWR75=COM2。
+            const long tool_ch = left ? left_ee_channel_ : right_ee_channel_;
+            const long ft_ch = left ? kwr75_ft_config_.left_channel : kwr75_ft_config_.right_channel;
+            const bool ft_side_on = left ? kwr75_ft_config_.left_enabled
+                                         : kwr75_ft_config_.right_enabled;
 
             int tool_idx = -1;
             for (size_t ti = 0; ti < toolCount(); ++ti)
@@ -2092,47 +2266,55 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                 }
             }
 
-            unsigned char buf[256] = {0};
-            if (tool_idx >= 0)
-            {
-                for (int drain = 0; drain < 4; ++drain)
-                {
-                    long ch = com1;
-                    const long received = get_ch(buf, &ch);
-                    if (received <= 0 || received > static_cast<long>(sizeof(buf)))
-                    {
-                        break;
-                    }
-                    if (ch == KWR75_FT_CHANNEL)
-                    {
-                        ingestKwr75Com2Frame(left, buf, received, ch);
-                        continue;
-                    }
-                    if (ch != com1)
-                    {
-                        continue;
-                    }
-                    dispatchToolCom1Frame(static_cast<size_t>(tool_idx), buf, received);
-                }
-            }
-
-            const bool ft_side_on = left ? kwr75_ft_config_.left_enabled
-                                         : kwr75_ft_config_.right_enabled;
             if (kwr75_ft_config_.enabled && kwr75_ft_running_.load(std::memory_order_acquire) && ft_side_on)
             {
-                long ch = left ? kwr75_ft_config_.left_channel : kwr75_ft_config_.right_channel;
                 // 0x49 request/response: when publishing in read(), send one poll before get.
                 if (!kwr75UsesPollThread() && kwr75_ft_config_.command_code == 0x49)
                 {
                     Send485Func send_485 = left ? MarvinRs485Bus::sendA() : MarvinRs485Bus::sendB();
                     const auto req = Kwr75Protocol::buildPollRequest(kwr75_ft_config_.command_code);
-                    send_485(const_cast<uint8_t*>(req.data()), static_cast<long>(req.size()), ch);
+                    send_485(const_cast<uint8_t*>(req.data()), static_cast<long>(req.size()), ft_ch);
                 }
+            }
+
+            // drain：KWR75 传感器流帧（100Hz）每周期全部取出（防积压、防挤占工具帧），
+            // 工具帧每周期只取一帧（半双工请求-响应，取多无益）。
+            constexpr int kMaxRxFrames = 8;
+            bool tool_frame_taken = false;
+            for (int i = 0; i < kMaxRxFrames; ++i)
+            {
+                unsigned char buf[256] = {0};
+                long ch = tool_ch;
                 const long received = get_ch(buf, &ch);
-                if (received > 0)
+                if (received <= 0 || received > static_cast<long>(sizeof(buf)))
                 {
-                    ingestKwr75Com2Frame(left, buf, received, ch);
+                    break;
                 }
+
+                if (ch == ft_ch && kwr75_ft_config_.enabled && ft_side_on)
+                {
+                    ingestKwr75Com2Frame(left, buf, received);
+                }
+                else if (ch == tool_ch && tool_idx >= 0 && !tool_frame_taken)
+                {
+                    dispatchToolCom1Frame(static_cast<size_t>(tool_idx), buf, received);
+                    tool_frame_taken = true;
+                }
+                else if (ch == tool_ch && tool_idx >= 0)
+                {
+                    // 同一周期内工具通道的第二帧：被静默丢弃（通常是拆帧的尾部）。
+                    // 排查 incomplete 的关键：这里丢弃的尾部与前面 dispatch 的头片拼起来
+                    // 才是一条完整响应。
+                    if (tool_debug_log_.load(std::memory_order_relaxed))
+                    {
+                        static rclcpp::Clock kDroppedToolFrameLogClock(RCL_STEADY_TIME);
+                        RCLCPP_WARN_THROTTLE(
+                            get_logger(), kDroppedToolFrameLogClock, 1000,
+                            "[rx_drop] tool_idx=%d ch=%ld size=%ld dropped (tool frame already taken this cycle)",
+                            tool_idx, ch, received);
+                    }
+                }
+                // 其它帧（未启用的侧）：丢弃，继续 drain 剩余传感器帧。
             }
         };
 
@@ -2148,10 +2330,8 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
 
     void MarvinHardware::tool_callback_for_tool_async(size_t tool_idx)
     {
-        // Async send: only getStatus() and move_gripper/move_hand; no blocking receive (recv thread handles responses).
+        // 工具指令发送已移至 write() 计数器调度；本线程仅做心跳离线检测与超时统计。
         constexpr int kControlPeriodMs = 100;
-        // Stopped tools still poll at control rate (not 1Hz): shared RS485 often drops most replies.
-        constexpr int kStoppedPollIntervalMs = kControlPeriodMs;
         constexpr int kHeartbeatOfflineThresholdMs = 30000;
         if (tool_idx >= kMaxTools || tool_idx >= toolCount())
             return;
@@ -2185,12 +2365,8 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                 continue;
             }
 
-            const bool initial_read_done = (tool_idx < tool_initial_read_done_.size() && tool_initial_read_done_[tool_idx]);
-            const bool stopped = isToolStopped(tool_idx);
-            const bool should_read = !initial_read_done || !stopped;
-
-            std::vector<double> write_cmd;
-            const bool should_write = shouldSendToolCommand(tool_idx, write_cmd) && !write_cmd.empty();
+            // 工具指令发送（控制/读状态/心跳）已移至 write() 计数器调度 sendToolCommandOnce()，
+            // 与机械臂主帧共用一次 OnSetSend；本线程仅保留心跳离线检测与超时统计。
 
             // Heartbeat: consider link healthy if we've parsed any valid status response recently.
             if (tool_idx < tool_hb_start_ms_.size() && tool_idx < tool_hb_last_rx_ms_.size() && tool_idx < tool_hb_offline_reported_.size())
@@ -2222,32 +2398,77 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             }
 
             // 一个控制周期内只发一条 set：优先控制指令，其次读状态
-            if (should_write)
+            std::this_thread::sleep_until(cycle_start + std::chrono::milliseconds(kControlPeriodMs));
+        }
+    }
+
+    void MarvinHardware::sendToolCommandOnce(size_t tool_idx, bool ctrl_due, bool read_due, bool hb_due)
+    {
+        if (tool_idx >= kMaxTools || tool_idx >= toolCount())
+            return;
+        if (tool_idx < tool_init_failed_.size() && tool_init_failed_[tool_idx])
+            return;
+        auto* tool = toolAt(tool_idx);
+        if (!tool)
+            return;
+
+        const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+
+        // ① 控制工具指令（10Hz，有命令变化才发；优先级最高）
+        // 响应门控：上一次写/读请求未响应则跳过本帧——避免 RS485 半双工下高频控制指令
+        // 打断 EincinX 等动作中慢速设备的写确认（超时由工具线程 checkPrevCycleTimeout 每 100ms 兜底清除）
+        std::vector<double> write_cmd;
+        if (ctrl_due && shouldSendToolCommand(tool_idx, write_cmd) && !write_cmd.empty())
+        {
+            if (toolIsHand(tool_idx))
             {
-                if (toolIsHand(tool_idx))
+                std::ostringstream target;
+                target << std::fixed << std::setprecision(4);
+                for (size_t i = 0; i < write_cmd.size(); ++i)
                 {
-                    auto* hand = dynamic_cast<ModbusHand*>(tool);
-                    if (hand && write_cmd.size() >= hand->getJointCount())
+                    if (i > 0) target << ", ";
+                    target << write_cmd[i];
+                }
+                RCLCPP_INFO(get_logger(),
+                            "Hand command changed: tool_idx=%zu side=%s channel=%ld target_rad=[%s]",
+                            tool_idx, toolUsesLeftChannel(tool_idx) ? "left/A" : "right/B",
+                            toolChannel(tool_idx), target.str().c_str());
+            }
+            // 【临时调试】响应门控已禁用：控制指令不再因 pending 阻塞，
+            // 待定位夹爪问题后按需恢复。
+            // if (tool_idx < tool_reply_pending_.size() &&
+            //     tool_reply_pending_[tool_idx].load(std::memory_order_acquire))
+            // {
+            //     static rclcpp::Clock kPendingLogClock(RCL_STEADY_TIME);
+            //     RCLCPP_WARN_THROTTLE(
+            //         get_logger(), kPendingLogClock, 1000,
+            //         "Hand/tool command blocked by pending reply: tool_idx=%zu channel=%ld kind=%d",
+            //         tool_idx, toolChannel(tool_idx),
+            //         tool_reply_kind_[tool_idx].load(std::memory_order_relaxed));
+            //     return;
+            // }
+            if (toolIsHand(tool_idx))
+            {
+                auto* hand = dynamic_cast<ModbusHand*>(tool);
+                if (hand && write_cmd.size() >= hand->getJointCount())
+                {
+                    const size_t dof = hand->getJointCount();
+                    std::vector<double> torques(dof, 1.0);
+                    std::vector<double> velocities(dof, 1.0);
+                    for (size_t k = 0; k < gripper_joint_name_.size() && k < gripper_effort_command_.size() && k < gripper_velocity_command_.size(); ++k)
                     {
-                        const size_t dof = hand->getJointCount();
-                        std::vector<double> torques(dof, 1.0);
-                        std::vector<double> velocities(dof, 1.0);
-                        for (size_t k = 0; k < gripper_joint_name_.size() && k < gripper_effort_command_.size() && k < gripper_velocity_command_.size(); ++k)
+                        if (!gripperJointBelongsToTool(k, tool_idx)) continue;
+                        int li = hand->mapJointNameToIndex(gripper_joint_name_[k]);
+                        if (li >= 0 && static_cast<size_t>(li) < dof)
                         {
-                            if (!gripperJointBelongsToTool(k, tool_idx)) continue;
-                            int li = hand->mapJointNameToIndex(gripper_joint_name_[k]);
-                            if (li >= 0 && static_cast<size_t>(li) < dof)
-                            {
-                                torques[static_cast<size_t>(li)] = std::clamp(gripper_effort_command_[k], 0.0, 1.0);
-                                velocities[static_cast<size_t>(li)] = std::clamp(gripper_velocity_command_[k], 0.0, 1.0);
-                            }
+                            torques[static_cast<size_t>(li)] = std::clamp(gripper_effort_command_[k], 0.0, 1.0);
+                            velocities[static_cast<size_t>(li)] = std::clamp(gripper_velocity_command_[k], 0.0, 1.0);
                         }
-                        std::vector<double> pos(write_cmd.begin(), write_cmd.begin() + static_cast<std::vector<double>::difference_type>(dof));
-                        if (!hand->move_hand(torques, velocities, pos))
-                        {
-                            std::this_thread::sleep_until(cycle_start + std::chrono::milliseconds(kControlPeriodMs));
-                            continue;
-                        }
+                    }
+                    std::vector<double> pos(write_cmd.begin(), write_cmd.begin() + static_cast<std::vector<double>::difference_type>(dof));
+                    if (hand->move_hand(torques, velocities, pos))
+                    {
                         markFrameSent(tool_idx, 2);
                         for (size_t k = 0; k < gripper_joint_name_.size() && k < last_gripper_command_.size() && k < gripper_stopped_.size(); ++k)
                         {
@@ -2269,51 +2490,99 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                             hand_stable_count_[tool_idx] = 0;
                         }
                     }
-                }
-                else
-                {
-                    const size_t gi = gripperJointIndexForTool(tool_idx);
-                    const double nt = (gi < gripper_effort_command_.size())
-                        ? std::clamp(gripper_effort_command_[gi], 0.0, 1.0) : 1.0;
-                    const double nv = (gi < gripper_velocity_command_.size())
-                        ? std::clamp(gripper_velocity_command_[gi], 0.0, 1.0) : 1.0;
-                    if (tool->move_gripper(nt, nv, write_cmd[0]))
+                    else
                     {
-                        if (tool_idx < in_flight_write_command_.size())
-                        {
-                            in_flight_write_command_[tool_idx] = write_cmd;
-                            applyGripperWriteAckFromInFlight(tool_idx);
-                        }
-                        // 异步模式：不等待控制指令返回帧，只根据读状态返回帧更新状态
-                        markFrameSent(tool_idx, 2);
+                        RCLCPP_WARN(get_logger(),
+                                    "Hand command rejected before SDK send completion: tool_idx=%zu channel=%ld",
+                                    tool_idx, toolChannel(tool_idx));
                     }
                 }
             }
             else
             {
-                // Priority: normal status read first; when stopped, keep polling at control rate for heartbeat.
-                if (should_read)
+                const size_t gi = gripperJointIndexForTool(tool_idx);
+                const double nt = (gi < gripper_effort_command_.size())
+                    ? std::clamp(gripper_effort_command_[gi], 0.0, 1.0) : 1.0;
+                const double nv = (gi < gripper_velocity_command_.size())
+                    ? std::clamp(gripper_velocity_command_[gi], 0.0, 1.0) : 1.0;
+                if (tool->move_gripper(nt, nv, write_cmd[0]))
                 {
-                    tool->getStatus();
+                    if (tool_idx < in_flight_write_command_.size())
+                    {
+                        in_flight_write_command_[tool_idx] = write_cmd;
+                        applyGripperWriteAckFromInFlight(tool_idx);
+                    }
+                    // 异步模式：不等待控制指令返回帧，只根据读状态返回帧更新状态
+                    markFrameSent(tool_idx, 2);
+                }
+            }
+            return;
+        }
+
+        // ② 获取状态指令（固定节拍）。请求-响应串行化：上一帧应答未返回前不发新状态查询，
+        // 避免半双工 RS485 总线上新请求打断在途响应（撕裂）。
+        // 为"保证频率"：无论 pending 来自读还是写，应答超过 2 个读周期未回即视为丢失并重发，
+        // 不依赖 200ms 超时线程，也不让写 ACK 偶发丢失长时间卡住状态反馈。
+        if (read_due)
+        {
+            bool can_send = true;
+            const bool pending_now = tool_reply_pending_[tool_idx].load(std::memory_order_acquire);
+            if (pending_now)
+            {
+                const auto sent_at = tool_sent_at_ms_[tool_idx].load(std::memory_order_relaxed);
+                const int kind_now = tool_reply_kind_[tool_idx].load(std::memory_order_relaxed);
+                const std::int64_t age_ms = now_ms - sent_at;
+                const auto window_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    tool_read_interval_ * 2).count();
+                can_send = std::chrono::milliseconds(age_ms) >= (tool_read_interval_ * 2);
+                if (tool_debug_log_.load(std::memory_order_relaxed))
+                {
+                    static rclcpp::Clock kReadGateLogClock(RCL_STEADY_TIME);
+                    RCLCPP_INFO_THROTTLE(
+                        get_logger(), kReadGateLogClock, 500,
+                        "[read_gate] tool_idx=%zu ch=%ld pending=true kind=%d age=%lldms window=%lldms -> %s",
+                        tool_idx, toolChannel(tool_idx), kind_now,
+                        static_cast<long long>(age_ms), static_cast<long long>(window_ms),
+                        can_send ? "RESEND(loss-retry)" : "SKIP(wait reply)");
+                }
+            }
+            if (can_send)
+            {
+                if (tool->getStatus())
+                {
                     if (tool_idx < tool_hb_tx_ms_.size())
                         tool_hb_tx_ms_[tool_idx].store(static_cast<std::int64_t>(now_ms));
                     markFrameSent(tool_idx, 1);
                 }
-                else if (tool_idx < tool_hb_tx_ms_.size())
+                else
                 {
-                    const auto last_tx = tool_hb_tx_ms_[tool_idx].load();
-                    const bool interval_due = (last_tx <= 0) ||
-                        ((now_ms - last_tx) >= kStoppedPollIntervalMs);
-                    if (interval_due)
+                    if (tool_debug_log_.load(std::memory_order_relaxed))
                     {
-                        tool->getStatus();
-                        tool_hb_tx_ms_[tool_idx].store(static_cast<std::int64_t>(now_ms));
-                        markFrameSent(tool_idx, 1);
+                        static rclcpp::Clock kReadGateFailLogClock(RCL_STEADY_TIME);
+                        RCLCPP_WARN_THROTTLE(
+                            get_logger(), kReadGateFailLogClock, 1000,
+                            "[read_gate] tool_idx=%zu ch=%ld read send FAILED (SDK channel busy?)",
+                            tool_idx, toolChannel(tool_idx));
                     }
                 }
             }
+            return;
+        }
 
-            std::this_thread::sleep_until(cycle_start + std::chrono::milliseconds(kControlPeriodMs));
+        // ③ 心跳（0.1Hz，空闲保活；距上次发送 ≥5s 才发，避免紧跟控制/状态后又发）
+        // 与状态查询一致：上一帧应答未返回前不发，避免打断在途响应。
+        if (hb_due && tool_idx < tool_hb_tx_ms_.size())
+        {
+            const auto last_tx = tool_hb_tx_ms_[tool_idx].load();
+            const bool interval_due = (last_tx <= 0) || ((now_ms - last_tx) >= 5000);
+            if (interval_due && !tool_reply_pending_[tool_idx].load(std::memory_order_acquire))
+            {
+                if (tool->getStatus())
+                {
+                    tool_hb_tx_ms_[tool_idx].store(static_cast<std::int64_t>(now_ms));
+                    markFrameSent(tool_idx, 1);
+                }
+            }
         }
     }
 
@@ -2515,9 +2784,8 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                 }
                 else
                 {
-                    processToolResponse(data_buf, static_cast<size_t>(received), tool_idx);
-                    if (tool_idx < tool_has_valid_state_.size() &&
-                        tool_has_valid_state_[tool_idx].load())
+                    if (processToolResponse(
+                            data_buf, static_cast<size_t>(received), tool_idx))
                     {
                         got_valid_status = true;
                         break;
@@ -2674,31 +2942,22 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
 
         stopKwr75FtThreads();
 
-        if (robot_arm_index_ == ARM_LEFT)
+        // 下使能请求收拢到 write() 单线程执行；write() 未运行时兜底直发。
+        if (hardware_connected_)
         {
-            OnClearSet();
-            OnSetDragSpace_A(0);
-            OnSetTargetState_A(0);
-            OnSetSend();
-            usleep(100000);
-        }
-        else if (robot_arm_index_ == ARM_RIGHT)
-        {
-            OnClearSet();
-            OnSetTargetState_B(0);
-            OnSetSend();
-            usleep(100000);
-        }
-        else if (robot_arm_index_ == ARM_DUAL)
-        {
-            OnClearSet();
-            OnSetTargetState_A(0);
-            OnSetSend();
-            usleep(100000);
-            OnClearSet();
-            OnSetTargetState_B(0);
-            OnSetSend();
-            usleep(100000);
+            PendingArmAction action;
+            action.kind = PendingArmActionKind::kPowerOff;
+            action.left = (robot_arm_index_ == ARM_LEFT || robot_arm_index_ == ARM_DUAL);
+            action.right = (robot_arm_index_ == ARM_RIGHT || robot_arm_index_ == ARM_DUAL);
+            action.total_steps = (action.left ? 1 : 0) + (action.right ? 1 : 0);
+
+            requestPendingAction(action);
+            if (!waitPendingActionDone(2000))
+            {
+                RCLCPP_WARN(get_logger(),
+                            "on_deactivate: control loop not running, direct send fallback");
+                executePendingActionDirect(action);
+            }
         }
 
         robot_ctrl_mode_ = "POWER_OFF";
@@ -2714,37 +2973,19 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         stopKwr75FtThreads();
 
         if (hardware_connected_) {
-            const bool update_left = (robot_arm_index_ == ARM_LEFT || robot_arm_index_ == ARM_DUAL);
-            const bool update_right = (robot_arm_index_ == ARM_RIGHT || robot_arm_index_ == ARM_DUAL);
-            const auto ensure_brake = [this](int arm_index) {
-                char name[30] = {};
-                std::snprintf(name, sizeof(name), "BRAK%d", arm_index);
-                long value = 0;
-                OnGetIntPara(name, &value);
-                if (value != 1) {
-                    OnClearSet();
-                    OnSetIntPara(name, 1);
-                    OnSetSend();
-                    usleep(100000);
-                    RCLCPP_WARN(get_logger(), "Emergency brake engaged: %s", name);
-                }
-            };
-            if (update_left) ensure_brake(ARM_LEFT);
-            if (update_right) ensure_brake(ARM_RIGHT);
+            // 急停序列（按需抱闸 + 下使能）收拢到 write() 单线程执行；未运行时兜底直发。
+            PendingArmAction action;
+            action.kind = PendingArmActionKind::kEmergencyStop;
+            action.left = (robot_arm_index_ == ARM_LEFT || robot_arm_index_ == ARM_DUAL);
+            action.right = (robot_arm_index_ == ARM_RIGHT || robot_arm_index_ == ARM_DUAL);
+            action.total_steps = 4;
 
-            if (robot_arm_index_ == ARM_LEFT || robot_arm_index_ == ARM_DUAL) {
-                OnClearSet();
-                OnSetTargetState_A(0);
-                OnSetSend();
-                usleep(100000);
+            requestPendingAction(action);
+            if (!waitPendingActionDone(2000))
+            {
+                RCLCPP_WARN(get_logger(), "on_shutdown: control loop not running, direct send fallback");
+                executePendingActionDirect(action);
             }
-            if (robot_arm_index_ == ARM_RIGHT || robot_arm_index_ == ARM_DUAL) {
-                OnClearSet();
-                OnSetTargetState_B(0);
-                OnSetSend();
-                usleep(100000);
-            }
-
             disconnectFromHardware();
         }
 
@@ -2757,40 +2998,23 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         RCLCPP_ERROR(get_logger(), "Error in Marvin Hardware Interface, emergency brake...");
 
         stopKwr75FtThreads();
+        // 立即停发关节指令；急停序列由 write() 单线程执行（write() 已报错停止时兜底直发）。
         robot_ctrl_mode_ = "POWER_OFF";
 
         if (hardware_connected_) {
-            const bool update_left = (robot_arm_index_ == ARM_LEFT || robot_arm_index_ == ARM_DUAL);
-            const bool update_right = (robot_arm_index_ == ARM_RIGHT || robot_arm_index_ == ARM_DUAL);
-            const auto ensure_brake = [this](int arm_index) {
-                char name[30] = {};
-                std::snprintf(name, sizeof(name), "BRAK%d", arm_index);
-                long value = 0;
-                OnGetIntPara(name, &value);
-                if (value != 1) {
-                    OnClearSet();
-                    OnSetIntPara(name, 1);
-                    OnSetSend();
-                    usleep(100000);
-                    RCLCPP_WARN(get_logger(), "Emergency brake engaged: %s", name);
-                }
-            };
-            if (update_left) ensure_brake(ARM_LEFT);
-            if (update_right) ensure_brake(ARM_RIGHT);
+            PendingArmAction action;
+            action.kind = PendingArmActionKind::kEmergencyStop;
+            action.left = (robot_arm_index_ == ARM_LEFT || robot_arm_index_ == ARM_DUAL);
+            action.right = (robot_arm_index_ == ARM_RIGHT || robot_arm_index_ == ARM_DUAL);
+            action.total_steps = 4;
 
-            if (robot_arm_index_ == ARM_LEFT || robot_arm_index_ == ARM_DUAL) {
-                OnClearSet();
-                OnSetTargetState_A(0);
-                OnSetSend();
-                usleep(100000);
+            requestPendingAction(action);
+            // 短超时：write() 已因错误停止时立即走兜底直发，保证急停低延迟。
+            if (!waitPendingActionDone(300))
+            {
+                RCLCPP_WARN(get_logger(), "on_error: control loop not running, direct send fallback");
+                executePendingActionDirect(action);
             }
-            if (robot_arm_index_ == ARM_RIGHT || robot_arm_index_ == ARM_DUAL) {
-                OnClearSet();
-                OnSetTargetState_B(0);
-                OnSetSend();
-                usleep(100000);
-            }
-
             disconnectFromHardware();
         }
 
@@ -2929,8 +3153,10 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             return hardware_interface::return_type::ERROR;
         }
 
-        // Single OnGetChData entry: COM1 tools + COM2 KWR75 (ros2_control update rate).
-        if (use_async_tool_comm_ || kwr75_ft_config_.enabled)
+        // COM1 tools + COM2 KWR75: 100Hz，每侧每周期最多读一帧。
+        const auto now = std::chrono::steady_clock::now();
+        if ((use_async_tool_comm_ || kwr75_ft_config_.enabled) &&
+            rateDue(now, last_rs485_rx_poll_, kRs485RxInterval))
         {
             pollRs485InHardwareRead();
         }
@@ -2950,6 +3176,10 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         {
             return hardware_interface::return_type::ERROR;
         }
+
+        // 工具发送频率由参数 tool_ctrl_rate/tool_read_rate/tool_hb_rate 显式配置（on_init 读取），
+        // 时间门控在 writeToHardware() 中按 steady_clock 判断，不依赖主循环 update_rate。
+
         /// convert rad to degree (use pre-allocated buffer to avoid allocations in control loop)
         if (hw_commands_deg_buffer_.size() != hw_position_commands_.size())
         {
@@ -3107,7 +3337,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
 
     bool MarvinHardware::isModbusWriteAck(const unsigned char* data_buf, size_t size)
     {
-        return size >= 2 && data_buf[1] == 0x10;
+        return size == 8 && data_buf[1] == 0x10;
     }
 
     void MarvinHardware::applyGripperWriteAckFromInFlight(size_t tool_idx)
@@ -3230,8 +3460,20 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             return;
         tool_tx_total_[tool_idx].fetch_add(1, std::memory_order_relaxed);
         tool_reply_kind_[tool_idx].store(kind, std::memory_order_relaxed);
-        // Set pending LAST so the recv thread sees a consistent (pending, kind) pair.
+        const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        tool_sent_at_ms_[tool_idx].store(now_ms, std::memory_order_relaxed);
+        // 状态查询（读）门控依据：标记"已发送、等待应答"，由响应到达（markFrameAnswered）
+        // 或超时（checkPrevCycleTimeout，200ms）清除。控制指令路径不使用此门控。
         tool_reply_pending_[tool_idx].store(true, std::memory_order_release);
+        if (tool_debug_log_.load(std::memory_order_relaxed))
+        {
+            static rclcpp::Clock kMarkSentLogClock(RCL_STEADY_TIME);
+            RCLCPP_INFO_THROTTLE(
+                get_logger(), kMarkSentLogClock, 500,
+                "[pending] tool_idx=%zu kind=%d ch=%ld frame SENT -> pending=true",
+                tool_idx, kind, toolChannel(tool_idx));
+        }
     }
 
     void MarvinHardware::markFrameAnswered(size_t tool_idx)
@@ -3242,6 +3484,19 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         // stray frames that arrive after a timeout already cleared the pending bit.
         const bool was_pending = tool_reply_pending_[tool_idx].exchange(
             false, std::memory_order_acq_rel);
+        const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        const auto sent_at = tool_sent_at_ms_[tool_idx].load(std::memory_order_relaxed);
+        const int kind = tool_reply_kind_[tool_idx].load(std::memory_order_relaxed);
+        if (tool_debug_log_.load(std::memory_order_relaxed))
+        {
+            static rclcpp::Clock kMarkAnsweredLogClock(RCL_STEADY_TIME);
+            RCLCPP_INFO_THROTTLE(
+                get_logger(), kMarkAnsweredLogClock, 500,
+                "[pending] tool_idx=%zu kind=%d ch=%ld reply arrived (was_pending=%d latency=%lldms)",
+                tool_idx, kind, toolChannel(tool_idx), was_pending ? 1 : 0,
+                static_cast<long long>(now_ms - sent_at));
+        }
         if (was_pending)
             tool_rx_total_[tool_idx].fetch_add(1, std::memory_order_relaxed);
     }
@@ -3250,13 +3505,19 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
     {
         if (tool_idx >= kMaxTools)
             return false;
-        // Non-blocking: just inspect the flag. If still pending at the start of the
-        // next cycle, the recv thread never cleared it within ~5 polls -> timeout.
-        const bool was_pending = tool_reply_pending_[tool_idx].exchange(
-            false, std::memory_order_acq_rel);
-        if (!was_pending)
+        // 时间戳窗口判定：仅当 pending 且距发送超过 kToolReplyTimeoutMs 才算超时。
+        // 发送（write 主线程，时间门控）与检查（工具线程 100ms 周期）异步，
+        // 不能以“检查时 pending 为 true”直接判超时（发送后 0~100ms 内检查会误判）。
+        const bool pending = tool_reply_pending_[tool_idx].load(std::memory_order_acquire);
+        if (!pending)
             return false;
-
+        const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        const auto sent_at = tool_sent_at_ms_[tool_idx].load(std::memory_order_relaxed);
+        if ((now_ms - sent_at) < kToolReplyTimeoutMs)
+            return false;  // 仍在超时窗口内：等待响应（响应到达由 recv 路径清 pending）
+        // 真超时：清 pending（恢复发送门控）+ 计数
+        tool_reply_pending_[tool_idx].store(false, std::memory_order_release);
         const auto timeouts = tool_timeout_count_[tool_idx].fetch_add(
             1, std::memory_order_relaxed) + 1;
         const int kind = tool_reply_kind_[tool_idx].load(std::memory_order_relaxed);
@@ -3264,9 +3525,9 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         {
             RCLCPP_WARN(get_logger(),
                         "tool reply timeout (first): tool_idx=%zu kind=%s channel=%ld — "
-                        "no reply observed by recv thread within one control cycle",
+                        "no reply within %lld ms of send",
                         tool_idx, kind == 2 ? "write" : (kind == 1 ? "read" : "?"),
-                        toolChannel(tool_idx));
+                        toolChannel(tool_idx), static_cast<long long>(kToolReplyTimeoutMs));
         }
         return true;
     }
@@ -3330,13 +3591,13 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
 
 
 
-    void MarvinHardware::processToolResponse(const unsigned char* data_buf, size_t size, size_t gripper_idx)
+    bool MarvinHardware::processToolResponse(const unsigned char* data_buf, size_t size, size_t gripper_idx)
     {
         auto* tool = toolAt(gripper_idx);
-        if (!tool) return;
+        if (!tool) return false;
 
         if (size >= 2 && isModbusWriteAck(data_buf, size))
-            return;
+            return false;
 
         auto* gripper = dynamic_cast<ModbusGripper*>(tool);
         if (gripper)
@@ -3359,8 +3620,9 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                 updateGripperState(gi, position, velocity, torque);
                 if (gripper->isTargetReached() && gi < gripper_stopped_.size())
                     gripper_stopped_[gi] = true;
+                return true;
             }
-            return;
+            return false;
         }
 
         if (toolIsHand(gripper_idx))
@@ -3455,10 +3717,12 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                                 }
                             }
                         }
+                        return true;
                     }
                 }
             }
         }
+        return false;
     }
 
 
@@ -3693,12 +3957,44 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
 
     bool MarvinHardware::writeToHardware(std::vector<double>& hw_commands)
     {
-        if (robot_ctrl_mode_ == "POWER_OFF") {
+        // 整段 SDK 访问（主帧 + 工具通道 + KWR75 轮询发送）统一在控制线程内串行执行；
+        // 与生命周期兜底直发（executePendingActionDirect）通过 sdk_access_mutex_ 互斥。
+        std::lock_guard<std::mutex> sdk_lock(sdk_access_mutex_);
+
+        // ① 待执行动作（优先级最高，占本周期主帧槽）：刹车（含 POWER_OFF 模式）、
+        //    下使能、急停。其余线程只置动作，由这里每周期执行一步。
+        if (tryExecutePendingActionStep())
+        {
             return true;
         }
 
+        if (robot_ctrl_mode_ == "POWER_OFF")
+        {
+            return true;
+        }
+
+        // 主帧槽未释放（SDK 上一帧尚未发走）：暂时只累计连续 false 次数并跳过本周期，
+        // 不因 OnClearSet false 触发硬件错误。
+        if (!OnClearSet())
+        {
+            ++clear_set_consecutive_false_count_;
+            RCLCPP_WARN_THROTTLE(
+                get_logger(), *get_node()->get_clock(), 1000,
+                "OnClearSet returned false for %llu consecutive cycle(s); continuing to skip write cycles",
+                static_cast<unsigned long long>(clear_set_consecutive_false_count_));
+            return true;
+        }
+        if (clear_set_consecutive_false_count_ > 0)
+        {
+            RCLCPP_WARN(
+                get_logger(), "OnClearSet recovered after %llu consecutive false result(s)",
+                static_cast<unsigned long long>(clear_set_consecutive_false_count_));
+            clear_set_consecutive_false_count_ = 0;
+        }
+
         bool result = true;
-        OnClearSet();
+
+        // ② 主帧：机械臂关节指令（每帧）
         if (robot_arm_index_ == ARM_LEFT)
         {
             if (!left_brake_released_)
@@ -3716,8 +4012,383 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             if (!right_brake_released_)
                 result = OnSetJointCmdPos_B(hw_commands.data() + 7) && result;
         }
-        OnSetSend();
-        return result;
+
+        // ③ 工具指令：在同一次 hardware write() 中按频率门控提交给独立通道。
+        // 仅在异步模式（工具线程不发送）下启用；同步模式由 tool_callback_for_tool 线程负责发送。
+        if (use_async_tool_comm_ && init_tool_on_startup_ && has_gripper_ && toolCount() > 0)
+        {
+            // 时间门控：50Hz 读请求与用户设定的机械臂主频率解耦。
+            const auto now = std::chrono::steady_clock::now();
+            bool ctrl_due = false, read_due = false, hb_due = false;
+            if (rateDue(now, last_tool_ctrl_tx_, tool_ctrl_interval_))
+            {
+                ctrl_due = true;
+            }
+            // 设置请求优先；同周期到期的 50Hz 读请求顺延到下一个 write()。
+            if (!ctrl_due && rateDue(now, last_tool_read_tx_, tool_read_interval_))
+            {
+                read_due = true;
+            }
+            if (!ctrl_due && !read_due && rateDue(now, last_tool_hb_tx_, tool_hb_interval_))
+            {
+                hb_due = true;
+            }
+            for (size_t ti = 0; ti < toolCount(); ++ti)
+            {
+                sendToolCommandOnce(ti, ctrl_due, read_due, hb_due);
+            }
+        }
+
+        // ④ KWR75 轮询线程模式的发送收拢：线程只置挂起标志，这里代为发送。
+        sendPendingKwr75Polls();
+
+        // OnSetSend 只提交机械臂主帧；工具/KWR75 通道由 SDK 独立发送。
+        // 提交失败（主帧槽仍被占用）同样计入连续失败，达到阈值才判定脱钩急停。
+        if (OnSetSend())
+        {
+            main_frame_submit_failure_count_ = 0;
+            return result;
+        }
+        ++main_frame_submit_failure_count_;
+        if (main_frame_submit_failure_count_ >= kMainFrameBusyFatalThreshold)
+        {
+            RCLCPP_ERROR(get_logger(),
+                         "SDK main-frame submit failed after %d consecutive cycles, declaring system disconnected",
+                         main_frame_submit_failure_count_);
+            return false;
+        }
+        RCLCPP_WARN(get_logger(),
+                    "SDK main-frame submit failed (%d/%d), skipping this write cycle",
+                    main_frame_submit_failure_count_, kMainFrameBusyFatalThreshold);
+        return true;
+    }
+
+    const char* MarvinHardware::pendingActionKindName(PendingArmActionKind k)
+    {
+        switch (k)
+        {
+        case PendingArmActionKind::kBrake: return "BRAKE";
+        case PendingArmActionKind::kPowerOff: return "POWER_OFF";
+        case PendingArmActionKind::kEmergencyStop: return "EMERGENCY_STOP";
+        default: return "NONE";
+        }
+    }
+
+    bool MarvinHardware::tryExecutePendingActionStep()
+    {
+        std::lock_guard<std::mutex> lock(pending_action_mutex_);
+        auto& a = pending_action_;
+        if (a.kind == PendingArmActionKind::kNone)
+        {
+            return false;
+        }
+
+        const bool update_left = a.left && (robot_arm_index_ == ARM_LEFT || robot_arm_index_ == ARM_DUAL);
+        const bool update_right = a.right && (robot_arm_index_ == ARM_RIGHT || robot_arm_index_ == ARM_DUAL);
+        const auto side_str = [&](bool l, bool r) -> const char* {
+            return (l && r) ? "both" : (l ? "left" : (r ? "right" : "none"));
+        };
+
+        RCLCPP_INFO(get_logger(),
+                    "[pending_action] step %d/%d kind=%s sides=%s robot_arm_config=%s",
+                    a.step + 1, a.total_steps, pendingActionKindName(a.kind),
+                    side_str(update_left, update_right), robot_arm_config_.c_str());
+
+        switch (a.kind)
+        {
+        case PendingArmActionKind::kBrake:
+        {
+            const long sdk_value = a.brake_release ? 2 : 1;  // 2=松闸, 1=抱闸
+            auto send_brake = [&](int arm_index) {
+                char name[30] = {};
+                std::snprintf(name, sizeof(name), "BRAK%d", arm_index);
+                OnClearSet();
+                if (a.brake_release)
+                {
+                    if (arm_index == ARM_LEFT) OnSetTargetState_A(0);
+                    else OnSetTargetState_B(0);
+                }
+                OnSetIntPara(name, sdk_value);
+                OnSetSend();
+                RCLCPP_INFO(get_logger(),
+                            "[pending_action] BRAKE %s: %s sent (sdk_value=%ld)",
+                            arm_index == ARM_LEFT ? "left" : "right",
+                            a.brake_release ? "release" : "engage", sdk_value);
+            };
+            if (update_left) send_brake(ARM_LEFT);
+            if (update_right) send_brake(ARM_RIGHT);
+            if (a.brake_release)
+            {
+                if (update_left) left_brake_released_ = true;
+                if (update_right) right_brake_released_ = true;
+            }
+            else
+            {
+                if (update_left) left_brake_released_ = false;
+                if (update_right) right_brake_released_ = false;
+            }
+            a.step = a.total_steps;
+            break;
+        }
+        case PendingArmActionKind::kPowerOff:
+            // 步骤 0：左臂下使能；步骤 1：右臂下使能
+            if (a.step == 0)
+            {
+                if (update_left)
+                {
+                    OnClearSet();
+                    OnSetTargetState_A(0);
+                    OnSetSend();
+                    RCLCPP_INFO(get_logger(), "[pending_action] POWER_OFF left arm: target state 0 sent");
+                }
+                a.step = update_right ? 1 : a.total_steps;
+            }
+            else if (a.step == 1 && update_right)
+            {
+                OnClearSet();
+                OnSetTargetState_B(0);
+                OnSetSend();
+                RCLCPP_INFO(get_logger(), "[pending_action] POWER_OFF right arm: target state 0 sent");
+                a.step = a.total_steps;
+            }
+            else
+            {
+                a.step = a.total_steps;
+            }
+            break;
+        case PendingArmActionKind::kEmergencyStop:
+            // 固定 4 步：抱闸左、抱闸右、下使能左、下使能右（未配置的一侧直接跳过）
+            if (a.step == 0)
+            {
+                if (update_left) engageBrakeIfNeeded(ARM_LEFT);
+                else RCLCPP_INFO(get_logger(), "[pending_action] EMERGENCY_STOP step1: left not configured, skipped");
+                a.step = 1;
+            }
+            else if (a.step == 1)
+            {
+                if (update_right) engageBrakeIfNeeded(ARM_RIGHT);
+                else RCLCPP_INFO(get_logger(), "[pending_action] EMERGENCY_STOP step2: right not configured, skipped");
+                a.step = 2;
+            }
+            else if (a.step == 2)
+            {
+                if (update_left)
+                {
+                    OnClearSet();
+                    OnSetTargetState_A(0);
+                    OnSetSend();
+                    RCLCPP_INFO(get_logger(), "[pending_action] EMERGENCY_STOP step3: left arm target state 0 sent");
+                }
+                else
+                {
+                    RCLCPP_INFO(get_logger(), "[pending_action] EMERGENCY_STOP step3: left not configured, skipped");
+                }
+                a.step = 3;
+            }
+            else if (a.step == 3)
+            {
+                if (update_right)
+                {
+                    OnClearSet();
+                    OnSetTargetState_B(0);
+                    OnSetSend();
+                    RCLCPP_INFO(get_logger(), "[pending_action] EMERGENCY_STOP step4: right arm target state 0 sent");
+                }
+                else
+                {
+                    RCLCPP_INFO(get_logger(), "[pending_action] EMERGENCY_STOP step4: right not configured, skipped");
+                }
+                a.step = 4;
+            }
+            else
+            {
+                a.step = a.total_steps;
+            }
+            break;
+        default:
+            RCLCPP_WARN(get_logger(), "[pending_action] unknown kind=%d, aborting",
+                        static_cast<int>(a.kind));
+            a.step = a.total_steps;
+            break;
+        }
+
+        if (a.step >= a.total_steps)
+        {
+            RCLCPP_INFO(get_logger(), "[pending_action] %s finished (steps=%d)",
+                        pendingActionKindName(a.kind), a.step);
+            a.kind = PendingArmActionKind::kNone;
+            pending_action_cv_.notify_all();
+        }
+        return true;
+    }
+
+    void MarvinHardware::engageBrakeIfNeeded(int arm_index)
+    {
+        char name[30] = {};
+        std::snprintf(name, sizeof(name), "BRAK%d", arm_index);
+        long value = 0;
+        OnGetIntPara(name, &value);
+        RCLCPP_INFO(get_logger(), "[pending_action] %s brake status: value=%ld", name, value);
+        if (value != 1)
+        {
+            OnClearSet();
+            OnSetIntPara(name, 1);
+            OnSetSend();
+            RCLCPP_WARN(get_logger(), "Emergency brake engaged: %s", name);
+        }
+        else
+        {
+            RCLCPP_INFO(get_logger(), "Emergency brake already engaged: %s", name);
+        }
+    }
+
+    void MarvinHardware::requestPendingAction(PendingArmAction action)
+    {
+        std::unique_lock<std::mutex> lock(pending_action_mutex_);
+        // 等待上一个动作完成（如正在执行的急停），避免被后续请求覆盖。
+        const bool waited = pending_action_cv_.wait_for(
+            lock, std::chrono::milliseconds(2000),
+            [this]() { return pending_action_.kind == PendingArmActionKind::kNone; });
+        if (!waited && pending_action_.kind != PendingArmActionKind::kNone)
+        {
+            RCLCPP_WARN(get_logger(),
+                        "[pending_action] previous action %s still in progress after 2s, overwriting it",
+                        pendingActionKindName(pending_action_.kind));
+        }
+        pending_action_ = action;
+        pending_action_cv_.notify_all();
+        RCLCPP_INFO(get_logger(), "[pending_action] requested kind=%s left=%d right=%d brake_release=%d",
+                    pendingActionKindName(action.kind), action.left ? 1 : 0,
+                    action.right ? 1 : 0, action.brake_release ? 1 : 0);
+    }
+
+    bool MarvinHardware::waitPendingActionDone(int wait_ms)
+    {
+        std::unique_lock<std::mutex> lock(pending_action_mutex_);
+        const bool done = pending_action_cv_.wait_for(
+            lock, std::chrono::milliseconds(wait_ms),
+            [this]() { return pending_action_.kind == PendingArmActionKind::kNone; });
+        if (!done)
+        {
+            RCLCPP_WARN(get_logger(),
+                        "[pending_action] wait timeout after %d ms (kind=%s still pending)",
+                        wait_ms, pendingActionKindName(pending_action_.kind));
+        }
+        return done;
+    }
+
+    void MarvinHardware::executePendingActionDirect(PendingArmAction action)
+    {
+        // 兜底直发：write() 未运行（如 on_error 后控制循环已停）时，在互斥锁内同步执行全部步骤。
+        RCLCPP_WARN(get_logger(), "[pending_action][fallback] direct execution of kind=%s left=%d right=%d",
+                    pendingActionKindName(action.kind), action.left ? 1 : 0, action.right ? 1 : 0);
+        std::lock_guard<std::mutex> sdk_lock(sdk_access_mutex_);
+        const bool update_left = action.left && (robot_arm_index_ == ARM_LEFT || robot_arm_index_ == ARM_DUAL);
+        const bool update_right = action.right && (robot_arm_index_ == ARM_RIGHT || robot_arm_index_ == ARM_DUAL);
+
+        if (action.kind == PendingArmActionKind::kBrake)
+        {
+            const long sdk_value = action.brake_release ? 2 : 1;
+            auto send_brake = [&](int arm_index) {
+                char name[30] = {};
+                std::snprintf(name, sizeof(name), "BRAK%d", arm_index);
+                OnClearSet();
+                if (action.brake_release)
+                {
+                    if (arm_index == ARM_LEFT) OnSetTargetState_A(0);
+                    else OnSetTargetState_B(0);
+                }
+                OnSetIntPara(name, sdk_value);
+                OnSetSend();
+                usleep(100000);
+                RCLCPP_INFO(get_logger(),
+                            "[pending_action][fallback] BRAKE %s: %s sent (sdk_value=%ld)",
+                            arm_index == ARM_LEFT ? "left" : "right",
+                            action.brake_release ? "release" : "engage", sdk_value);
+            };
+            if (update_left) send_brake(ARM_LEFT);
+            if (update_right) send_brake(ARM_RIGHT);
+            if (action.brake_release)
+            {
+                if (update_left) left_brake_released_ = true;
+                if (update_right) right_brake_released_ = true;
+            }
+            else
+            {
+                if (update_left) left_brake_released_ = false;
+                if (update_right) right_brake_released_ = false;
+            }
+        }
+        else if (action.kind == PendingArmActionKind::kPowerOff)
+        {
+            if (update_left)
+            {
+                OnClearSet();
+                OnSetTargetState_A(0);
+                OnSetSend();
+                usleep(100000);
+                RCLCPP_INFO(get_logger(), "[pending_action][fallback] POWER_OFF left arm: target state 0 sent");
+            }
+            if (update_right)
+            {
+                OnClearSet();
+                OnSetTargetState_B(0);
+                OnSetSend();
+                usleep(100000);
+                RCLCPP_INFO(get_logger(), "[pending_action][fallback] POWER_OFF right arm: target state 0 sent");
+            }
+        }
+        else if (action.kind == PendingArmActionKind::kEmergencyStop)
+        {
+            if (update_left) engageBrakeIfNeeded(ARM_LEFT);
+            if (update_right) engageBrakeIfNeeded(ARM_RIGHT);
+            if (update_left)
+            {
+                OnClearSet();
+                OnSetTargetState_A(0);
+                OnSetSend();
+                usleep(100000);
+                RCLCPP_INFO(get_logger(), "[pending_action][fallback] EMERGENCY_STOP left arm: target state 0 sent");
+            }
+            if (update_right)
+            {
+                OnClearSet();
+                OnSetTargetState_B(0);
+                OnSetSend();
+                usleep(100000);
+                RCLCPP_INFO(get_logger(), "[pending_action][fallback] EMERGENCY_STOP right arm: target state 0 sent");
+            }
+        }
+        RCLCPP_INFO(get_logger(), "[pending_action][fallback] %s direct execution finished",
+                    pendingActionKindName(action.kind));
+    }
+
+    void MarvinHardware::sendPendingKwr75Polls()
+    {
+        if (!kwr75_ft_config_.enabled)
+        {
+            return;
+        }
+        if (kwr75_poll_pending_left_.exchange(false))
+        {
+            const auto req = Kwr75Protocol::buildPollRequest(kwr75_ft_config_.command_code);
+            MarvinRs485Bus::sendA()(
+                const_cast<uint8_t*>(req.data()), static_cast<long>(req.size()),
+                kwr75_ft_config_.left_channel);
+            RCLCPP_INFO(get_logger(),
+                        "[kwr75] poll request sent on left COM2 (ch=%ld, cmd=0x%02X)",
+                        kwr75_ft_config_.left_channel, kwr75_ft_config_.command_code);
+        }
+        if (kwr75_poll_pending_right_.exchange(false))
+        {
+            const auto req = Kwr75Protocol::buildPollRequest(kwr75_ft_config_.command_code);
+            MarvinRs485Bus::sendB()(
+                const_cast<uint8_t*>(req.data()), static_cast<long>(req.size()),
+                kwr75_ft_config_.right_channel);
+            RCLCPP_INFO(get_logger(),
+                        "[kwr75] poll request sent on right COM2 (ch=%ld, cmd=0x%02X)",
+                        kwr75_ft_config_.right_channel, kwr75_ft_config_.command_code);
+        }
     }
 
     void MarvinHardware::loadKwr75FtConfig()
@@ -3876,11 +4547,22 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             const auto cycle_start = std::chrono::steady_clock::now();
             const auto cycle_end = cycle_start + std::chrono::milliseconds(interval_ms);
 
+            // 0x49 轮询发送收拢到 write() 单线程：线程只置挂起标志，由 write() 代为发送，
+            // 采样仍由 read() 解析进 sample_slot，这里仅消费新样本。
+            if (client.isPollMode())
+            {
+                if (arm_index == ARM_LEFT)
+                {
+                    kwr75_poll_pending_left_.store(true, std::memory_order_release);
+                }
+                else
+                {
+                    kwr75_poll_pending_right_.store(true, std::memory_order_release);
+                }
+            }
+
             std::array<double, Kwr75Protocol::kAxisCount> wrench {};
-            const bool got_new = client.isPollMode()
-                ? client.pollAndTakeWrench(cycle_end, wrench)
-                : client.takeWrench(wrench);
-            if (got_new)
+            if (client.takeWrench(wrench))
             {
                 applyKwr75Wrench(arm_index, wrench);
             }
