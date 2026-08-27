@@ -330,6 +330,9 @@ if(EXISTS "${_TJ_SDK_ROOT}/SDK_PYTHON")
     install(
         DIRECTORY external/TJ_FX_ROBOT_CONTRL_SDK/SDK_PYTHON
         DESTINATION share/${PROJECT_NAME}/TJ_FX_ROBOT_CONTRL_SDK
+        # Upstream vendors MarvinPlatform_* (desktop GUI ELF, ~27MB) next to the Python
+        # bindings; it is not required at runtime and must not be installed into the prefix.
+        PATTERN "MarvinPlatform*" EXCLUDE
     )
     # Keep SDK_PYTHON unmodified (upstream behavior loads .so next to the .py files),
     # but do NOT track binaries in git: we install the freshly built .so here.
