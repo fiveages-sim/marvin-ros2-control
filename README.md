@@ -132,6 +132,20 @@ colcon build --packages-up-to marvin_ros2_control --symlink-install
 
 `full` deb 构建会在 CI 中按目标架构重编 SDK（见父仓 `README.deb.md`）。
 
+> **SDK 版本说明**：SDK 子模块 `external/TJ_FX_ROBOT_CONTRL_SDK` 的 `latest` 分支同时包含两个版本目录——`contrlSDK`（43 以前）与 `contrlSDK100343`（43 版本）。编译时用 CMake 选项 `MARVIN_SDK_VERSION` 选择（**不能混用**）：
+>
+> ```bash
+> # 43 版本（默认，需底层控制系统 100343 及以上，不向下兼容）
+> colcon build --packages-select marvin_ros2_control --cmake-args -DMARVIN_SDK_VERSION=43
+>
+> # 43 以前版本（控制器固件为 100343 以前场景）
+> colcon build --packages-select marvin_ros2_control --cmake-args -DMARVIN_SDK_VERSION=old
+> ```
+>
+> 子模块分支：`latest`（最新，随上游更新保留历史）、`stable`（回滚点，指向更新前的 latest）；tag `upstream-<sha>` 记录 latest 对应的上游 commit。子模块 `latest` 更新后需在本仓库提交新的子模块指针。
+>
+> 43 版 SDK 要求外部工程 include 其头文件时定义 `CMPL_LIN` 宏，本工程 CMakeLists 已通过 `add_compile_definitions(CMPL_LIN)` 处理，无需手动配置。
+
 ## 6. 示例
 
 `examples/` 目录含夹爪/灵巧手 SDK 层调试程序（不经过 `ros2_control`）：

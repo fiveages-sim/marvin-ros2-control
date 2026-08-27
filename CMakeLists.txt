@@ -18,10 +18,27 @@ find_package(gripper_hardware_common REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(EIGEN3 REQUIRED eigen3)
 
-set(HEADER_KINE_DIR "${CMAKE_SOURCE_DIR}/external/TJ_FX_ROBOT_CONTRL_SDK/kinematicsSDK/")
-set(HEADER_CONTROL_DIR "${CMAKE_SOURCE_DIR}/external/TJ_FX_ROBOT_CONTRL_SDK/contrlSDK/")
-set(LIB_KINE_DIR "${CMAKE_SOURCE_DIR}/external/TJ_FX_ROBOT_CONTRL_SDK/kinematicsSDK/")
-set(LIB_CONTROL_DIR "${CMAKE_SOURCE_DIR}/external/TJ_FX_ROBOT_CONTRL_SDK/contrlSDK/")
+set(_TJ_SDK_ROOT "${CMAKE_SOURCE_DIR}/external/TJ_FX_ROBOT_CONTRL_SDK")
+
+# Select which marvin control SDK version to build.
+# 原则：43 版本（含）以前用 contrlSDK，43 版本以后用 contrlSDK100343，不能混用。
+# latest 聚合分支同时包含 contrlSDK + contrlSDK100343，用 MARVIN_SDK_VERSION 选择：
+#   MARVIN_SDK_VERSION=43  -> contrlSDK100343（需底层控制系统 100343 及以上，默认）
+#   MARVIN_SDK_VERSION=old -> contrlSDK（43 以前版本兜底）
+set(MARVIN_SDK_VERSION "43" CACHE STRING "marvin SDK 版本: 43=contrlSDK100343 / old=contrlSDK")
+set_property(CACHE MARVIN_SDK_VERSION PROPERTY STRINGS 43 old)
+if(MARVIN_SDK_VERSION STREQUAL "old")
+    set(MARVIN_CONTROL_SDK_DIR "contrlSDK")
+    message(STATUS "marvin_ros2_control: 使用 43 以前版本 SDK (${MARVIN_CONTROL_SDK_DIR})")
+else()
+    set(MARVIN_CONTROL_SDK_DIR "contrlSDK100343")
+    message(STATUS "marvin_ros2_control: 使用 43 版本 SDK (${MARVIN_CONTROL_SDK_DIR})")
+endif()
+
+set(HEADER_KINE_DIR "${_TJ_SDK_ROOT}/kinematicsSDK/")
+set(HEADER_CONTROL_DIR "${_TJ_SDK_ROOT}/${MARVIN_CONTROL_SDK_DIR}/")
+set(LIB_KINE_DIR "${_TJ_SDK_ROOT}/kinematicsSDK/")
+set(LIB_CONTROL_DIR "${_TJ_SDK_ROOT}/${MARVIN_CONTROL_SDK_DIR}/")
 
 # Build kinematics SDK (libKine.so) if missing, and auto-rebuild if format is invalid.
 set(KINE_SO_PATH "${LIB_KINE_DIR}/libKine.so")
@@ -117,6 +134,10 @@ set(EXTERNAL_KINEMATICSO "${KINE_SO_PATH}")
 ## Note: libMarvinSDK.so is built during compilation, so we link it directly via target_link_directories
 ## instead of using find_library which runs at configure time
 
+## contrlSDK（43 以前）与 contrlSDK100343（43 版本）的 CmplOpt.h
+## 都仅在 #ifdef CMPL_LIN 下提供 Linux 平台类型定义（SOCKET/LOOPHANDLE 等），
+## 因此无论选择哪个版本编译都需要显式定义 CMPL_LIN 宏。
+add_compile_definitions(CMPL_LIN)
 
 # Create library
 add_library(${PROJECT_NAME} SHARED
@@ -305,7 +326,6 @@ install(PROGRAMS
 
 # Install SDK Python bindings and identification template data (full upstream SDK only).
 # Trimmed mirror repos (contrlSDK + kinematicsSDK only) omit SDK_PYTHON/DEMO_PYTHON; skip install in that case.
-set(_TJ_SDK_ROOT "${CMAKE_SOURCE_DIR}/external/TJ_FX_ROBOT_CONTRL_SDK")
 if(EXISTS "${_TJ_SDK_ROOT}/SDK_PYTHON")
     install(
         DIRECTORY external/TJ_FX_ROBOT_CONTRL_SDK/SDK_PYTHON
@@ -320,11 +340,12 @@ if(EXISTS "${_TJ_SDK_ROOT}/SDK_PYTHON")
         OPTIONAL
     )
 endif()
-if(EXISTS "${_TJ_SDK_ROOT}/DEMO_PYTHON/LoadData_ccs_right/LoadData/CfgFile")
+# 负载辨识模板数据（上游 CommonConfig/LoadData_ccs；wizard 脚本通过 CommonConfig 读取）。
+if(EXISTS "${_TJ_SDK_ROOT}/CommonConfig/LoadData_ccs/LoadData/CfgFile")
     install(
-        DIRECTORY external/TJ_FX_ROBOT_CONTRL_SDK/DEMO_PYTHON/LoadData_ccs_right/LoadData/CfgFile
-                  external/TJ_FX_ROBOT_CONTRL_SDK/DEMO_PYTHON/LoadData_ccs_right/LoadData/IdenTraj
-        DESTINATION share/${PROJECT_NAME}/TJ_FX_ROBOT_CONTRL_SDK/DEMO_PYTHON/LoadData_ccs_right/LoadData
+        DIRECTORY external/TJ_FX_ROBOT_CONTRL_SDK/CommonConfig/LoadData_ccs/LoadData/CfgFile
+                  external/TJ_FX_ROBOT_CONTRL_SDK/CommonConfig/LoadData_ccs/LoadData/IdenTraj
+        DESTINATION share/${PROJECT_NAME}/TJ_FX_ROBOT_CONTRL_SDK/CommonConfig/LoadData_ccs/LoadData
     )
 endif()
 

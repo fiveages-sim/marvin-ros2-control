@@ -248,28 +248,74 @@ namespace marvin_ros2_control
                           i, joint_name.c_str(), clamped_rad, raw_positions[i], torques[i], velocities[i]);
             }
 
+            // 初始化后的第一次命令会进入完整寄存器块写入；成功后缓存力矩/速度，
+            // 后续未变化时只写位置寄存器。运行中力矩/速度参数改变时再次写完整块。
+            // resetState() 会把缓存恢复为 NaN，确保重新激活后重新初始化。
+            const bool initialize_dynamics = std::any_of(
+                last_applied_torques_.begin(), last_applied_torques_.end(),
+                [](double value) { return std::isnan(value); }) ||
+                std::any_of(
+                    last_applied_velocities_.begin(), last_applied_velocities_.end(),
+                    [](double value) { return std::isnan(value); });
             const bool write_dynamics = dynamicsChanged(torques, velocities);
 
             if (write_dynamics)
             {
-                // O6: 一次 FC16 写 0-17（位置+力矩+速度）；O7: 0-20
+                // O6/L6: 一次 FC16 写 0-17（位置+力矩+速度）；O7: 0-20。
                 const uint16_t n_regs = fullInputRegisterCount();
                 std::vector<uint16_t> block(n_regs, 0);
                 for (size_t i = 0; i < JOINT_COUNT; ++i)
                 {
                     block[i] = raw_positions[i];
-                    block[torqueRegStart() + i] = static_cast<uint16_t>(
-                        std::lround(std::clamp(torques[i], 0.0, 1.0) * 255.0));
-                    block[speedRegStart() + i] = static_cast<uint16_t>(
-                        std::lround(std::clamp(velocities[i], 0.0, 1.0) * 255.0));
+                    if constexpr (Product == LinkerHandProduct::O6)
+                    {
+                        if (initialize_dynamics)
+                        {
+                            // O6 首次初始化按设备约定写最大值。
+                            block[torqueRegStart() + i] = 255;
+                            block[speedRegStart() + i] = 255;
+                        }
+                        else
+                        {
+                            // 运行中动态参数改变时写入新的归一化力矩/速度。
+                            block[torqueRegStart() + i] = static_cast<uint16_t>(
+                                std::lround(std::clamp(torques[i], 0.0, 1.0) * 255.0));
+                            block[speedRegStart() + i] = static_cast<uint16_t>(
+                                std::lround(std::clamp(velocities[i], 0.0, 1.0) * 255.0));
+                        }
+                    }
+                    else
+                    {
+                        block[torqueRegStart() + i] = static_cast<uint16_t>(
+                            std::lround(std::clamp(torques[i], 0.0, 1.0) * 255.0));
+                        block[speedRegStart() + i] = static_cast<uint16_t>(
+                            std::lround(std::clamp(velocities[i], 0.0, 1.0) * 255.0));
+                    }
                 }
                 if (!writeMultipleRegisters(slave_id_, ModbusConfig::LinkerHand::THUMB_PITCH_REG, block,
                                             ModbusConfig::LinkerHand::WRITE_FUNCTION))
                 {
                     return false;
                 }
-                last_applied_torques_ = torques;
-                last_applied_velocities_ = velocities;
+                if constexpr (Product == LinkerHandProduct::O6)
+                {
+                    if (initialize_dynamics)
+                    {
+                        // 缓存必须反映设备实际收到的最大值，后续参数变化才能被检测。
+                        last_applied_torques_.assign(JOINT_COUNT, 1.0);
+                        last_applied_velocities_.assign(JOINT_COUNT, 1.0);
+                    }
+                    else
+                    {
+                        last_applied_torques_ = torques;
+                        last_applied_velocities_ = velocities;
+                    }
+                }
+                else
+                {
+                    last_applied_torques_ = torques;
+                    last_applied_velocities_ = velocities;
+                }
                 pending_full_register_io_ = true;
                 {
                     static rclcpp::Clock kLogClock(RCL_STEADY_TIME);
