@@ -205,6 +205,8 @@ private:
         bool readFromHardware(bool initial_frame);
         bool writeToHardware(std::vector<double>& hw_commands);
         void setArmCtrlInternal(int arm_index);
+        // 串行下使能，并逐臂确认新的反馈帧中状态为 0。
+        bool powerOffArms();
         bool left_brake_released_ = false;
         bool right_brake_released_ = false;
 

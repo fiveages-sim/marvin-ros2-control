@@ -810,7 +810,8 @@ MarvinHardware::paramCallback(const std::vector<rclcpp::Parameter> & params)
                 }
             }
             ctrl_mode = modeToCtrlModeString(mode);
-            robot_ctrl_mode_ = ctrl_mode;
+            // POWER_OFF 在取得 SDK 锁后更新，避免与正在发送的关节帧交错。
+            if (mode != 4) robot_ctrl_mode_ = ctrl_mode;
             if (mode != 4) last_active_ctrl_mode_ = ctrl_mode;
             need_config_update = true;
             ctrl_mode_changed = true;
@@ -935,6 +936,15 @@ MarvinHardware::paramCallback(const std::vector<rclcpp::Parameter> & params)
 
     if (need_config_update) {
         const int mode = ctrl_mode.empty() ? -1 : ctrlModeStringToMode(ctrl_mode, get_logger());
+        if (mode == 4) {
+            result.successful = powerOffArms();
+            if (!result.successful) {
+                result.reason = "POWER_OFF not confirmed for all configured arms; see per-arm logs. "
+                                "Joint commands remain suspended; retry POWER_OFF.";
+            }
+            // 下使能后不要再清错、重复配置模式和限速。
+            return result;
+        }
         applyRobotConfiguration(mode, drag_mode, cart_type,
                               max_joint_speed, max_joint_acceleration,
                               joint_k_gains, joint_d_gains, cart_k_gains, cart_d_gains);
@@ -1113,20 +1123,7 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         RCLCPP_INFO(get_logger(), "Set to cartesian impedance mode with KD=[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f], speed=%.1f, acceleration=%.1f",
                     K[0], K[1], K[2], K[3], K[4], K[5], K[6], max_joint_speed, max_joint_acceleration);
     } else if (mode == 4) {
-        // POWER_OFF: 下使能；A/B 分两次下发，避免同包卡顿
-        if (update_left) {
-            OnClearSet();
-            OnSetTargetState_A(0);
-            OnSetSend();
-            usleep(100000);
-        }
-        if (update_right) {
-            OnClearSet();
-            OnSetTargetState_B(0);
-            OnSetSend();
-            usleep(100000);
-        }
-        RCLCPP_INFO(get_logger(), "Set to POWER_OFF mode (左右臂下使能)");
+        powerOffArms();
     } else if (mode == 5) {
         // PD 模式：关节阻抗 + 速度前馈（极低延时跟踪，主要适用于遥操场景）
         // 前置条件：控制器 robot.ini 中 JointPIDCtlType=1；关节轨迹速度 ≤180°/s
@@ -1185,6 +1182,50 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
     }
 }
 
+
+    bool MarvinHardware::powerOffArms()
+    {
+        std::lock_guard<std::mutex> sdk_lock(sdk_access_mutex_);
+        robot_ctrl_mode_ = "POWER_OFF";
+        const auto wait_until = [](auto ready, int timeout_ms, int poll_ms) {
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+            do {
+                if (ready()) return true;
+                std::this_thread::sleep_for(std::chrono::milliseconds(poll_ms));
+            } while (std::chrono::steady_clock::now() < deadline);
+            return false;
+        };
+
+        bool success = true;
+        for (int arm : {ARM_LEFT, ARM_RIGHT}) {
+            if (robot_arm_index_ != ARM_DUAL && robot_arm_index_ != arm) continue;
+            const char* side = arm == ARM_LEFT ? "left" : "right";
+            bool confirmed = false;
+            for (int attempt = 1; attempt <= 3 && !confirmed; ++attempt) {
+                DCSS before{}, feedback{};
+                const bool sent = wait_until(OnClearSet, 200, 1) && OnGetBuf(&before) &&
+                    (arm == ARM_LEFT ? OnSetTargetState_A(0) : OnSetTargetState_B(0)) && OnSetSend();
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                // 必须收到新帧且状态为 0；发送失败或旧反馈均不能算成功。
+                confirmed = sent && wait_until([&]() {
+                    return OnGetBuf(&feedback) &&
+                        feedback.m_Out[arm].m_OutFrameSerial != before.m_Out[arm].m_OutFrameSerial &&
+                        feedback.m_State[arm].m_CurState == 0;
+                }, 500, 10);
+                if (!confirmed) {
+                    RCLCPP_WARN(get_logger(), "POWER_OFF %s attempt %d: %s", side, attempt,
+                                sent ? "state feedback timeout" : "SDK submission failed");
+                }
+            }
+            if (confirmed) {
+                RCLCPP_INFO(get_logger(), "POWER_OFF %s confirmed: state=0", side);
+            } else {
+                RCLCPP_ERROR(get_logger(), "POWER_OFF %s failed after 3 attempts", side);
+            }
+            success = confirmed && success;  // 一只臂失败仍继续处理另一只。
+        }
+        return success;
+    }
 
     void MarvinHardware::setArmCtrlInternal(int arm_index)
     {
@@ -3974,7 +4015,12 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
     {
         // 整段 SDK 访问（主帧 + 工具通道 + KWR75 轮询发送）统一在控制线程内串行执行；
         // 与生命周期兜底直发（executePendingActionDirect）通过 sdk_access_mutex_ 互斥。
-        std::lock_guard<std::mutex> sdk_lock(sdk_access_mutex_);
+        std::unique_lock<std::mutex> sdk_lock(sdk_access_mutex_, std::try_to_lock);
+        if (!sdk_lock.owns_lock())
+        {
+            // 参数切换/生命周期直发占用 SDK 时跳过本周期，不阻塞控制循环。
+            return true;
+        }
 
         // ① 待执行动作（优先级最高，占本周期主帧槽）：刹车（含 POWER_OFF 模式）、
         //    下使能、急停。其余线程只置动作，由这里每周期执行一步。
