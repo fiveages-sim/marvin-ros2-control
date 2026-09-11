@@ -974,14 +974,16 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         }
     };
     const auto apply_joint_limits = [&](bool update_left, bool update_right) {
-        OnClearSet();
         if (update_left) {
+            OnClearSet();
             OnSetJointLmt_A(static_cast<int>(max_joint_speed), static_cast<int>(max_joint_acceleration));
+            send_and_sleep();
         }
         if (update_right) {
+            OnClearSet();
             OnSetJointLmt_B(static_cast<int>(max_joint_speed), static_cast<int>(max_joint_acceleration));
+            send_and_sleep();
         }
-        send_and_sleep();
     };
 
     // Get current parameter values if not provided
@@ -1029,17 +1031,19 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
     bool update_left = (robot_arm_index_ == ARM_LEFT || robot_arm_index_ == ARM_DUAL);
     bool update_right = (robot_arm_index_ == ARM_RIGHT || robot_arm_index_ == ARM_DUAL);
 
-    // Process based on selected mode
+    // A/B 分包下发，每次发送后等待，避免双臂同包切换卡顿。
     if (mode == 1) {
         // Position mode
-        OnClearSet();
         if (update_left) {
+            OnClearSet();
             OnSetTargetState_A(1);  // Position mode
+            send_and_sleep();
         }
         if (update_right) {
+            OnClearSet();
             OnSetTargetState_B(1);  // Position mode
+            send_and_sleep();
         }
-        send_and_sleep();
         apply_joint_limits(update_left, update_right);
         
         RCLCPP_INFO(get_logger(), "Set to position mode with speed=%.1f, acceleration=%.1f", 
@@ -1053,19 +1057,22 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             D[i] = final_joint_d[i];
         }
         
-        OnClearSet();
         if (update_left) {
+            OnClearSet();
             OnSetTargetState_A(3);  // Torque mode
             OnSetImpType_A(1);      // Joint impedance
             OnSetJointKD_A(K, D);
+            apply_drag_mode_if_needed(true, false);
+            send_and_sleep();
         }
         if (update_right) {
+            OnClearSet();
             OnSetTargetState_B(3);  // Torque mode
             OnSetImpType_B(1);      // Joint impedance
             OnSetJointKD_B(K, D);
+            apply_drag_mode_if_needed(false, true);
+            send_and_sleep();
         }
-        apply_drag_mode_if_needed(update_left, update_right);
-        send_and_sleep();
         apply_joint_limits(update_left, update_right);
         
         RCLCPP_INFO(get_logger(), "Set to joint impedance mode with KD=[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f], speed=%.1f, acceleration=%.1f",
@@ -1079,13 +1086,16 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
             D[i] = final_cart_d[i];
         }
         
-        OnClearSet();
         if (update_left) {
+            OnClearSet();
             OnSetTargetState_A(3);  // Torque mode
             OnSetImpType_A(2);      // Cartesian impedance
             OnSetCartKD_A(K, D, cart_type);
+            apply_drag_mode_if_needed(true, false);
+            send_and_sleep();
         }
         if (update_right) {
+            OnClearSet();
             OnSetTargetState_B(3);  // Torque mode
             OnSetImpType_B(2);      // Cartesian impedance
             // Right arm uses 6 values for cartesian
@@ -1095,9 +1105,9 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
                 D_right[i] = final_cart_d[i];
             }
             OnSetCartKD_B(K_right, D_right, cart_type);
+            apply_drag_mode_if_needed(false, true);
+            send_and_sleep();
         }
-        apply_drag_mode_if_needed(update_left, update_right);
-        send_and_sleep();
         apply_joint_limits(update_left, update_right);
         
         RCLCPP_INFO(get_logger(), "Set to cartesian impedance mode with KD=[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f], speed=%.1f, acceleration=%.1f",
@@ -1130,34 +1140,39 @@ void MarvinHardware::applyRobotConfiguration(int mode, int drag_mode, int cart_t
         for (int i = 0; i < 7; i++) { K[i] = final_pd_k[i]; D[i] = final_pd_d[i]; }
 
         // 切换关节阻抗：速度/加速度设为最大（100，以免限制轨迹），设置刚度阻尼参数
-        OnClearSet();
         if (update_left) {
+            OnClearSet();
             OnSetJointLmt_A(100, 100);
             OnSetJointKD_A(K, D);
             OnSetTargetState_A(3);   // Torque 模式
             OnSetImpType_A(1);       // 关节阻抗
+            send_and_sleep();
         }
         if (update_right) {
+            OnClearSet();
             OnSetJointLmt_B(100, 100);
             OnSetJointKD_B(K, D);
             OnSetTargetState_B(3);
             OnSetImpType_B(1);
+            send_and_sleep();
         }
-        send_and_sleep();
 
         // 开启 PD 速度前馈：step 为轨迹发送周期(ms)，0~20，<1 则不添加前馈（建议 5ms）
         // 仅 43 版及以上 SDK（SDK100343）提供 FX_OnSetVelEstStep；旧版退化为纯关节阻抗
 #if SDK_VERSION >= 100343
         const char* pd_fb_suffix = "";
-        OnClearSet();
         if (update_left) {
+            OnClearSet();
             FX_OnSetVelEstStep('A', pd_step);
+            OnSetSend();
+            usleep(200000);
         }
         if (update_right) {
+            OnClearSet();
             FX_OnSetVelEstStep('B', pd_step);
+            OnSetSend();
+            usleep(200000);
         }
-        OnSetSend();
-        usleep(200000);
 #else
         const char* pd_fb_suffix = " (SDK<100343: vel feedforward unsupported, joint impedance only)";
 #endif
